@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Testing / tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+
+# Local databases / runtime
+*.db
+*.sqlite
+*.sqlite3
+logs/
+tmp/
+
+# Secrets / credentials
+*.pem
+*.key
+*.crt
+secrets/
+credentials/
+
+# Agent / LLM artifacts
+.agent/
+.agent-cache/
+.llm/
+*.prompt-cache
+
+# Generated / local data
+data/local/
+rzpy_test_api_key.csv
