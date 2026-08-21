@@ -56,3 +56,14 @@
 - **Consequences:**
   - *Positive:* Prevents overselling and race conditions without heavy distributed locks.
   - *Negative:* Contested transactions must handle optimistic lock failure gracefully and report stock depletion.
+
+---
+
+## ADR-006: CI Tooling & Engineering Quality Standards
+
+- **Status:** ACCEPTED
+- **Context:** Ensuring deterministic, repeatable code quality, type safety, security scanning, and test validation across all contributions in a safety-critical commerce repository.
+- **Decision:** Adopt `Ruff` (linting + formatting with bandit security rules), `Mypy` (strict static typing), `Pytest` (with coverage and async support), and automated git secret scanning in GitHub Actions CI across Python 3.11 and 3.12 matrices.
+- **Consequences:**
+  - *Positive:* Fast, deterministic feedback loop; prevents syntax regressions, type mismatches, and secret leakage before merging.
+  - *Negative:* Strict static typing overhead during rapid development.

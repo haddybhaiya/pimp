@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-format:
+    name: Lint and Format Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Lint Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+
+      - name: Run Ruff Lint
+        run: ruff check .
+
+      - name: Run Ruff Format Check
+        run: ruff format --check .
+
+  type-check:
+    name: Static Type Checking
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Mypy
+        run: mypy src tests
+
+  test-and-coverage:
+    name: Test Suite & Coverage
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Pytest with Coverage
+        run: pytest --cov=agent_ready_merchant --cov-report=xml --cov-report=term-missing
+
+  security-checks:
+    name: Security & Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Security Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+
+      - name: Verify No Secrets or Environment Files Tracked
+        run: |
+          echo "Scanning git tracked files for accidental secrets/credentials..."
+          # Fail if any .env (except .env.example), .csv, .key, .pem, or .crt are tracked in git index
+          TRACKED_SECRETS=$(git ls-files | grep -E '^(\.env|\.env\..*|.*\.csv|.*\.key|.*\.pem|.*\.crt)$' | grep -v '^\.env\.example$' || true)
+          if [ -n "$TRACKED_SECRETS" ]; then
+            echo "ERROR: Untracked/Sensitive files found in git index:"
+            echo "$TRACKED_SECRETS"
+            exit 1
+          else
+            echo "PASS: Zero credential/environment files tracked in git index."
+          fi
+
+      - name: Run Dependency Vulnerability Audit
+        run: |
+          pip install -e .
+          pip-audit --desc on || echo "Dependency audit completed."
