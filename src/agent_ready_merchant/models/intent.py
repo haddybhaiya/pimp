@@ -21,7 +21,7 @@ class BuyerIntent(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "validation_status IN ('VALIDATED', 'REJECTED', 'MALFORMED')",
+            "validation_status IN ('PENDING', 'VALIDATED', 'REJECTED', 'MALFORMED')",
             name="ck_buyer_intents_validation_status_valid",
         ),
         CheckConstraint(

@@ -195,7 +195,7 @@ def upgrade() -> None:
         sa.Column("validation_status", sa.String(32), nullable=False, server_default="VALIDATED"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
-            "validation_status IN ('VALIDATED', 'REJECTED', 'MALFORMED')",
+            "validation_status IN ('PENDING', 'VALIDATED', 'REJECTED', 'MALFORMED')",
             name="ck_buyer_intents_validation_status_valid",
         ),
         sa.CheckConstraint(
