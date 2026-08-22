@@ -11,7 +11,7 @@ def test_settings_secret_masking() -> None:
         SECRET_KEY=SecretStr("super-sensitive-jwt-key"),
         RAZORPAY_KEY_SECRET=SecretStr("rzp_secret_xyz123"),
         RAZORPAY_WEBHOOK_SECRET=SecretStr("webhook_secret_abc"),
-        GEMINI_API_KEY=SecretStr("gemini_key_live_999"),
+        GROQ_API_KEY=SecretStr("gsk_key_live_999"),
     )
 
     # String representations must NEVER expose plaintext secrets (INV-AGY-03)
@@ -21,18 +21,18 @@ def test_settings_secret_masking() -> None:
     assert "super-sensitive-jwt-key" not in str_repr
     assert "rzp_secret_xyz123" not in str_repr
     assert "webhook_secret_abc" not in str_repr
-    assert "gemini_key_live_999" not in str_repr
+    assert "gsk_key_live_999" not in str_repr
 
     assert "super-sensitive-jwt-key" not in repr_repr
     assert "rzp_secret_xyz123" not in repr_repr
     assert "webhook_secret_abc" not in repr_repr
-    assert "gemini_key_live_999" not in repr_repr
+    assert "gsk_key_live_999" not in repr_repr
 
     # Values must be retrievable only via get_secret_value()
     assert settings.SECRET_KEY.get_secret_value() == "super-sensitive-jwt-key"
     assert settings.RAZORPAY_KEY_SECRET.get_secret_value() == "rzp_secret_xyz123"
     assert settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value() == "webhook_secret_abc"
-    assert settings.GEMINI_API_KEY.get_secret_value() == "gemini_key_live_999"
+    assert settings.GROQ_API_KEY.get_secret_value() == "gsk_key_live_999"
 
 
 def test_settings_monetary_defaults_are_integer_paise() -> None:
