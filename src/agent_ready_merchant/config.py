@@ -68,15 +68,11 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------------------
     # 4. LLM Provider Credentials (Stored safely as SecretStr)
     # --------------------------------------------------------------------------
-    GEMINI_API_KEY: SecretStr = Field(
-        default=SecretStr(""),
-        description="Google Gemini API key",
-    )
     GROQ_API_KEY: SecretStr = Field(
         default=SecretStr(""),
-        description="Groq API key (optional provider)",
+        description="Groq API key for model inference",
     )
-    LLM_MODEL_NAME: str = "gemini-2.5-flash"
+    LLM_MODEL_NAME: str = "llama-3.3-70b-versatile"
     LLM_MAX_OUTPUT_TOKENS: int = 2048
     LLM_TEMPERATURE: float = 0.2
     LLM_STEP_LIMIT: int = 5
