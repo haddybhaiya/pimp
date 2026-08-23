@@ -46,7 +46,8 @@ class PriceQuoteStateMachine:
             TerminalStateError: If current state is terminal.
             InvalidStateTransitionError: If transition is not allowed or quote has expired.
         """
-        now = current_time or datetime.now(UTC)
+        now_dt = current_time or datetime.now(UTC)
+        now = now_dt if now_dt.tzinfo is not None else now_dt.replace(tzinfo=UTC)
         current_state = quote.status
 
         if current_state in cls.TERMINAL_STATES:
@@ -68,15 +69,19 @@ class PriceQuoteStateMachine:
 
         # Enforce expiry invariant: quote cannot be accepted or negotiated if now > expires_at
         if target_state in {"ACCEPTED", "NEGOTIATING"}:
-            if now > quote.expires_at:
+            expires_at = (
+                quote.expires_at
+                if quote.expires_at.tzinfo is not None
+                else quote.expires_at.replace(tzinfo=UTC)
+            )
+            if now > expires_at:
                 raise InvalidStateTransitionError(
                     entity_name="PriceQuote",
                     entity_id=quote.id,
                     current_state=current_state,
                     target_state=target_state,
                     reason=(
-                        f"Quote expired at {quote.expires_at.isoformat()}, "
-                        f"current time {now.isoformat()}"
+                        f"Quote expired at {expires_at.isoformat()}, current time {now.isoformat()}"
                     ),
                 )
 
