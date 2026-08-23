@@ -32,6 +32,7 @@ class PriceQuoteStateMachine:
     }
 
     TERMINAL_STATES: set[str] = {"ACCEPTED", "EXPIRED", "SUPERSEDED", "REJECTED"}
+    MUTABLE_FIELDS: set[str] = {"discount_paise", "discount_reason", "total_paise"}
 
     @classmethod
     def validate_transition(
@@ -103,7 +104,13 @@ class PriceQuoteStateMachine:
         from_state = quote.status
         update_payload: dict[str, Any] = {"status": target_state}
         if additional_updates:
-            update_payload.update(additional_updates)
+            for k, v in additional_updates.items():
+                if k not in cls.MUTABLE_FIELDS:
+                    raise ValueError(
+                        f"Field '{k}' is protected and cannot be "
+                        "modified during PriceQuote transition"
+                    )
+                update_payload[k] = v
 
         # Apply version-checked atomic update
         new_version = await update_with_version_check(
@@ -118,7 +125,8 @@ class PriceQuoteStateMachine:
         quote.version = new_version
         if additional_updates:
             for k, v in additional_updates.items():
-                setattr(quote, k, v)
+                if k in cls.MUTABLE_FIELDS:
+                    setattr(quote, k, v)
 
         audit_payload = {
             "entity": "PriceQuote",
@@ -129,17 +137,15 @@ class PriceQuoteStateMachine:
             "reason": reason,
         }
 
-        # Append immutable audit event
-        audit_event = AuditEvent(
+        # Append immutable audit event with hash chaining
+        await AuditEvent.create_event(
+            session=session,
             merchant_id=quote.merchant_id,
             session_id=quote.session_id,
             actor_type=actor_type,
             event_type=f"PRICE_QUOTE_TRANSITION_{target_state}",
             payload=audit_payload,
-            event_hash=f"hash_quote_{quote.id}_{new_version}",
         )
-        session.add(audit_event)
-        await session.flush()
 
         return TransitionResult(
             entity=quote,

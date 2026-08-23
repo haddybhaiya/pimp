@@ -1,5 +1,4 @@
-"""Concrete implementations for all 6 MVP gateway tools."""
-
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -33,6 +32,8 @@ from agent_ready_merchant.tools.models import (
     NegotiateQuoteParams,
     RequestPriceQuoteParams,
 )
+
+logger = logging.getLogger("agent_ready_merchant.tools")
 
 
 class DiscoverCatalogTool(BaseTool):
@@ -334,7 +335,9 @@ class NegotiateQuoteTool(BaseTool):
                 )
             )
 
-        calculated_discount = max(0, quote.subtotal_paise - p.proposed_total_paise)
+        # Derive discount from quote gross total including shipping
+        gross_before_discount = quote.subtotal_paise + quote.shipping_paise
+        calculated_discount = max(0, gross_before_discount - p.proposed_total_paise)
         proposal = QuoteProposal(
             items=item_proposals,
             subtotal_paise=quote.subtotal_paise,
@@ -352,7 +355,13 @@ class NegotiateQuoteTool(BaseTool):
         )
         eval_res = DeterministicPolicyEngine.evaluate_quote(proposal, policy_ctx)
 
-        if eval_res.verdict == PolicyVerdict.DENY:
+        if eval_res.verdict != PolicyVerdict.ALLOW:
+            if eval_res.verdict == PolicyVerdict.ESCALATE_APPROVAL:
+                return {
+                    "status": "PENDING_APPROVAL",
+                    "total_paise": quote.total_paise,
+                    "message": f"Counter-offer requires merchant approval: {eval_res.reason}",
+                }
             return {
                 "status": "REJECTED",
                 "total_paise": quote.total_paise,
@@ -398,6 +407,22 @@ class CreateOrderTool(BaseTool):
         context: GatewayContext,
     ) -> dict[str, Any]:
         p = CreateOrderParams.model_validate(params)
+
+        # Verify quote ownership and session boundary
+        quote_stmt = select(PriceQuote).where(
+            PriceQuote.id == p.quote_id,
+            PriceQuote.merchant_id == context.merchant_id,
+            PriceQuote.session_id == context.session_id,
+        )
+        quote = (await session.execute(quote_stmt)).scalar_one_or_none()
+        if not quote:
+            return {
+                "error": {
+                    "code": "QUOTE_NOT_FOUND",
+                    "message": f"PriceQuote with ID {p.quote_id} not found in this session.",
+                }
+            }
+
         settings = get_settings()
         rzp_client = RazorpayClient(
             key_id=settings.RAZORPAY_KEY_ID,
@@ -453,6 +478,20 @@ class CheckPaymentStatusTool(BaseTool):
                     "message": f"Order with ID {p.order_id} not found.",
                 }
             }
+
+        # If order is not settled, query Razorpay and reconcile local state
+        if order.status != "PAID" and order.rzp_order_id:
+            settings = get_settings()
+            rzp_client = RazorpayClient(
+                key_id=settings.RAZORPAY_KEY_ID,
+                key_secret=settings.RAZORPAY_KEY_SECRET,
+                base_url=settings.RAZORPAY_API_BASE_URL,
+            )
+            try:
+                await PaymentService.reconcile_order(session, order.id, rzp_client)
+                await session.refresh(order)
+            except Exception as exc:
+                logger.warning("Reconciliation check failed for order %s: %s", order.id, exc)
 
         pay_stmt = select(PaymentAttempt).where(PaymentAttempt.order_id == order.id)
         payment = (await session.execute(pay_stmt)).scalar_one_or_none()

@@ -3,7 +3,6 @@
 Adheres strictly to docs/tool-contract.md §1 and the mandatory Action Gateway pipeline.
 """
 
-import hashlib
 import logging
 from typing import Any
 
@@ -164,17 +163,11 @@ class ToolGateway:
             "result_data": result.data,
             "result_error": result.error,
         }
-        event_hash = hashlib.sha256(
-            f"{context.session_id}_{proposal.tool_name}_{result.status}".encode()
-        ).hexdigest()
-
-        audit = AuditEvent(
+        await AuditEvent.create_event(
+            session=session,
             merchant_id=context.merchant_id,
             session_id=context.session_id,
             actor_type="BUYER_AGENT",
             event_type="TOOL_EXECUTION",
             payload=audit_payload,
-            event_hash=event_hash,
         )
-        session.add(audit)
-        await session.flush()

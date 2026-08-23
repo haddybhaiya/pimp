@@ -549,9 +549,7 @@ async def test_df17_reconciliation_recovers_missing_webhook(
 
     transport = httpx.MockTransport(rzp_recon_handler)
     async with httpx.AsyncClient(transport=transport) as http_client:
-        rzp_client = RazorpayClient(
-            key_id="k", key_secret=SecretStr("s"), http_client=http_client
-        )
+        rzp_client = RazorpayClient(key_id="k", key_secret=SecretStr("s"), http_client=http_client)
         recon_result = await PaymentService.reconcile_order(
             session=db_session,
             order_id=order.id,

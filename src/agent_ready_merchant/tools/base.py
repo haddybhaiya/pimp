@@ -19,10 +19,10 @@ class GatewayContext:
     autonomy_level: int = 1  # 0: Read-Only, 1: Bounded Auto, 2: HITL
     max_discount_percentage: float = 15.0
     min_margin_percentage: float = 20.0
-    max_single_transaction_paise: int = 10_000_000
+    max_single_transaction_paise: int = 5_000_000
 
     def has_capability(self, required_cap: str | None) -> bool:
-        if not required_cap:
+        if required_cap is None:
             return True
         return required_cap in self.capabilities
 
