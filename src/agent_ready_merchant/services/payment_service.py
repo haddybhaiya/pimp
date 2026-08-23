@@ -10,10 +10,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from agent_ready_merchant.db.concurrency import update_with_version_check
+from agent_ready_merchant.db.concurrency import OptimisticLockError, update_with_version_check
 from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
 from agent_ready_merchant.integrations.razorpay.exceptions import (
     AmountMismatchFraudError,
@@ -282,71 +283,87 @@ class PaymentService:
                 "payment_id": rzp_payment_id,
             }
 
-        # Create or update PaymentAttempt
-        if not existing_attempt:
-            payment_attempt = PaymentAttempt(
-                order_id=order.id,
-                rzp_payment_id=rzp_payment_id,
-                rzp_order_id=rzp_order_id,
-                status="CAPTURED",
-                amount_paise=order.amount_paise,
-                payment_method=payment_data.get("method"),
-                webhook_payload=payment_data,
-            )
-            session.add(payment_attempt)
-            await session.flush()
-        else:
-            if existing_attempt.status != "CAPTURED":
-                await PaymentAttemptStateMachine.transition(
-                    session=session,
-                    payment=existing_attempt,
-                    target_state="CAPTURED",
-                    expected_version=existing_attempt.version,
-                    reason="Webhook confirmation",
-                )
-            payment_attempt = existing_attempt
+        order_id_str = str(order.id)
+        merchant_id = order.merchant_id
 
-        # Advance Order state to PAID if not already paid
-        if order.status in {"PENDING_PAYMENT", "PAYMENT_PROCESSING", "PAYMENT_FAILED"}:
-            if order.status == "PENDING_PAYMENT":
-                # Advance PENDING_PAYMENT -> PAYMENT_PROCESSING
+        try:
+            # Create or update PaymentAttempt
+            if not existing_attempt:
+                payment_attempt = PaymentAttempt(
+                    order_id=order.id,
+                    rzp_payment_id=rzp_payment_id,
+                    rzp_order_id=rzp_order_id,
+                    status="CAPTURED",
+                    amount_paise=order.amount_paise,
+                    payment_method=payment_data.get("method"),
+                    webhook_payload=payment_data,
+                )
+                session.add(payment_attempt)
+                await session.flush()
+            else:
+                if existing_attempt.status != "CAPTURED":
+                    await PaymentAttemptStateMachine.transition(
+                        session=session,
+                        payment=existing_attempt,
+                        target_state="CAPTURED",
+                        expected_version=existing_attempt.version,
+                        reason="Webhook confirmation",
+                    )
+                payment_attempt = existing_attempt
+
+            # Advance Order state to PAID if not already paid
+            if order.status in {"PENDING_PAYMENT", "PAYMENT_PROCESSING", "PAYMENT_FAILED"}:
+                if order.status == "PENDING_PAYMENT":
+                    # Advance PENDING_PAYMENT -> PAYMENT_PROCESSING
+                    await OrderStateMachine.transition(
+                        session=session,
+                        order=order,
+                        target_state="PAYMENT_PROCESSING",
+                        expected_version=order.version,
+                        reason="Payment captured webhook",
+                    )
+                # Advance PAYMENT_PROCESSING -> PAID
                 await OrderStateMachine.transition(
                     session=session,
                     order=order,
-                    target_state="PAYMENT_PROCESSING",
+                    target_state="PAID",
                     expected_version=order.version,
-                    reason="Payment captured webhook",
+                    reason=f"Payment verified via {event_name}",
                 )
-            # Advance PAYMENT_PROCESSING -> PAID
-            await OrderStateMachine.transition(
-                session=session,
-                order=order,
-                target_state="PAID",
-                expected_version=order.version,
-                reason=f"Payment verified via {event_name}",
-            )
 
-        # Create Append-Only Ledger Entry (TransactionRecord)
-        tx_stmt = select(TransactionRecord).where(
-            TransactionRecord.payment_attempt_id == payment_attempt.id,
-            TransactionRecord.entry_type == "CREDIT",
-        )
-        existing_tx = (await session.execute(tx_stmt)).scalar_one_or_none()
-        if not existing_tx:
-            tx_record = TransactionRecord(
-                payment_attempt_id=payment_attempt.id,
-                merchant_id=order.merchant_id,
-                entry_type="CREDIT",
-                amount_paise=order.amount_paise,
-                status="COMMITTED",
-                settlement_ref=rzp_payment_id,
+            # Create Append-Only Ledger Entry (TransactionRecord)
+            tx_stmt = select(TransactionRecord).where(
+                TransactionRecord.payment_attempt_id == payment_attempt.id,
+                TransactionRecord.entry_type == "CREDIT",
             )
-            session.add(tx_record)
-            await session.flush()
+            existing_tx = (await session.execute(tx_stmt)).scalar_one_or_none()
+            if not existing_tx:
+                tx_record = TransactionRecord(
+                    payment_attempt_id=payment_attempt.id,
+                    merchant_id=merchant_id,
+                    entry_type="CREDIT",
+                    amount_paise=order.amount_paise,
+                    status="COMMITTED",
+                    settlement_ref=rzp_payment_id,
+                )
+                session.add(tx_record)
+                await session.flush()
+        except (IntegrityError, OptimisticLockError) as exc:
+            await session.rollback()
+            logger.info(
+                "Concurrent webhook delivery collision handled gracefully on order %s: %s",
+                order_id_str,
+                exc,
+            )
+            return {
+                "status": "DUPLICATE_IGNORED",
+                "order_id": order_id_str,
+                "payment_id": rzp_payment_id,
+            }
 
         return {
             "status": "PROCESSED",
-            "order_id": str(order.id),
+            "order_id": order_id_str,
             "payment_id": rzp_payment_id,
             "order_status": order.status,
         }
@@ -364,6 +381,7 @@ class PaymentService:
         """Records payment attempt failure and updates order status."""
         error_obj = payment_data.get("error_code")
         error_desc = payment_data.get("error_description")
+        order_id_str = str(order.id)
 
         pay_stmt = select(PaymentAttempt).where(
             PaymentAttempt.order_id == order.id,
@@ -371,37 +389,46 @@ class PaymentService:
         )
         existing_attempt = (await session.execute(pay_stmt)).scalar_one_or_none()
 
-        if not existing_attempt:
-            payment_attempt = PaymentAttempt(
-                order_id=order.id,
-                rzp_payment_id=rzp_payment_id,
-                rzp_order_id=rzp_order_id,
-                status="FAILED",
-                amount_paise=amount_paise or order.amount_paise,
-                error_code=str(error_obj) if error_obj else None,
-                error_description=str(error_desc) if error_desc else None,
-                webhook_payload=payment_data,
-            )
-            session.add(payment_attempt)
-            await session.flush()
-        else:
-            if existing_attempt.status != "FAILED":
-                await PaymentAttemptStateMachine.transition(
+        try:
+            if not existing_attempt:
+                payment_attempt = PaymentAttempt(
+                    order_id=order.id,
+                    rzp_payment_id=rzp_payment_id,
+                    rzp_order_id=rzp_order_id,
+                    status="FAILED",
+                    amount_paise=amount_paise or order.amount_paise,
+                    error_code=str(error_obj) if error_obj else None,
+                    error_description=str(error_desc) if error_desc else None,
+                    webhook_payload=payment_data,
+                )
+                session.add(payment_attempt)
+                await session.flush()
+            else:
+                if existing_attempt.status != "FAILED":
+                    await PaymentAttemptStateMachine.transition(
+                        session=session,
+                        payment=existing_attempt,
+                        target_state="FAILED",
+                        expected_version=existing_attempt.version,
+                        reason="Payment failed webhook received",
+                    )
+
+            if order.status == "PAYMENT_PROCESSING":
+                await OrderStateMachine.transition(
                     session=session,
-                    payment=existing_attempt,
-                    target_state="FAILED",
-                    expected_version=existing_attempt.version,
+                    order=order,
+                    target_state="PAYMENT_FAILED",
+                    expected_version=order.version,
                     reason="Payment failed webhook received",
                 )
-
-        if order.status == "PAYMENT_PROCESSING":
-            await OrderStateMachine.transition(
-                session=session,
-                order=order,
-                target_state="PAYMENT_FAILED",
-                expected_version=order.version,
-                reason="Payment failed webhook received",
-            )
+        except (IntegrityError, OptimisticLockError) as exc:
+            await session.rollback()
+            logger.info("Concurrent payment failure webhook collision handled: %s", exc)
+            return {
+                "status": "DUPLICATE_IGNORED",
+                "order_id": order_id_str,
+                "payment_id": rzp_payment_id,
+            }
 
         return {
             "status": "FAILURE_RECORDED",

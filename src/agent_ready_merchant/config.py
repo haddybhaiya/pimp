@@ -6,7 +6,7 @@ and are never exposed via logging, serialization, or error responses.
 """
 
 from functools import lru_cache
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,6 +14,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """Central application configuration loaded from environment and .env file."""
+
+    KNOWN_INSECURE_SECRETS: ClassVar[tuple[str, ...]] = (
+        "default-insecure-secret-key-change-in-production",
+        "secret",
+        "changeme",
+        "password",
+        "admin",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -103,10 +111,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_security(self) -> "Settings":
-        """Rejects known default or empty SECRET_KEY in production to fail closed."""
+        """Rejects known default, empty, or whitespace SECRET_KEY in production to fail closed."""
         if self.ENVIRONMENT == "production":
-            val = self.SECRET_KEY.get_secret_value()
-            if not val or val == "default-insecure-secret-key-change-in-production":
+            val = self.SECRET_KEY.get_secret_value().strip()
+            if not val or val in self.KNOWN_INSECURE_SECRETS:
                 raise ValueError("SECRET_KEY must be configured with a secure value in production")
         return self
 

@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agent_ready_merchant.db.base import GUID, Base, OptimisticLockMixin, utc_now
@@ -28,6 +28,11 @@ class TransactionRecord(Base, OptimisticLockMixin):
         CheckConstraint(
             "status IN ('UNCOMMITTED', 'COMMITTED', 'REVERSED')",
             name="ck_transaction_records_status_valid",
+        ),
+        UniqueConstraint(
+            "payment_attempt_id",
+            "entry_type",
+            name="uq_transaction_records_attempt_entry",
         ),
     )
 

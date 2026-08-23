@@ -430,6 +430,12 @@ def upgrade() -> None:
     op.create_index("ix_transaction_records_entry_type", "transaction_records", ["entry_type"])
     op.create_index("ix_transaction_records_status", "transaction_records", ["status"])
     op.create_index("ix_transaction_records_created_at", "transaction_records", ["created_at"])
+    op.create_index(
+        "uq_transaction_records_attempt_entry",
+        "transaction_records",
+        ["payment_attempt_id", "entry_type"],
+        unique=True,
+    )
 
     # 13. Policy Rules Table
     op.create_table(
