@@ -112,13 +112,19 @@ class PriceQuoteStateMachine:
                     )
                 update_payload[k] = v
 
-        # Apply version-checked atomic update
+        check_time = current_time or datetime.now(UTC)
+        extra_conditions = []
+        if target_state in {"ACCEPTED", "NEGOTIATING", "PROPOSED"}:
+            extra_conditions.append(PriceQuote.expires_at >= check_time)
+
+        # Apply version-checked and expiry-checked atomic update
         new_version = await update_with_version_check(
             session=session,
             model_class=PriceQuote,
             entity_id=quote.id,
             expected_version=expected_version,
             values=update_payload,
+            extra_conditions=extra_conditions,
         )
 
         quote.status = target_state

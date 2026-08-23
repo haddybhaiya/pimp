@@ -283,6 +283,7 @@ class NegotiateQuoteTool(BaseTool):
             .where(
                 PriceQuote.id == p.quote_id,
                 PriceQuote.merchant_id == context.merchant_id,
+                PriceQuote.session_id == context.session_id,
             )
         )
         res = await session.execute(stmt)
@@ -437,6 +438,8 @@ class CreateOrderTool(BaseTool):
                 buyer_email=p.buyer_email,
                 shipping_address=p.shipping_address.model_dump(),
                 rzp_client=rzp_client,
+                merchant_id=context.merchant_id,
+                session_id=context.session_id,
             )
             return {
                 "order_id": str(order.id),

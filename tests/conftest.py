@@ -19,6 +19,9 @@ from sqlalchemy.pool import StaticPool
 os.environ["ENVIRONMENT"] = "test"
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ["DATABASE_URL_SYNC"] = "sqlite:///:memory:"
+os.environ["RAZORPAY_KEY_ID"] = "rzp_test_placeholder"
+os.environ["RAZORPAY_KEY_SECRET"] = "test_secret_key_placeholder"
+os.environ["RAZORPAY_WEBHOOK_SECRET"] = "test_webhook_secret_12345"
 
 import agent_ready_merchant.models  # noqa: F401 - Register models
 from agent_ready_merchant.db.base import Base

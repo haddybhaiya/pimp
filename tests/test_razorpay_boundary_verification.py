@@ -103,20 +103,60 @@ async def test_full_boundary_successful_payment_flow(db_session: AsyncSession) -
     db_session.add(quote_item)
     await db_session.flush()
 
-    # 2. Step 1: Create Order via Razorpay Client (Live Sandbox if configured)
-    rzp_client = RazorpayClient(
-        key_id=settings.RAZORPAY_KEY_ID,
-        key_secret=settings.RAZORPAY_KEY_SECRET,
-        base_url=settings.RAZORPAY_API_BASE_URL,
+    # 2. Step 1: Create Order via Razorpay Client (Live Sandbox or Mock if placeholder credentials)
+    has_real_keys = (
+        settings.RAZORPAY_KEY_ID.startswith("rzp_test_")
+        and settings.RAZORPAY_KEY_ID != "rzp_test_placeholder"
+        and bool(settings.RAZORPAY_KEY_SECRET.get_secret_value())
+        and settings.RAZORPAY_KEY_SECRET.get_secret_value() != "test_secret_key_placeholder"
     )
 
-    order = await PaymentService.create_order_from_accepted_quote(
-        session=db_session,
-        quote_id=quote.id,
-        buyer_email="tester@boundary.com",
-        shipping_address={"city": "Mumbai", "postal_code": "400001", "country": "IN"},
-        rzp_client=rzp_client,
-    )
+    if has_real_keys:
+        rzp_client = RazorpayClient(
+            key_id=settings.RAZORPAY_KEY_ID,
+            key_secret=settings.RAZORPAY_KEY_SECRET,
+            base_url=settings.RAZORPAY_API_BASE_URL,
+        )
+        order = await PaymentService.create_order_from_accepted_quote(
+            session=db_session,
+            quote_id=quote.id,
+            buyer_email="tester@boundary.com",
+            shipping_address={"city": "Mumbai", "postal_code": "400001", "country": "IN"},
+            rzp_client=rzp_client,
+        )
+    else:
+
+        def create_order_mock(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "id": "order_boundary_test_01",
+                    "entity": "order",
+                    "amount": 50000,
+                    "amount_paid": 0,
+                    "amount_due": 50000,
+                    "currency": "INR",
+                    "receipt": f"ord_{quote.id.hex[:32]}",
+                    "status": "created",
+                    "attempts": 0,
+                    "created_at": int(now.timestamp()),
+                },
+            )
+
+        transport = httpx.MockTransport(create_order_mock)
+        async with httpx.AsyncClient(transport=transport) as http_client:
+            rzp_client = RazorpayClient(
+                key_id="rzp_test_mock",
+                key_secret=SecretStr("mock_secret"),
+                http_client=http_client,
+            )
+            order = await PaymentService.create_order_from_accepted_quote(
+                session=db_session,
+                quote_id=quote.id,
+                buyer_email="tester@boundary.com",
+                shipping_address={"city": "Mumbai", "postal_code": "400001", "country": "IN"},
+                rzp_client=rzp_client,
+            )
 
     assert order.id is not None
     assert order.status == "PENDING_PAYMENT"

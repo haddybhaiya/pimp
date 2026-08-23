@@ -16,7 +16,12 @@ async def test_live_razorpay_testmode_order_roundtrip() -> None:
     key_secret = settings.RAZORPAY_KEY_SECRET.get_secret_value()
 
     # Skip if placeholder or empty
-    if not key_id.startswith("rzp_test_") or not key_secret:
+    if (
+        not key_id.startswith("rzp_test_")
+        or key_id == "rzp_test_placeholder"
+        or not key_secret
+        or key_secret == "test_secret_key_placeholder"
+    ):
         pytest.skip(
             "No real Razorpay test-mode credentials configured; skipping live sandbox call."
         )
