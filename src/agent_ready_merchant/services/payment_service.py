@@ -46,18 +46,30 @@ class PaymentService:
         buyer_email: str,
         shipping_address: dict[str, Any],
         rzp_client: RazorpayClient,
+        merchant_id: uuid.UUID | None = None,
+        session_id: uuid.UUID | None = None,
     ) -> Order:
         """Creates a local Order and Razorpay Order for an ACCEPTED PriceQuote."""
-        # 1. Fetch Quote with items
+        # 1. Fetch Quote with items and lock quote row against concurrent duplicate checkouts
         stmt = (
             select(PriceQuote)
             .options(selectinload(PriceQuote.items))
             .where(PriceQuote.id == quote_id)
+            .with_for_update()
         )
         res = await session.execute(stmt)
         quote = res.scalar_one_or_none()
         if not quote:
             raise ValueError(f"PriceQuote with ID {quote_id} not found")
+
+        if merchant_id is not None and quote.merchant_id != merchant_id:
+            raise ValueError(
+                f"PriceQuote '{quote_id}' does not belong to authenticated merchant '{merchant_id}'"
+            )
+        if session_id is not None and quote.session_id != session_id:
+            raise ValueError(
+                f"PriceQuote '{quote_id}' does not belong to active session '{session_id}'"
+            )
 
         if quote.status != "ACCEPTED":
             raise ValueError(
@@ -442,12 +454,18 @@ class PaymentService:
         session: AsyncSession,
         order_id: uuid.UUID,
         rzp_client: RazorpayClient,
+        merchant_id: uuid.UUID | None = None,
     ) -> dict[str, Any]:
         """Out-of-band reconciliation querying Razorpay for authoritative order payment status."""
         stmt = select(Order).where(Order.id == order_id)
         order = (await session.execute(stmt)).scalar_one_or_none()
         if not order:
             raise ValueError(f"Order with ID {order_id} not found")
+
+        if merchant_id is not None and order.merchant_id != merchant_id:
+            raise ValueError(
+                f"Order '{order_id}' does not belong to authenticated merchant '{merchant_id}'"
+            )
 
         if not order.rzp_order_id:
             return {"status": "NO_RZP_ORDER_ID", "order_id": str(order.id)}

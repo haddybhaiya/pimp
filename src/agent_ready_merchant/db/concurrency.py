@@ -32,14 +32,16 @@ async def update_with_version_check(
     entity_id: Any,
     expected_version: int,
     values: dict[str, Any],
+    extra_conditions: list[Any] | None = None,
 ) -> int:
     """Executes a version-checked atomic UPDATE query.
 
     Increments the version by 1 and applies the given values only if the current
-    database version matches expected_version.
+    database version matches expected_version and any extra_conditions are satisfied.
 
     Raises:
-        OptimisticLockError: If no row was matched/updated (version mismatch or deleted).
+        OptimisticLockError: If no row was matched/updated (version mismatch,
+            condition failure, or deleted).
 
     Returns:
         The new version integer (expected_version + 1).
@@ -47,13 +49,18 @@ async def update_with_version_check(
     new_version = expected_version + 1
     update_payload = {**values, "version": new_version}
 
+    where_clauses: list[Any] = [
+        model_class.id == entity_id,  # type: ignore[attr-defined]
+        model_class.version == expected_version,  # type: ignore[attr-defined]
+    ]
+    if extra_conditions:
+        where_clauses.extend(extra_conditions)
+
     stmt = (
         update(model_class)
-        .where(
-            model_class.id == entity_id,  # type: ignore[attr-defined]
-            model_class.version == expected_version,  # type: ignore[attr-defined]
-        )
+        .where(*where_clauses)
         .values(**update_payload)
+        .execution_options(synchronize_session="fetch")
     )
 
     result = await session.execute(stmt)

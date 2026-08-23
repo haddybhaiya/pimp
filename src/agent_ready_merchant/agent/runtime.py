@@ -5,6 +5,7 @@ Adheres strictly to docs/agent-contract.md §4, §5, §6 and INV-AGY-02 / INV-AG
 
 import json
 import logging
+import time
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -77,14 +78,27 @@ class AgentRuntime:
         tool_calls_log: list[dict[str, Any]] = []
         intents_log: list[StructuredIntent] = []
 
-        while steps_taken < max_steps:
+        effective_max_steps = min(max(1, max_steps), 5)
+        turn_deadline = time.monotonic() + timeout_seconds
+
+        while steps_taken < effective_max_steps:
             steps_taken += 1
+            remaining_time = turn_deadline - time.monotonic()
+            if remaining_time <= 0:
+                logger.warning("Turn exceeded maximum total timeout of %.1fs", timeout_seconds)
+                return AgentRunResult(
+                    status="ERROR",
+                    buyer_message="I encountered an unexpected service error. Please try again.",
+                    steps_taken=steps_taken,
+                    tool_calls_executed=tool_calls_log,
+                    structured_intents=intents_log,
+                )
 
             # 1. LLM Generation
             try:
                 llm_res = await self.llm.generate_response(
                     messages=messages,
-                    timeout=timeout_seconds,
+                    timeout=remaining_time,
                 )
             except LLMError as exc:
                 logger.error("LLM generation failure during turn: %s", exc)

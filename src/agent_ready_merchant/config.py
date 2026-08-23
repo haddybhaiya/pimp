@@ -66,11 +66,11 @@ class Settings(BaseSettings):
         description="Razorpay public test key ID",
     )
     RAZORPAY_KEY_SECRET: SecretStr = Field(
-        default=SecretStr(""),
+        default=SecretStr("test_secret_key_placeholder"),
         description="Razorpay private test key secret",
     )
     RAZORPAY_WEBHOOK_SECRET: SecretStr = Field(
-        default=SecretStr(""),
+        default=SecretStr("test_webhook_secret_12345"),
         description="Razorpay webhook HMAC SHA-256 secret",
     )
     RAZORPAY_API_BASE_URL: str = "https://api.razorpay.com/v1"

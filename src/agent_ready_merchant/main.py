@@ -194,6 +194,8 @@ def create_app() -> FastAPI:
                 buyer_email=payload.buyer_email,
                 shipping_address=payload.shipping_address,
                 rzp_client=rzp_client,
+                merchant_id=x_merchant_id,
+                session_id=x_session_id,
             )
             return {
                 "order_id": str(order.id),
@@ -241,6 +243,7 @@ def create_app() -> FastAPI:
                 session=db,
                 order_id=order_id,
                 rzp_client=rzp_client,
+                merchant_id=x_merchant_id,
             )
         except ValueError as exc:
             raise HTTPException(
