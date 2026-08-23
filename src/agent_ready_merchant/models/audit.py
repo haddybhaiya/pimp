@@ -1,10 +1,13 @@
 """AuditEvent canonical entity model."""
 
+import hashlib
+import json
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, String
+from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, String, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agent_ready_merchant.db.base import GUID, Base, utc_now
@@ -18,6 +21,8 @@ class AuditEvent(Base):
     """Cryptographically tamper-evident, append-only audit event log."""
 
     __tablename__ = "audit_events"
+
+    GENESIS_HASH: str = "0" * 64
 
     __table_args__ = (
         CheckConstraint(
@@ -33,7 +38,7 @@ class AuditEvent(Base):
     )
     merchant_id: Mapped[uuid.UUID] = mapped_column(
         GUID(),
-        ForeignKey("merchants.id", ondelete="CASCADE"),
+        ForeignKey("merchants.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
@@ -82,3 +87,41 @@ class AuditEvent(Base):
         "BuyerAgentSession",
         back_populates="audit_events",
     )
+
+    @classmethod
+    async def create_event(
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+        actor_type: str,
+        event_type: str,
+        payload: dict[str, Any],
+        session_id: uuid.UUID | None = None,
+    ) -> "AuditEvent":
+        """Appends a new audit event with deterministic cryptographic hash chaining."""
+        stmt = (
+            select(cls.event_hash)
+            .where(cls.merchant_id == merchant_id)
+            .order_by(cls.created_at.desc(), cls.id.desc())
+            .limit(1)
+        )
+        prev_hash = (await session.execute(stmt)).scalar_one_or_none() or cls.GENESIS_HASH
+
+        payload_json = json.dumps(payload, sort_keys=True, default=str)
+        raw = (
+            f"{prev_hash}:{merchant_id}:{session_id or ''}:{actor_type}:{event_type}:{payload_json}"
+        )
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+        event = cls(
+            merchant_id=merchant_id,
+            session_id=session_id,
+            actor_type=actor_type,
+            event_type=event_type,
+            payload=payload,
+            prev_event_hash=prev_hash,
+            event_hash=digest,
+        )
+        session.add(event)
+        await session.flush()
+        return event

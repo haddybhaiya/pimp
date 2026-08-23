@@ -49,7 +49,7 @@ class DeterministicPolicyEngine:
 
             # 2. Floor Price Check on all line items
             for item in proposal.items:
-                floor_result = evaluate_floor_price(item)
+                floor_result = evaluate_floor_price(item, context)
                 if floor_result.is_denied:
                     return floor_result
 

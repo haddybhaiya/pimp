@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING
 from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from agent_ready_merchant.db.base import GUID, Base, TimestampMixin
+from agent_ready_merchant.db.base import GUID, Base, OptimisticLockMixin, TimestampMixin
 
 if TYPE_CHECKING:
     from agent_ready_merchant.models.session import BuyerAgentSession
 
 
-class AgentRun(Base, TimestampMixin):
+class AgentRun(Base, TimestampMixin, OptimisticLockMixin):
     """Execution lifecycle record governing untrusted intelligence bounds."""
 
     __tablename__ = "agent_runs"

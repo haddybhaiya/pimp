@@ -21,15 +21,16 @@ def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         settings = get_settings()
+        db_url = settings.DATABASE_URL.get_secret_value()
         engine_kwargs: dict[str, Any] = {
             "echo": settings.DB_ECHO,
         }
         # SQLite doesn't support pool_size / max_overflow
-        if "sqlite" not in settings.DATABASE_URL:
+        if "sqlite" not in db_url:
             engine_kwargs["pool_size"] = settings.DB_POOL_SIZE
             engine_kwargs["max_overflow"] = settings.DB_MAX_OVERFLOW
 
-        _engine = create_async_engine(settings.DATABASE_URL, **engine_kwargs)
+        _engine = create_async_engine(db_url, **engine_kwargs)
     return _engine
 
 

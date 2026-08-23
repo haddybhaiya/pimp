@@ -1,20 +1,19 @@
 """BuyerIntent canonical entity model."""
 
 import uuid
-from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, Numeric, String, Text
+from sqlalchemy import JSON, CheckConstraint, ForeignKey, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from agent_ready_merchant.db.base import GUID, Base, utc_now
+from agent_ready_merchant.db.base import GUID, Base, OptimisticLockMixin, TimestampMixin
 
 if TYPE_CHECKING:
     from agent_ready_merchant.models.session import BuyerAgentSession
 
 
-class BuyerIntent(Base):
+class BuyerIntent(Base, TimestampMixin, OptimisticLockMixin):
     """Model-interpreted intent parsed from buyer interaction."""
 
     __tablename__ = "buyer_intents"
@@ -63,11 +62,6 @@ class BuyerIntent(Base):
     validation_status: Mapped[str] = mapped_column(
         String(32),
         default="VALIDATED",
-        nullable=False,
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utc_now,
         nullable=False,
     )
 

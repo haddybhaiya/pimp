@@ -7,15 +7,15 @@ from typing import TYPE_CHECKING
 from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from agent_ready_merchant.db.base import GUID, Base, utc_now
+from agent_ready_merchant.db.base import GUID, Base, OptimisticLockMixin, utc_now
 
 if TYPE_CHECKING:
     from agent_ready_merchant.models.merchant import Merchant
     from agent_ready_merchant.models.payment import PaymentAttempt
 
 
-class TransactionRecord(Base):
-    """Append-only immutable financial ledger entry."""
+class TransactionRecord(Base, OptimisticLockMixin):
+    """Append-only immutable financial ledger entry with optimistic concurrency."""
 
     __tablename__ = "transaction_records"
 
@@ -44,7 +44,7 @@ class TransactionRecord(Base):
     )
     merchant_id: Mapped[uuid.UUID] = mapped_column(
         GUID(),
-        ForeignKey("merchants.id", ondelete="CASCADE"),
+        ForeignKey("merchants.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )

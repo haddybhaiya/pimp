@@ -6,15 +6,15 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import JSON, BigInteger, CheckConstraint, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from agent_ready_merchant.db.base import GUID, Base, TimestampMixin
+from agent_ready_merchant.db.base import GUID, Base, OptimisticLockMixin, TimestampMixin
 
 if TYPE_CHECKING:
     from agent_ready_merchant.models.order import Order
     from agent_ready_merchant.models.transaction import TransactionRecord
 
 
-class PaymentAttempt(Base, TimestampMixin):
-    """Lifecycle record for an individual payment transaction attempt."""
+class PaymentAttempt(Base, TimestampMixin, OptimisticLockMixin):
+    """Lifecycle record for an individual payment attempt with optimistic concurrency."""
 
     __tablename__ = "payment_attempts"
 

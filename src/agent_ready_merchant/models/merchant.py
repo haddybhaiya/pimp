@@ -89,10 +89,8 @@ class Merchant(Base, TimestampMixin, OptimisticLockMixin):
     transaction_records: Mapped[list["TransactionRecord"]] = relationship(
         "TransactionRecord",
         back_populates="merchant",
-        cascade="all, delete-orphan",
     )
     audit_events: Mapped[list["AuditEvent"]] = relationship(
         "AuditEvent",
         back_populates="merchant",
-        cascade="all, delete-orphan",
     )
