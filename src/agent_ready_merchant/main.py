@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import agent_ready_merchant
@@ -154,10 +154,34 @@ def create_app() -> FastAPI:
     )
     async def create_order_from_quote(
         payload: CreateOrderFromQuoteRequest,
+        x_merchant_id: uuid.UUID | None = Header(default=None, alias="X-Merchant-ID"),
+        x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         """Creates an Order and Razorpay Order from an accepted PriceQuote."""
+        # Verify quote ownership if security headers provided
+        if x_merchant_id or x_session_id:
+            from agent_ready_merchant.models.quote import PriceQuote
+
+            stmt = select(PriceQuote).where(PriceQuote.id == payload.quote_id)
+            quote = (await db.execute(stmt)).scalar_one_or_none()
+            if not quote:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"PriceQuote with ID {payload.quote_id} not found",
+                )
+            if x_merchant_id and quote.merchant_id != x_merchant_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Quote does not belong to the authenticated merchant",
+                )
+            if x_session_id and quote.session_id != x_session_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Quote does not belong to the active session",
+                )
+
         rzp_client = RazorpayClient(
             key_id=current_settings.RAZORPAY_KEY_ID,
             key_secret=current_settings.RAZORPAY_KEY_SECRET,
@@ -191,10 +215,22 @@ def create_app() -> FastAPI:
     )
     async def reconcile_order(
         order_id: uuid.UUID,
+        x_merchant_id: uuid.UUID | None = Header(default=None, alias="X-Merchant-ID"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         """Triggers out-of-band reconciliation against Razorpay."""
+        if x_merchant_id:
+            from agent_ready_merchant.models.order import Order
+
+            order_stmt = select(Order).where(Order.id == order_id)
+            existing_order = (await db.execute(order_stmt)).scalar_one_or_none()
+            if existing_order and existing_order.merchant_id != x_merchant_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Order does not belong to authenticated merchant",
+                )
+
         rzp_client = RazorpayClient(
             key_id=current_settings.RAZORPAY_KEY_ID,
             key_secret=current_settings.RAZORPAY_KEY_SECRET,

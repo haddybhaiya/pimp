@@ -193,7 +193,9 @@ def upgrade() -> None:
         sa.Column("extracted_entities", sa.JSON(), nullable=False),
         sa.Column("confidence_score", sa.Numeric(4, 3), nullable=False, server_default="1.000"),
         sa.Column("validation_status", sa.String(32), nullable=False, server_default="VALIDATED"),
+        sa.Column("version", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
             "validation_status IN ('PENDING', 'VALIDATED', 'REJECTED', 'MALFORMED')",
             name="ck_buyer_intents_validation_status_valid",
@@ -370,6 +372,7 @@ def upgrade() -> None:
         sa.Column("error_code", sa.String(64), nullable=True),
         sa.Column("error_description", sa.Text(), nullable=True),
         sa.Column("webhook_payload", sa.JSON(), nullable=True),
+        sa.Column("version", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
@@ -399,13 +402,14 @@ def upgrade() -> None:
         sa.Column(
             "merchant_id",
             UUID(as_uuid=True),
-            sa.ForeignKey("merchants.id", ondelete="CASCADE"),
+            sa.ForeignKey("merchants.id", ondelete="RESTRICT"),
             nullable=False,
         ),
         sa.Column("entry_type", sa.String(32), nullable=False),
         sa.Column("amount_paise", sa.BigInteger(), nullable=False),
         sa.Column("status", sa.String(32), nullable=False, server_default="COMMITTED"),
         sa.Column("settlement_ref", sa.String(128), nullable=True),
+        sa.Column("version", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
             "entry_type IN ('CREDIT', 'DEBIT_REFUND')",
@@ -465,7 +469,7 @@ def upgrade() -> None:
         sa.Column(
             "merchant_id",
             UUID(as_uuid=True),
-            sa.ForeignKey("merchants.id", ondelete="CASCADE"),
+            sa.ForeignKey("merchants.id", ondelete="RESTRICT"),
             nullable=False,
         ),
         sa.Column(
@@ -505,6 +509,7 @@ def upgrade() -> None:
         sa.Column("step_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("total_tokens", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("error_message", sa.Text(), nullable=True),
+        sa.Column("version", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(

@@ -207,13 +207,11 @@ class AgentRuntime:
         status: str,
     ) -> None:
         """Records agent run completion audit."""
-        audit = AuditEvent(
+        await AuditEvent.create_event(
+            session=session,
             merchant_id=context.merchant_id,
             session_id=context.session_id,
             actor_type="BUYER_AGENT",
             event_type="AGENT_RUN_COMPLETED",
             payload={"steps_taken": steps, "status": status},
-            event_hash=f"agent_run_{context.session_id}_{steps}_{status}",
         )
-        session.add(audit)
-        await session.flush()

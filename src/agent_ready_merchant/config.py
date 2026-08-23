@@ -8,7 +8,7 @@ and are never exposed via logging, serialization, or error responses.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,12 +36,14 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------------------
     # 2. Database Configuration (PostgreSQL 16+ / SQLite for isolated tests)
     # --------------------------------------------------------------------------
-    DATABASE_URL: str = Field(
-        default="postgresql+asyncpg://postgres:postgres@localhost:5432/agent_ready_merchant",
+    DATABASE_URL: SecretStr = Field(
+        default=SecretStr(
+            "postgresql+asyncpg://postgres:postgres@localhost:5432/agent_ready_merchant"
+        ),
         description="Async database connection string",
     )
-    DATABASE_URL_SYNC: str = Field(
-        default="postgresql://postgres:postgres@localhost:5432/agent_ready_merchant",
+    DATABASE_URL_SYNC: SecretStr = Field(
+        default=SecretStr("postgresql://postgres:postgres@localhost:5432/agent_ready_merchant"),
         description="Synchronous database connection string for migrations",
     )
     DB_ECHO: bool = False
@@ -85,7 +87,7 @@ class Settings(BaseSettings):
     DEFAULT_MAX_DISCOUNT_PERCENTAGE: float = 15.0
     DEFAULT_MIN_MARGIN_PERCENTAGE: float = 20.0
     DEFAULT_QUOTE_TTL_MINUTES: int = 15
-    MAX_SINGLE_TRANSACTION_PAISE: int = 10_000_000  # ₹1,00,000 in paise
+    MAX_SINGLE_TRANSACTION_PAISE: int = 5_000_000  # ₹50,000 in paise (docs/policy-model.md §2.2)
 
     # --------------------------------------------------------------------------
     # 6. Rate Limiting & Security Guards
@@ -98,6 +100,15 @@ class Settings(BaseSettings):
     def is_testing(self) -> bool:
         """Helper to check if currently executing in test environment."""
         return self.ENVIRONMENT == "test"
+
+    @model_validator(mode="after")
+    def validate_production_security(self) -> "Settings":
+        """Rejects known default or empty SECRET_KEY in production to fail closed."""
+        if self.ENVIRONMENT == "production":
+            val = self.SECRET_KEY.get_secret_value()
+            if not val or val == "default-insecure-secret-key-change-in-production":
+                raise ValueError("SECRET_KEY must be configured with a secure value in production")
+        return self
 
 
 @lru_cache(maxsize=1)

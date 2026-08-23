@@ -29,7 +29,7 @@ target_metadata = Base.metadata
 def get_url() -> str:
     """Retrieves sync database URL from settings."""
     settings = get_settings()
-    return settings.DATABASE_URL_SYNC
+    return settings.DATABASE_URL_SYNC.get_secret_value()
 
 
 def run_migrations_offline() -> None:
@@ -70,7 +70,7 @@ async def run_async_migrations() -> None:
     """
     settings = get_settings()
     configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = settings.DATABASE_URL
+    configuration["sqlalchemy.url"] = settings.DATABASE_URL.get_secret_value()
 
     connectable = async_engine_from_config(
         configuration,
