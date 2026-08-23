@@ -34,6 +34,7 @@ class OrderStateMachine:
     }
 
     TERMINAL_STATES: set[str] = {"COMPLETED", "CANCELLED", "EXPIRED", "REFUNDED"}
+    MUTABLE_FIELDS: set[str] = {"shipping_address", "buyer_email", "rzp_order_id"}
 
     @classmethod
     def validate_transition(cls, order: Order, target_state: str) -> None:
@@ -79,7 +80,12 @@ class OrderStateMachine:
         from_state = order.status
         update_payload: dict[str, Any] = {"status": target_state}
         if additional_updates:
-            update_payload.update(additional_updates)
+            for k, v in additional_updates.items():
+                if k not in cls.MUTABLE_FIELDS:
+                    raise ValueError(
+                        f"Field '{k}' is protected and cannot be modified during Order transition"
+                    )
+                update_payload[k] = v
 
         new_version = await update_with_version_check(
             session=session,
@@ -93,7 +99,8 @@ class OrderStateMachine:
         order.version = new_version
         if additional_updates:
             for k, v in additional_updates.items():
-                setattr(order, k, v)
+                if k in cls.MUTABLE_FIELDS:
+                    setattr(order, k, v)
 
         audit_payload = {
             "entity": "Order",
@@ -104,16 +111,14 @@ class OrderStateMachine:
             "reason": reason,
         }
 
-        audit_event = AuditEvent(
+        await AuditEvent.create_event(
+            session=session,
             merchant_id=order.merchant_id,
             session_id=None,
             actor_type=actor_type,
             event_type=f"ORDER_TRANSITION_{target_state}",
             payload=audit_payload,
-            event_hash=f"hash_order_{order.id}_{new_version}",
         )
-        session.add(audit_event)
-        await session.flush()
 
         return TransitionResult(
             entity=order,

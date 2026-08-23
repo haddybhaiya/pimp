@@ -6,12 +6,14 @@ Adheres strictly to docs/razorpay-integration-notes.md, INV-FIN-04, and INV-FIN-
 import json
 import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from agent_ready_merchant.db.concurrency import update_with_version_check
 from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
 from agent_ready_merchant.integrations.razorpay.exceptions import (
     AmountMismatchFraudError,
@@ -21,6 +23,7 @@ from agent_ready_merchant.integrations.razorpay.webhook import (
     assert_valid_webhook_signature,
 )
 from agent_ready_merchant.models.audit import AuditEvent
+from agent_ready_merchant.models.inventory import InventoryItem
 from agent_ready_merchant.models.order import Order, OrderItem
 from agent_ready_merchant.models.payment import PaymentAttempt
 from agent_ready_merchant.models.quote import PriceQuote
@@ -60,11 +63,48 @@ class PaymentService:
                 f"Cannot create order: quote is in '{quote.status}', must be 'ACCEPTED'"
             )
 
+        # Enforce quote expiry invariant
+        now = datetime.now(UTC)
+        quote_expires = (
+            quote.expires_at
+            if quote.expires_at.tzinfo is not None
+            else quote.expires_at.replace(tzinfo=UTC)
+        )
+        if now > quote_expires:
+            raise ValueError(
+                f"Cannot create order: PriceQuote '{quote_id}' expired at "
+                f"{quote_expires.isoformat()}"
+            )
+
         # 2. Check if order already exists for this quote (Idempotency)
         order_stmt = select(Order).where(Order.quote_id == quote_id)
         existing_order = (await session.execute(order_stmt)).scalar_one_or_none()
         if existing_order:
             return existing_order
+
+        # 2.5 Reserve inventory for each quote line item
+        for q_item in quote.items:
+            inv_stmt = select(InventoryItem).where(InventoryItem.variant_id == q_item.variant_id)
+            inv = (await session.execute(inv_stmt)).scalar_one_or_none()
+            if inv is not None:
+                if inv.available_quantity < q_item.quantity + inv.safety_threshold:
+                    raise ValueError(
+                        f"Insufficient stock for variant '{q_item.variant_id}': "
+                        f"requested {q_item.quantity}, available {inv.available_quantity} "
+                        f"(safety threshold: {inv.safety_threshold})"
+                    )
+                new_avail = inv.available_quantity - q_item.quantity
+                new_res = inv.reserved_quantity + q_item.quantity
+                await update_with_version_check(
+                    session=session,
+                    model_class=InventoryItem,
+                    entity_id=inv.id,
+                    expected_version=inv.version,
+                    values={"available_quantity": new_avail, "reserved_quantity": new_res},
+                )
+                inv.available_quantity = new_avail
+                inv.reserved_quantity = new_res
+                inv.version += 1
 
         # 3. Call Razorpay API to generate external order
         receipt_id = f"ord_{quote.id.hex[:32]}"
@@ -165,12 +205,19 @@ class PaymentService:
 
         # 4. Handle event types
         if event_name in {"order.paid", "payment.captured"}:
+            if not rzp_payment_id:
+                logger.warning("Webhook %s missing payment ID", event_name)
+                return {"status": "IGNORED", "reason": "missing_payment_id"}
+            if not amount_paise or int(amount_paise) <= 0:
+                logger.warning("Webhook %s invalid amount: %s", event_name, amount_paise)
+                return {"status": "IGNORED", "reason": "invalid_payment_amount"}
+
             return await cls._handle_payment_success(
                 session=session,
                 order=order,
                 rzp_payment_id=rzp_payment_id,
                 rzp_order_id=rzp_order_id,
-                amount_paise=amount_paise,
+                amount_paise=int(amount_paise),
                 payment_data=payment_data,
                 event_name=event_name,
             )
@@ -202,7 +249,8 @@ class PaymentService:
         # Check Amount Invariant (Anti-Fraud)
         if amount_paise is not None and amount_paise != order.amount_paise:
             # Amount mismatch: Log critical security fraud attempt
-            audit_event = AuditEvent(
+            await AuditEvent.create_event(
+                session=session,
                 merchant_id=order.merchant_id,
                 session_id=None,
                 actor_type="SYSTEM",
@@ -213,10 +261,7 @@ class PaymentService:
                     "received_amount_paise": amount_paise,
                     "rzp_payment_id": rzp_payment_id,
                 },
-                event_hash=f"fraud_{order.id}_{rzp_payment_id}",
             )
-            session.add(audit_event)
-            await session.flush()
             raise AmountMismatchFraudError(
                 expected_amount_paise=order.amount_paise,
                 received_amount_paise=amount_paise,
@@ -256,6 +301,7 @@ class PaymentService:
                     session=session,
                     payment=existing_attempt,
                     target_state="CAPTURED",
+                    expected_version=existing_attempt.version,
                     reason="Webhook confirmation",
                 )
             payment_attempt = existing_attempt
@@ -338,6 +384,15 @@ class PaymentService:
             )
             session.add(payment_attempt)
             await session.flush()
+        else:
+            if existing_attempt.status != "FAILED":
+                await PaymentAttemptStateMachine.transition(
+                    session=session,
+                    payment=existing_attempt,
+                    target_state="FAILED",
+                    expected_version=existing_attempt.version,
+                    reason="Payment failed webhook received",
+                )
 
         if order.status == "PAYMENT_PROCESSING":
             await OrderStateMachine.transition(

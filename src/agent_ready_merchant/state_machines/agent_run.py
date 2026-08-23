@@ -5,10 +5,13 @@ Adheres strictly to docs/state-machines.md §5 and INV-AGY-04 (Bounded Agent Exe
 
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent_ready_merchant.db.concurrency import update_with_version_check
 from agent_ready_merchant.models.agent_run import AgentRun
 from agent_ready_merchant.models.audit import AuditEvent
+from agent_ready_merchant.models.session import BuyerAgentSession
 from agent_ready_merchant.state_machines.base import (
     InvalidStateTransitionError,
     TerminalStateError,
@@ -31,8 +34,8 @@ class AgentRunStateMachine:
     }
 
     TERMINAL_STATES: set[str] = {"COMPLETED", "FAILED", "KILLED"}
-
     MAX_ALLOWED_STEPS: int = 5
+    MUTABLE_FIELDS: set[str] = {"step_count", "total_tokens", "error_message"}
 
     @classmethod
     def validate_transition(cls, run: AgentRun, target_state: str) -> None:
@@ -72,18 +75,50 @@ class AgentRunStateMachine:
         session: AsyncSession,
         run: AgentRun,
         target_state: str,
+        expected_version: int | None = None,
         actor_type: str = "SYSTEM",
         reason: str | None = None,
         additional_updates: dict[str, Any] | None = None,
     ) -> TransitionResult[AgentRun]:
-        """Validates, transitions state, and writes audit event."""
+        """Validates, atomically transitions state with version check, and writes audit event."""
         cls.validate_transition(run, target_state)
 
         from_state = run.status
-        run.status = target_state
+        updates: dict[str, Any] = {"status": target_state}
+
         if additional_updates:
             for k, v in additional_updates.items():
-                setattr(run, k, v)
+                if k not in cls.MUTABLE_FIELDS:
+                    raise ValueError(
+                        f"Field '{k}' is protected and cannot be "
+                        "modified during AgentRun transition"
+                    )
+                updates[k] = v
+
+        version_to_check = expected_version or run.version
+        new_version = await update_with_version_check(
+            session=session,
+            model_class=AgentRun,
+            entity_id=run.id,
+            expected_version=version_to_check,
+            values=updates,
+        )
+
+        run.status = target_state
+        run.version = new_version
+        if additional_updates:
+            for k, v in additional_updates.items():
+                if k in cls.MUTABLE_FIELDS:
+                    setattr(run, k, v)
+
+        # Explicitly load merchant_id from BuyerAgentSession
+        if run.session is not None:
+            merchant_id = run.session.merchant_id
+        else:
+            session_stmt = select(BuyerAgentSession.merchant_id).where(
+                BuyerAgentSession.id == run.session_id
+            )
+            merchant_id = (await session.execute(session_stmt)).scalar_one()
 
         audit_payload = {
             "entity": "AgentRun",
@@ -96,22 +131,19 @@ class AgentRunStateMachine:
             "reason": reason,
         }
 
-        merchant_id = run.session.merchant_id if run.session else run.session_id
-        audit_event = AuditEvent(
+        await AuditEvent.create_event(
+            session=session,
             merchant_id=merchant_id,
             session_id=run.session_id,
             actor_type=actor_type,
             event_type=f"AGENT_RUN_TRANSITION_{target_state}",
             payload=audit_payload,
-            event_hash=f"hash_run_{run.id}_{target_state}",
         )
-        session.add(audit_event)
-        await session.flush()
 
         return TransitionResult(
             entity=run,
             from_state=from_state,
             to_state=target_state,
-            version=1,
+            version=new_version,
             audit_payload=audit_payload,
         )

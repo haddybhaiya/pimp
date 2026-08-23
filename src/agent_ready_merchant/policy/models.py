@@ -53,6 +53,7 @@ class QuoteItemProposal:
     unit_floor_price_paise: int
     proposed_unit_price_paise: int
     is_negotiable: bool = False
+    unit_cost_price_paise: int | None = None
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,7 @@ class PolicyContext:
     merchant_autonomy_level: int = 1  # 0: Read-Only, 1: Bounded Auto, 2: Supervised HITL
     max_discount_percentage: float = 15.0
     min_margin_percentage: float = 20.0
-    max_single_transaction_paise: int = 10_000_000  # ₹100,000 default
+    max_single_transaction_paise: int = 5_000_000  # ₹50,000 default (docs/policy-model.md §2.2)
     session_capabilities: set[str] = field(
         default_factory=lambda: {
             "buyer:discover",

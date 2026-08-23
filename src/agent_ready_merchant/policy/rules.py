@@ -41,8 +41,11 @@ def evaluate_capability(
     )
 
 
-def evaluate_floor_price(item: QuoteItemProposal) -> PolicyEvaluationResult:
-    """Enforces that item unit price cannot breach the SKU floor price."""
+def evaluate_floor_price(
+    item: QuoteItemProposal,
+    context: PolicyContext | None = None,
+) -> PolicyEvaluationResult:
+    """Enforces that item unit price cannot breach the SKU floor price or minimum margin."""
     if item.proposed_unit_price_paise <= 0:
         return PolicyEvaluationResult(
             verdict=PolicyVerdict.DENY,
@@ -51,26 +54,46 @@ def evaluate_floor_price(item: QuoteItemProposal) -> PolicyEvaluationResult:
             metadata={"sku": item.sku, "proposed_price_paise": item.proposed_unit_price_paise},
         )
 
-    if item.proposed_unit_price_paise < item.unit_floor_price_paise:
-        return PolicyEvaluationResult(
-            verdict=PolicyVerdict.DENY,
-            rule_code="POLICY_VIOLATION_BELOW_FLOOR_PRICE",
-            reason=(
+    cost_floor = 0
+    if item.unit_cost_price_paise is not None and context is not None:
+        cost_floor = int(item.unit_cost_price_paise * (1.0 + context.min_margin_percentage / 100.0))
+
+    effective_floor_paise = max(item.unit_floor_price_paise, cost_floor)
+
+    if item.proposed_unit_price_paise < effective_floor_paise:
+        if effective_floor_paise == cost_floor and cost_floor > item.unit_floor_price_paise:
+            margin_pct = context.min_margin_percentage if context else 0
+            reason = (
+                f"Proposed unit price ₹{item.proposed_unit_price_paise / 100:.2f} "
+                f"for SKU '{item.sku}' is below the required minimum margin price of "
+                f"₹{cost_floor / 100:.2f} (margin: {margin_pct}%)"
+            )
+            rule_code = "POLICY_VIOLATION_BELOW_MIN_MARGIN"
+        else:
+            reason = (
                 f"Proposed unit price ₹{item.proposed_unit_price_paise / 100:.2f} "
                 f"for SKU '{item.sku}' is below the allowed floor price of "
                 f"₹{item.unit_floor_price_paise / 100:.2f}"
-            ),
+            )
+            rule_code = "POLICY_VIOLATION_BELOW_FLOOR_PRICE"
+
+        return PolicyEvaluationResult(
+            verdict=PolicyVerdict.DENY,
+            rule_code=rule_code,
+            reason=reason,
             metadata={
                 "sku": item.sku,
                 "proposed_unit_price_paise": item.proposed_unit_price_paise,
                 "floor_price_paise": item.unit_floor_price_paise,
+                "cost_price_paise": item.unit_cost_price_paise,
+                "effective_floor_paise": effective_floor_paise,
             },
         )
 
     return PolicyEvaluationResult(
         verdict=PolicyVerdict.ALLOW,
         rule_code="FLOOR_PRICE_OK",
-        reason=f"SKU '{item.sku}' unit price satisfies floor price",
+        reason=f"SKU '{item.sku}' unit price satisfies floor and margin constraints",
     )
 
 
