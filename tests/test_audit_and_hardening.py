@@ -1,19 +1,29 @@
-"""Tests for security hardening, audit hash chains, margin enforcement, and inventory reservation."""
+"""Tests for security hardening, audit hash chains, margin enforcement, and concurrency."""
 
+import asyncio
+import hashlib
+import hmac
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from httpx import AsyncClient
 from pydantic import SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
 from agent_ready_merchant.models.agent_run import AgentRun
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.intent import BuyerIntent
 from agent_ready_merchant.models.merchant import Merchant
-from agent_ready_merchant.models.quote import PriceQuote
+from agent_ready_merchant.models.order import Order
+from agent_ready_merchant.models.payment import PaymentAttempt
+from agent_ready_merchant.models.product import Product, ProductVariant
+from agent_ready_merchant.models.quote import PriceQuote, QuoteItem
 from agent_ready_merchant.models.session import BuyerAgentSession
+from agent_ready_merchant.models.transaction import TransactionRecord
 from agent_ready_merchant.policy.engine import DeterministicPolicyEngine
 from agent_ready_merchant.policy.models import (
     PolicyContext,
@@ -25,8 +35,19 @@ from agent_ready_merchant.services.payment_service import PaymentService
 from agent_ready_merchant.state_machines.agent_run import AgentRunStateMachine
 from agent_ready_merchant.state_machines.buyer_intent import BuyerIntentStateMachine
 from agent_ready_merchant.tools.base import GatewayContext
-from agent_ready_merchant.tools.handlers import CreateOrderTool
-from agent_ready_merchant.tools.models import CreateOrderParams, ShippingAddressParam
+from agent_ready_merchant.tools.handlers import (
+    CreateOrderTool,
+    NegotiateQuoteTool,
+)
+from agent_ready_merchant.tools.models import (
+    CreateOrderParams,
+    NegotiateQuoteParams,
+    ShippingAddressParam,
+)
+
+
+def _sign(body: bytes, secret: str) -> str:
+    return hmac.new(key=secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256).hexdigest()
 
 
 @pytest.mark.asyncio
@@ -141,6 +162,350 @@ async def test_state_machines_reject_protected_fields(db_session: AsyncSession) 
             target_state="VALIDATED",
             additional_updates={"session_id": uuid.uuid4()},
         )
+
+
+@pytest.mark.asyncio
+async def test_escalate_approval_zero_quote_mutation(db_session: AsyncSession) -> None:
+    """Regression test: ESCALATE_APPROVAL returns PENDING_APPROVAL with ZERO quote mutations."""
+    merchant = Merchant(
+        name="HITL Merchant",
+        slug=f"hitl-merchant-{uuid.uuid4().hex[:8]}",
+        currency="INR",
+        rzp_key_id="rzp_test_123",
+    )
+    db_session.add(merchant)
+    await db_session.flush()
+
+    session = BuyerAgentSession(
+        merchant_id=merchant.id,
+        buyer_agent_identifier="agent_hitl",
+        auth_token_hash="hash_hitl",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    db_session.add(session)
+    await db_session.flush()
+
+    product = Product(
+        merchant_id=merchant.id,
+        title="Negotiable Widget",
+        sku="WIDGET-001",
+        category="General",
+        base_price_paise=100_000,
+        floor_price_paise=80_000,
+        is_negotiable=True,
+    )
+    db_session.add(product)
+    await db_session.flush()
+
+    variant = ProductVariant(product_id=product.id, title="Standard", sku="WIDGET-001-STD")
+    db_session.add(variant)
+    await db_session.flush()
+
+    quote = PriceQuote(
+        merchant_id=merchant.id,
+        session_id=session.id,
+        status="PROPOSED",
+        subtotal_paise=100_000,
+        discount_paise=0,
+        shipping_paise=0,
+        total_paise=100_000,
+        idempotency_key=f"idem_{uuid.uuid4().hex}",
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+    )
+    db_session.add(quote)
+    await db_session.flush()
+
+    q_item = QuoteItem(
+        quote_id=quote.id,
+        variant_id=variant.id,
+        quantity=1,
+        unit_price_paise=100_000,
+        total_price_paise=100_000,
+    )
+    db_session.add(q_item)
+    await db_session.flush()
+
+    # Initial state snapshot
+    initial_version = quote.version
+    initial_status = quote.status
+    initial_total = quote.total_paise
+    initial_discount = quote.discount_paise
+
+    tool = NegotiateQuoteTool()
+    # autonomy_level = 2 (HITL: requires merchant escalation for discounts)
+    context = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=session.id,
+        capabilities={"buyer:quote", "buyer:negotiate"},
+        autonomy_level=2,
+    )
+
+    result = await tool.execute(
+        session=db_session,
+        params=NegotiateQuoteParams(
+            quote_id=quote.id,
+            proposed_total_paise=90_000,
+            rationale="Bulk inquiry discount requested",
+        ),
+        context=context,
+    )
+
+    # Verify structured PENDING_APPROVAL result
+    assert result["status"] == "PENDING_APPROVAL"
+    assert "Counter-offer requires merchant approval" in result["message"]
+
+    # Re-query quote from database to prove ZERO mutation
+    stmt = select(PriceQuote).where(PriceQuote.id == quote.id)
+    refreshed_quote = (await db_session.execute(stmt)).scalar_one()
+
+    assert refreshed_quote.status == initial_status
+    assert refreshed_quote.status == "PROPOSED"
+    assert refreshed_quote.version == initial_version
+    assert refreshed_quote.total_paise == initial_total
+    assert refreshed_quote.total_paise == 100_000
+    assert refreshed_quote.discount_paise == initial_discount
+    assert refreshed_quote.discount_paise == 0
+
+
+@pytest.mark.asyncio
+async def test_denied_negotiation_zero_quote_mutation(db_session: AsyncSession) -> None:
+    """Regression test: DENY verdict returns REJECTED with ZERO quote mutations."""
+    merchant = Merchant(
+        name="Strict Merchant",
+        slug=f"strict-merchant-{uuid.uuid4().hex[:8]}",
+        currency="INR",
+        rzp_key_id="rzp_test_123",
+    )
+    db_session.add(merchant)
+    await db_session.flush()
+
+    session = BuyerAgentSession(
+        merchant_id=merchant.id,
+        buyer_agent_identifier="agent_strict",
+        auth_token_hash="hash_strict",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    db_session.add(session)
+    await db_session.flush()
+
+    product = Product(
+        merchant_id=merchant.id,
+        title="Fixed Item",
+        sku="FIXED-001",
+        category="General",
+        base_price_paise=100_000,
+        floor_price_paise=90_000,
+        is_negotiable=False,  # Not negotiable
+    )
+    db_session.add(product)
+    await db_session.flush()
+
+    variant = ProductVariant(product_id=product.id, title="Default", sku="FIXED-001-DEF")
+    db_session.add(variant)
+    await db_session.flush()
+
+    quote = PriceQuote(
+        merchant_id=merchant.id,
+        session_id=session.id,
+        status="PROPOSED",
+        subtotal_paise=100_000,
+        discount_paise=0,
+        shipping_paise=0,
+        total_paise=100_000,
+        idempotency_key=f"idem_{uuid.uuid4().hex}",
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+    )
+    db_session.add(quote)
+    await db_session.flush()
+
+    q_item = QuoteItem(
+        quote_id=quote.id,
+        variant_id=variant.id,
+        quantity=1,
+        unit_price_paise=100_000,
+        total_price_paise=100_000,
+    )
+    db_session.add(q_item)
+    await db_session.flush()
+
+    tool = NegotiateQuoteTool()
+    context = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=session.id,
+        capabilities={"buyer:quote", "buyer:negotiate"},
+        autonomy_level=1,
+    )
+
+    result = await tool.execute(
+        session=db_session,
+        params=NegotiateQuoteParams(
+            quote_id=quote.id,
+            proposed_total_paise=50_000,
+        ),
+        context=context,
+    )
+
+    assert result["status"] == "REJECTED"
+    assert quote.status == "PROPOSED"
+    assert quote.total_paise == 100_000
+    assert quote.discount_paise == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_webhook_delivery_atomic_deduplication(
+    test_engine: AsyncEngine,
+    db_session: AsyncSession,
+) -> None:
+    """Regression test: Concurrent webhooks execute atomically without 500s or duplicates."""
+    from collections.abc import AsyncGenerator
+
+    from httpx import ASGITransport
+
+    from agent_ready_merchant.config import get_settings
+    from agent_ready_merchant.db.session import get_db_session
+    from agent_ready_merchant.main import create_app
+
+    merchant = Merchant(
+        name="Concurrent Store",
+        slug=f"concurrent-store-{uuid.uuid4().hex[:8]}",
+        currency="INR",
+        rzp_key_id="rzp_test_concurrent",
+    )
+    db_session.add(merchant)
+    await db_session.flush()
+
+    session = BuyerAgentSession(
+        merchant_id=merchant.id,
+        buyer_agent_identifier="agent_conc",
+        auth_token_hash="hash_conc",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    db_session.add(session)
+    await db_session.flush()
+
+    quote = PriceQuote(
+        merchant_id=merchant.id,
+        session_id=session.id,
+        status="ACCEPTED",
+        subtotal_paise=250_000,
+        discount_paise=0,
+        shipping_paise=0,
+        total_paise=250_000,
+        idempotency_key=f"idem_{uuid.uuid4().hex}",
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+    )
+    db_session.add(quote)
+    await db_session.flush()
+
+    rzp_order_id = f"order_conc_{uuid.uuid4().hex[:12]}"
+    rzp_payment_id = f"pay_conc_{uuid.uuid4().hex[:12]}"
+
+    order = Order(
+        quote_id=quote.id,
+        merchant_id=merchant.id,
+        status="PENDING_PAYMENT",
+        amount_paise=250_000,
+        currency="INR",
+        buyer_email="concurrency@test.com",
+        shipping_address={"line1": "Street", "city": "Bangalore", "postal_code": "560001"},
+        rzp_order_id=rzp_order_id,
+    )
+    db_session.add(order)
+    await db_session.flush()
+    await db_session.commit()
+
+    secret = get_settings().RAZORPAY_WEBHOOK_SECRET.get_secret_value()
+    webhook_payload = {
+        "entity": "event",
+        "event": "payment.captured",
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": rzp_payment_id,
+                    "order_id": rzp_order_id,
+                    "amount": 250_000,
+                    "status": "captured",
+                    "method": "upi",
+                }
+            },
+            "order": {
+                "entity": {
+                    "id": rzp_order_id,
+                    "amount": 250_000,
+                    "status": "paid",
+                }
+            },
+        },
+    }
+    raw_body = json.dumps(webhook_payload).encode("utf-8")
+    sig = _sign(raw_body, secret)
+
+    session_factory = async_sessionmaker(
+        bind=test_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+    async def override_get_db_session() -> AsyncGenerator[AsyncSession, None]:
+        async with session_factory() as s:
+            try:
+                yield s
+                await s.commit()
+            except Exception:
+                await s.rollback()
+                raise
+
+    app = create_app()
+    app.dependency_overrides[get_db_session] = override_get_db_session
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as concurrent_client:
+        # Initial delivery succeeds and processes payment
+        initial_resp = await concurrent_client.post(
+            "/api/v1/payments/webhook",
+            content=raw_body,
+            headers={"X-Razorpay-Signature": sig, "Content-Type": "application/json"},
+        )
+        assert initial_resp.status_code == 200
+        assert initial_resp.json()["status"] == "PROCESSED"
+
+        # Concurrent duplicate deliveries must all be safely deduplicated
+        tasks = [
+            concurrent_client.post(
+                "/api/v1/payments/webhook",
+                content=raw_body,
+                headers={"X-Razorpay-Signature": sig, "Content-Type": "application/json"},
+            )
+            for _ in range(5)
+        ]
+        responses = await asyncio.gather(*tasks)
+
+    # All concurrent duplicate requests must return HTTP 200 OK (never HTTP 500)
+    for resp in responses:
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "DUPLICATE_IGNORED"
+
+    # Reset transaction snapshot to see data committed by webhook handlers
+    await db_session.rollback()
+
+    # Assert DB invariants: exactly 1 payment_attempt and 1 transaction_record
+    pay_stmt = select(PaymentAttempt).where(PaymentAttempt.order_id == order.id)
+    payment_attempts = (await db_session.execute(pay_stmt)).scalars().all()
+    assert len(payment_attempts) == 1
+    assert payment_attempts[0].rzp_payment_id == rzp_payment_id
+    assert payment_attempts[0].status == "CAPTURED"
+
+    tx_stmt = select(TransactionRecord).where(
+        TransactionRecord.payment_attempt_id == payment_attempts[0].id
+    )
+    tx_records = (await db_session.execute(tx_stmt)).scalars().all()
+    assert len(tx_records) == 1
+    assert tx_records[0].entry_type == "CREDIT"
+    assert tx_records[0].amount_paise == 250_000
+
+    await db_session.refresh(order)
+    assert order.status == "PAID"
 
 
 @pytest.mark.asyncio

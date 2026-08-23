@@ -42,14 +42,69 @@ def test_settings_secret_masking() -> None:
     assert settings.GROQ_API_KEY.get_secret_value() == "gsk_key_live_999"
 
 
-def test_settings_production_fails_closed_without_secret_key() -> None:
-    """Verifies that production environment fails closed if SECRET_KEY is default or missing."""
+def test_settings_production_fails_closed_when_default_secret_key() -> None:
+    """Verifies that production environment fails closed when SECRET_KEY is default."""
     with pytest.raises(ValidationError) as exc_info:
         Settings(
             ENVIRONMENT="production",
             SECRET_KEY=SecretStr("default-insecure-secret-key-change-in-production"),
         )
     assert "SECRET_KEY must be configured" in str(exc_info.value)
+
+
+def test_settings_production_fails_closed_when_empty_secret_key() -> None:
+    """Verifies that production environment fails closed when SECRET_KEY is empty."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            ENVIRONMENT="production",
+            SECRET_KEY=SecretStr(""),
+        )
+    assert "SECRET_KEY must be configured" in str(exc_info.value)
+
+
+def test_settings_production_fails_closed_when_whitespace_secret_key() -> None:
+    """Verifies that production environment fails closed when SECRET_KEY is whitespace only."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            ENVIRONMENT="production",
+            SECRET_KEY=SecretStr("   "),
+        )
+    assert "SECRET_KEY must be configured" in str(exc_info.value)
+
+
+def test_settings_production_fails_closed_when_insecure_known_secret() -> None:
+    """Verifies that production fails closed on common insecure placeholders like 'changeme'."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            ENVIRONMENT="production",
+            SECRET_KEY=SecretStr("changeme"),
+        )
+    assert "SECRET_KEY must be configured" in str(exc_info.value)
+
+
+def test_settings_production_succeeds_with_valid_secure_secret() -> None:
+    """Verifies that production succeeds when a valid, non-default SECRET_KEY is provided."""
+    settings = Settings(
+        ENVIRONMENT="production",
+        SECRET_KEY=SecretStr("production-secure-entropy-key-9876543210"),
+    )
+    assert settings.ENVIRONMENT == "production"
+    assert settings.SECRET_KEY.get_secret_value() == "production-secure-entropy-key-9876543210"
+
+
+def test_settings_development_and_test_allow_default_secret() -> None:
+    """Verifies development and test environments allow default SECRET_KEY without error."""
+    dev_settings = Settings(
+        ENVIRONMENT="development",
+        SECRET_KEY=SecretStr("default-insecure-secret-key-change-in-production"),
+    )
+    assert dev_settings.ENVIRONMENT == "development"
+
+    test_settings = Settings(
+        ENVIRONMENT="test",
+        SECRET_KEY=SecretStr("default-insecure-secret-key-change-in-production"),
+    )
+    assert test_settings.ENVIRONMENT == "test"
 
 
 def test_settings_monetary_defaults_are_integer_paise() -> None:
