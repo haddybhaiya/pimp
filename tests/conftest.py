@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool
 
 # Force test environment before importing application
 os.environ["ENVIRONMENT"] = "test"
@@ -30,6 +31,8 @@ async def test_engine() -> AsyncGenerator[AsyncEngine, None]:
     """Creates an isolated in-memory SQLite engine with foreign key enforcement."""
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
         echo=False,
     )
 

@@ -3,13 +3,14 @@
 Adheres strictly to docs/tool-contract.md §1 and the mandatory Action Gateway pipeline.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_ready_merchant.agent.intent import ToolCallProposal
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.tools.base import BaseTool, GatewayContext
 from agent_ready_merchant.tools.handlers import (
@@ -21,6 +22,9 @@ from agent_ready_merchant.tools.handlers import (
     RequestPriceQuoteTool,
 )
 from agent_ready_merchant.tools.models import ToolExecutionResult
+
+if TYPE_CHECKING:
+    from agent_ready_merchant.agent.intent import ToolCallProposal
 
 logger = logging.getLogger("agent_ready_merchant.gateway")
 

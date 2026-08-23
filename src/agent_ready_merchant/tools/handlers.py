@@ -309,17 +309,7 @@ class NegotiateQuoteTool(BaseTool):
                 }
             }
 
-        # Transition to NEGOTIATING if PROPOSED
-        if quote.status == "PROPOSED":
-            await PriceQuoteStateMachine.transition(
-                session=session,
-                quote=quote,
-                target_state="NEGOTIATING",
-                expected_version=quote.version,
-                reason="Buyer counter-offer submitted",
-            )
-
-        # Build proposal for policy evaluation
+        # Build proposal for policy evaluation without mutating quote
         item_proposals = []
         for itm in quote.items:
             prod = itm.variant.product
@@ -355,6 +345,7 @@ class NegotiateQuoteTool(BaseTool):
         )
         eval_res = DeterministicPolicyEngine.evaluate_quote(proposal, policy_ctx)
 
+        # Fail closed on non-ALLOW verdicts with ZERO state or price mutations
         if eval_res.verdict != PolicyVerdict.ALLOW:
             if eval_res.verdict == PolicyVerdict.ESCALATE_APPROVAL:
                 return {
@@ -368,10 +359,15 @@ class NegotiateQuoteTool(BaseTool):
                 "message": f"Counter-offer rejected by policy: {eval_res.reason}",
             }
 
-        # Update quote with agreed discount and advance state
-        quote.discount_paise = calculated_discount
-        quote.total_paise = p.proposed_total_paise
-        quote.discount_reason = p.rationale or "Negotiated discount approved"
+        # ONLY upon explicit PolicyVerdict.ALLOW: advance FSM and mutate quote fields
+        if quote.status == "PROPOSED":
+            await PriceQuoteStateMachine.transition(
+                session=session,
+                quote=quote,
+                target_state="NEGOTIATING",
+                expected_version=quote.version,
+                reason="Buyer counter-offer accepted for revision",
+            )
 
         await PriceQuoteStateMachine.transition(
             session=session,
@@ -379,6 +375,11 @@ class NegotiateQuoteTool(BaseTool):
             target_state="PROPOSED",
             expected_version=quote.version,
             reason="Counter-offer accepted and quote revised",
+            additional_updates={
+                "discount_paise": calculated_discount,
+                "total_paise": p.proposed_total_paise,
+                "discount_reason": p.rationale or "Negotiated discount approved",
+            },
         )
         await session.flush()
 
