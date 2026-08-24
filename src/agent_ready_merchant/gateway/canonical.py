@@ -7,10 +7,10 @@ Adheres strictly to Phase 2.1 specifications:
 - Zero bypass around authorization, inventory reservations, policy, or audit
 """
 
-from __future__ import annotations
-
+import asyncio
 import hashlib
 import logging
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -21,6 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from agent_ready_merchant.config import get_settings
+from agent_ready_merchant.gateway.hardening import (
+    GatewayErrorCode,
+    global_idempotency_manager,
+    global_rate_limiter,
+    sanitize_error_response,
+    validate_payload_size,
+)
 from agent_ready_merchant.gateway.registry import CapabilityDefinition, CapabilityRegistry
 from agent_ready_merchant.gateway.representation import (
     MerchantAIRepresentation,
@@ -1557,94 +1564,208 @@ class CanonicalCommerceGateway:
         context: GatewayContext,
     ) -> GatewayResponseEnvelope[Any]:
         """Dispatches untrusted capability payload through strict validation and execution."""
+        start_time = time.time()
+        settings = get_settings()
+        request_id = context.request_id or uuid.uuid4()
+        idempotency_key = payload.get("idempotency_key") or context.idempotency_key
+
+        # 1. Check capability registration
         cap_def = CapabilityRegistry.get_capability(capability_name)
         if not cap_def:
             return self._rejected_envelope(
                 capability_name,
-                "UNKNOWN_CAPABILITY",
+                GatewayErrorCode.UNKNOWN_CAPABILITY.value,
                 f"Capability '{capability_name}' is not registered in the canonical registry.",
+                request_id=request_id,
             )
 
-        try:
-            if capability_name == "initialize_session":
-                req_sess = InitializeSessionRequest.model_validate(payload)
-                return await self.initialize_session(session, req_sess, context.merchant_id)
+        # 2. Bounded Payload Size Validation (Max 64 KB)
+        is_payload_valid, payload_size = validate_payload_size(payload)
+        if not is_payload_valid:
+            return self._error_envelope(
+                capability_name,
+                GatewayErrorCode.PAYLOAD_SIZE_EXCEEDED.value,
+                f"Payload size {payload_size} bytes exceeds maximum allowed limit (65536 bytes).",
+                request_id=request_id,
+            )
 
-            elif capability_name == "terminate_session":
-                req_term = TerminateSessionRequest.model_validate(payload)
-                return await self.terminate_session(session, req_term, context)
+        # 3. Sliding-Window Rate Limiting Check
+        client_key = str(context.session_id or context.merchant_id)
+        rate_limit = getattr(settings, "GATEWAY_RATE_LIMIT_PER_MINUTE", 60)
+        is_allowed, retry_after = await global_rate_limiter.check_rate_limit(
+            client_key=client_key,
+            limit=rate_limit,
+            window_seconds=60,
+        )
+        if not is_allowed:
+            return self._rejected_envelope(
+                capability_name,
+                GatewayErrorCode.RATE_LIMIT_EXCEEDED.value,
+                f"Rate limit exceeded for session. Retry after {retry_after} seconds.",
+                details={"retry_after_seconds": retry_after},
+                request_id=request_id,
+            )
 
-            elif capability_name == "discover_products":
-                req_disc = DiscoverProductsRequest.model_validate(payload)
-                return await self.discover_products(session, req_disc, context)
+        # 4. Idempotency Check
+        if idempotency_key:
+            cached_resp = await global_idempotency_manager.check_idempotency(
+                merchant_id=context.merchant_id,
+                session_id=context.session_id,
+                idempotency_key=idempotency_key,
+            )
+            if cached_resp is not None:
+                return cached_resp
 
-            elif capability_name == "get_product":
-                req_prod = GetProductRequest.model_validate(payload)
-                return await self.get_product(session, req_prod, context)
-
-            elif capability_name == "check_inventory":
-                req_inv = CheckInventoryRequest.model_validate(payload)
-                return await self.check_inventory(session, req_inv, context)
-
-            elif capability_name == "get_quote":
-                req_q = GetQuoteRequest.model_validate(payload)
-                return await self.get_quote(session, req_q, context)
-
-            elif capability_name == "negotiate_quote":
-                req_neg = NegotiateQuoteGatewayRequest.model_validate(payload)
-                return await self.negotiate_quote(session, req_neg, context)
-
-            elif capability_name == "accept_quote":
-                req_acc = AcceptQuoteGatewayRequest.model_validate(payload)
-                return await self.accept_quote(session, req_acc, context)
-
-            elif capability_name == "calculate_shipping":
-                req_ship = CalculateShippingRequest.model_validate(payload)
-                return await self.calculate_shipping(session, req_ship, context)
-
-            elif capability_name == "create_order":
-                req_ord = CreateOrderGatewayRequest.model_validate(payload)
-                return await self.create_order(session, req_ord, context)
-
-            elif capability_name == "request_checkout":
-                req_chk = RequestCheckoutRequest.model_validate(payload)
-                return await self.request_checkout(session, req_chk, context)
-
-            elif capability_name == "get_payment_status":
-                req_pay = GetPaymentStatusRequest.model_validate(payload)
-                return await self.get_payment_status(session, req_pay, context)
-
-            elif capability_name == "get_order_status":
-                req_ord_stat = GetOrderStatusRequest.model_validate(payload)
-                return await self.get_order_status(session, req_ord_stat, context)
-
-            else:
+            lock_acquired = await global_idempotency_manager.acquire_mutation_lock(
+                merchant_id=context.merchant_id,
+                session_id=context.session_id,
+                idempotency_key=idempotency_key,
+            )
+            if not lock_acquired:
                 return self._rejected_envelope(
                     capability_name,
-                    "UNHANDLED_CAPABILITY",
-                    f"Capability '{capability_name}' lacks a dispatcher mapping.",
+                    GatewayErrorCode.IDEMPOTENCY_CONFLICT.value,
+                    f"A request with idempotency key '{idempotency_key}' is currently executing.",
+                    request_id=request_id,
                 )
 
+        try:
+            # 5. Execute with Timeout Boundary (10.0 seconds default)
+            timeout_sec = getattr(settings, "GATEWAY_REQUEST_TIMEOUT_SECONDS", 10.0)
+            async with asyncio.timeout(timeout_sec):
+                result_envelope = await self._dispatch_internal(
+                    session=session,
+                    capability_name=capability_name,
+                    payload=payload,
+                    context=context,
+                )
+
+            # Ensure trace identifiers are populated
+            result_envelope.request_id = request_id
+            if idempotency_key and not result_envelope.idempotency_key:
+                result_envelope.idempotency_key = idempotency_key
+
+            # Record Idempotency Cache for successful/rejected mutations
+            if idempotency_key:
+                await global_idempotency_manager.record_idempotency(
+                    merchant_id=context.merchant_id,
+                    session_id=context.session_id,
+                    idempotency_key=idempotency_key,
+                    envelope=result_envelope,
+                )
+
+            return result_envelope
+
+        except TimeoutError:
+            logger.error(
+                "Timeout boundary exceeded during capability execution: %s",
+                capability_name,
+            )
+            return self._error_envelope(
+                capability_name,
+                GatewayErrorCode.TIMEOUT_BOUNDARY_EXCEEDED.value,
+                f"Execution timeout of {timeout_sec}s exceeded for capability '{capability_name}'.",
+                retryable=True,
+                request_id=request_id,
+            )
         except ValidationError as exc:
             logger.warning("Gateway payload validation failed for '%s': %s", capability_name, exc)
             return self._error_envelope(
                 capability_name,
-                "MALFORMED_REQUEST_SCHEMA",
+                GatewayErrorCode.MALFORMED_REQUEST_SCHEMA.value,
                 f"Schema validation error: {exc}",
                 retryable=True,
+                request_id=request_id,
             )
         except Exception as exc:
-            logger.error(
-                "Unexpected gateway execution failure in '%s': %s",
-                capability_name,
-                exc,
-                exc_info=True,
+            return sanitize_error_response(
+                capability=capability_name,
+                exc=exc,
+                request_id=request_id,
+                is_testing=settings.is_testing,
             )
-            return self._error_envelope(
+        finally:
+            if idempotency_key:
+                await global_idempotency_manager.release_mutation_lock(
+                    merchant_id=context.merchant_id,
+                    session_id=context.session_id,
+                    idempotency_key=idempotency_key,
+                )
+            duration_ms = (time.time() - start_time) * 1000.0
+            logger.debug(
+                "Gateway capability executed: capability=%s merchant_id=%s "
+                "session_id=%s duration_ms=%.2f",
                 capability_name,
-                "INTERNAL_GATEWAY_ERROR",
-                f"Internal gateway execution error: {exc}",
-                retryable=False,
+                context.merchant_id,
+                context.session_id,
+                duration_ms,
+            )
+
+    async def _dispatch_internal(
+        self,
+        session: AsyncSession,
+        capability_name: str,
+        payload: dict[str, Any],
+        context: GatewayContext,
+    ) -> GatewayResponseEnvelope[Any]:
+        """Internal router mapping validated capability calls to concrete methods."""
+        if capability_name == "initialize_session":
+            req_sess = InitializeSessionRequest.model_validate(payload)
+            return await self.initialize_session(session, req_sess, context.merchant_id)
+
+        elif capability_name == "terminate_session":
+            req_term = TerminateSessionRequest.model_validate(payload)
+            return await self.terminate_session(session, req_term, context)
+
+        elif capability_name == "discover_products":
+            req_disc = DiscoverProductsRequest.model_validate(payload)
+            return await self.discover_products(session, req_disc, context)
+
+        elif capability_name == "get_product":
+            req_prod = GetProductRequest.model_validate(payload)
+            return await self.get_product(session, req_prod, context)
+
+        elif capability_name == "check_inventory":
+            req_inv = CheckInventoryRequest.model_validate(payload)
+            return await self.check_inventory(session, req_inv, context)
+
+        elif capability_name == "get_quote":
+            req_q = GetQuoteRequest.model_validate(payload)
+            return await self.get_quote(session, req_q, context)
+
+        elif capability_name == "negotiate_quote":
+            req_neg = NegotiateQuoteGatewayRequest.model_validate(payload)
+            return await self.negotiate_quote(session, req_neg, context)
+
+        elif capability_name == "accept_quote":
+            req_acc = AcceptQuoteGatewayRequest.model_validate(payload)
+            return await self.accept_quote(session, req_acc, context)
+
+        elif capability_name == "calculate_shipping":
+            req_ship = CalculateShippingRequest.model_validate(payload)
+            return await self.calculate_shipping(session, req_ship, context)
+
+        elif capability_name == "create_order":
+            req_ord = CreateOrderGatewayRequest.model_validate(payload)
+            return await self.create_order(session, req_ord, context)
+
+        elif capability_name == "request_checkout":
+            req_chk = RequestCheckoutRequest.model_validate(payload)
+            return await self.request_checkout(session, req_chk, context)
+
+        elif capability_name == "get_payment_status":
+            req_pay = GetPaymentStatusRequest.model_validate(payload)
+            return await self.get_payment_status(session, req_pay, context)
+
+        elif capability_name == "get_order_status":
+            req_ord_stat = GetOrderStatusRequest.model_validate(payload)
+            return await self.get_order_status(session, req_ord_stat, context)
+
+        else:
+            return self._rejected_envelope(
+                capability_name,
+                "UNHANDLED_CAPABILITY",
+                f"Capability '{capability_name}' lacks a dispatcher mapping.",
             )
 
     # -------------------------------------------------------------------------
@@ -1656,12 +1777,16 @@ class CanonicalCommerceGateway:
         code: str,
         message: str,
         details: dict[str, Any] | None = None,
+        request_id: uuid.UUID | None = None,
+        idempotency_key: str | None = None,
     ) -> GatewayResponseEnvelope[Any]:
         return GatewayResponseEnvelope[Any](
             status="REJECTED",
             capability=capability,
             data=None,
             error=GatewayError(code=code, message=message, retryable=False, details=details),
+            request_id=request_id or uuid.uuid4(),
+            idempotency_key=idempotency_key,
         )
 
     def _error_envelope(
@@ -1671,10 +1796,14 @@ class CanonicalCommerceGateway:
         message: str,
         retryable: bool = False,
         details: dict[str, Any] | None = None,
+        request_id: uuid.UUID | None = None,
+        idempotency_key: str | None = None,
     ) -> GatewayResponseEnvelope[Any]:
         return GatewayResponseEnvelope[Any](
             status="ERROR",
             capability=capability,
             data=None,
             error=GatewayError(code=code, message=message, retryable=retryable, details=details),
+            request_id=request_id or uuid.uuid4(),
+            idempotency_key=idempotency_key,
         )

@@ -1,7 +1,9 @@
 """Canonical request, response, and envelope schemas for the Commerce Gateway.
 
-Adheres strictly to Phase 2.1 specifications:
+Adheres strictly to Phase 2.1 - 2.3 specifications:
 - Strict Pydantic models with extra="forbid"
+- Versioned canonical contract ("2026-03-01")
+- Request IDs and Idempotency Keys on mutations
 - Explicit UUID types and non-negative 64-bit integer paise
 - Deterministic response envelopes with state-oriented context
 - Zero leakage of internal ORM models or database credentials
@@ -16,6 +18,9 @@ from typing import Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 T = TypeVar("T")
+
+COMMERCE_PROTOCOL_VERSION: str = "2026-03-01"
+DEFAULT_MAX_PAYLOAD_BYTES: int = 65_536  # 64 KB bounded limit
 
 
 class GatewayError(BaseModel):
@@ -54,6 +59,14 @@ class GatewayResponseEnvelope(BaseModel, Generic[T]):
 
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: str = Field(
+        default=COMMERCE_PROTOCOL_VERSION,
+        description="Canonical commerce contract schema version",
+    )
+    request_id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        description="Unique request trace identifier",
+    )
     status: Literal["SUCCESS", "REJECTED", "ERROR"] = Field(
         ..., description="Overall execution outcome"
     )
@@ -71,6 +84,10 @@ class GatewayResponseEnvelope(BaseModel, Generic[T]):
     )
     audit_event_id: uuid.UUID | None = Field(
         default=None, description="Hash-chained audit event ID if state changed"
+    )
+    idempotency_key: str | None = Field(
+        default=None,
+        description="Client-supplied idempotency key if provided",
     )
 
 
@@ -233,6 +250,9 @@ class GetQuoteRequest(BaseModel):
     shipping_country: str = Field(
         default="IN", max_length=2, description="Target destination country"
     )
+    idempotency_key: str | None = Field(
+        default=None, max_length=128, description="Optional client idempotency key"
+    )
 
 
 class QuoteLineItemDetail(BaseModel):
@@ -339,6 +359,9 @@ class CreateOrderGatewayRequest(BaseModel):
         ...,
         description="Destination shipping address",
     )
+    idempotency_key: str | None = Field(
+        default=None, max_length=128, description="Optional client idempotency key"
+    )
 
 
 class CreateOrderGatewayResponse(BaseModel):
@@ -382,6 +405,9 @@ class RequestCheckoutRequest(BaseModel):
     )
     shipping_address: ShippingAddressGateway | None = Field(
         default=None, description="Required if creating order from quote"
+    )
+    idempotency_key: str | None = Field(
+        default=None, max_length=128, description="Optional client idempotency key"
     )
 
 
@@ -483,6 +509,9 @@ class InitializeSessionRequest(BaseModel):
         ],
         description="List of requested security capabilities",
     )
+    idempotency_key: str | None = Field(
+        default=None, max_length=128, description="Optional client idempotency key"
+    )
 
 
 class InitializeSessionResponse(BaseModel):
@@ -537,6 +566,9 @@ class NegotiateQuoteGatewayRequest(BaseModel):
     rationale: str | None = Field(
         default=None, max_length=500, description="Negotiation justification/rationale"
     )
+    idempotency_key: str | None = Field(
+        default=None, max_length=128, description="Optional client idempotency key"
+    )
 
 
 class NegotiateQuoteGatewayResponse(BaseModel):
@@ -567,6 +599,9 @@ class AcceptQuoteGatewayRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     quote_id: uuid.UUID = Field(..., description="ID of the PriceQuote to accept")
+    idempotency_key: str | None = Field(
+        default=None, max_length=128, description="Optional client idempotency key"
+    )
 
 
 class AcceptQuoteGatewayResponse(BaseModel):
