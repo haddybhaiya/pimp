@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from agent_ready_merchant.config import get_settings
+from agent_ready_merchant.db.concurrency import OptimisticLockError
 from agent_ready_merchant.gateway.hardening import (
     GatewayErrorCode,
     global_idempotency_manager,
@@ -70,6 +71,7 @@ from agent_ready_merchant.gateway.schemas import (
     VariantDetailItem,
 )
 from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
+from agent_ready_merchant.integrations.razorpay.exceptions import RazorpayError
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.order import Order
 from agent_ready_merchant.models.payment import PaymentAttempt
@@ -551,8 +553,10 @@ class CanonicalCommerceGateway:
                 )
                 prod = (await session.execute(prod_stmt)).scalar_one_or_none()
                 if prod and prod.variants:
-                    variant = prod.variants[0]
-                    variant.product = prod
+                    active_vars = [v for v in prod.variants if v.is_active]
+                    if active_vars:
+                        variant = active_vars[0]
+                        variant.product = prod
 
             if not variant or not variant.product.is_active:
                 return self._rejected_envelope(
@@ -562,16 +566,17 @@ class CanonicalCommerceGateway:
                 )
 
             inv = variant.inventory_item
-            if inv:
-                if inv.available_quantity < (req_item.quantity + inv.safety_threshold):
-                    return self._rejected_envelope(
-                        "get_quote",
-                        "INSUFFICIENT_STOCK",
-                        (
-                            f"Insufficient stock for SKU '{req_item.sku}': requested "
-                            f"{req_item.quantity}, available {inv.available_quantity}."
-                        ),
-                    )
+            safety_thresh = getattr(inv, "safety_threshold", 0) if inv else 0
+            if inv is None or inv.available_quantity < (req_item.quantity + safety_thresh):
+                avail_qty = inv.available_quantity if inv else 0
+                return self._rejected_envelope(
+                    "get_quote",
+                    "INSUFFICIENT_STOCK",
+                    (
+                        f"Insufficient stock for SKU '{req_item.sku}': requested "
+                        f"{req_item.quantity}, available {avail_qty}."
+                    ),
+                )
 
             unit_price = (
                 variant.price_override_paise
@@ -711,7 +716,7 @@ class CanonicalCommerceGateway:
                 entity_id=str(new_quote.id),
                 state="PROPOSED",
                 version=new_quote.version,
-                allowed_actions=["ACCEPT", "NEGOTIATE", "ABANDON"],
+                allowed_actions=["accept_quote", "negotiate_quote", "terminate_session"],
                 next_action="Accept quote or negotiate revised pricing before expiry",
                 expires_at=expires_at,
             ),
@@ -820,13 +825,22 @@ class CanonicalCommerceGateway:
             )
         except ValueError as exc:
             return self._rejected_envelope("create_order", "ORDER_CREATION_FAILED", str(exc))
+        except RazorpayError as exc:
+            return self._error_envelope(
+                "create_order",
+                GatewayErrorCode.COMMERCE_PAYMENT_GATEWAY_ERROR.value,
+                f"Razorpay payment gateway error: {exc}",
+                retryable=True,
+            )
+        except OptimisticLockError as exc:
+            return self._rejected_envelope("create_order", "CONCURRENCY_CONFLICT", str(exc))
 
         # Query audit event created
         audit_stmt = (
             select(AuditEvent)
             .where(
                 AuditEvent.merchant_id == context.merchant_id,
-                AuditEvent.event_type == "ORDER_CREATED",
+                AuditEvent.event_type.in_(["ORDER_CREATED", "ORDER_TRANSITION_PENDING_PAYMENT"]),
             )
             .order_by(AuditEvent.created_at.desc())
         )
@@ -915,11 +929,33 @@ class CanonicalCommerceGateway:
                 return self._rejected_envelope(
                     "request_checkout", "CHECKOUT_CREATION_FAILED", str(exc)
                 )
+            except RazorpayError as exc:
+                return self._error_envelope(
+                    "request_checkout",
+                    GatewayErrorCode.COMMERCE_PAYMENT_GATEWAY_ERROR.value,
+                    f"Razorpay payment gateway error: {exc}",
+                    retryable=True,
+                )
+            except OptimisticLockError as exc:
+                return self._rejected_envelope("request_checkout", "CONCURRENCY_CONFLICT", str(exc))
         else:
             return self._rejected_envelope(
                 "request_checkout",
                 "INVALID_PARAMETERS",
                 "Either order_id or quote_id must be provided to initiate checkout.",
+            )
+
+        if order.status in {"PAID", "COMPLETED"}:
+            return self._rejected_envelope(
+                "request_checkout",
+                "ORDER_ALREADY_PAID",
+                f"Order '{order.id}' is already paid.",
+            )
+        if order.status == "CANCELLED":
+            return self._rejected_envelope(
+                "request_checkout",
+                "ORDER_CANCELLED",
+                f"Order '{order.id}' has been cancelled.",
             )
 
         if not order.rzp_order_id:
@@ -1141,6 +1177,13 @@ class CanonicalCommerceGateway:
                 f"Session with ID '{request.session_id}' not found.",
             )
 
+        if sess.status in {"TERMINATED", "EXPIRED"}:
+            return self._rejected_envelope(
+                "terminate_session",
+                "SESSION_ALREADY_TERMINATED",
+                f"Session '{request.session_id}' is already {sess.status.lower()}.",
+            )
+
         sess.status = "TERMINATED"
         now = datetime.now(UTC)
         await session.flush()
@@ -1236,24 +1279,26 @@ class CanonicalCommerceGateway:
                 ),
             )
 
+        proposed_goods_paise = max(0, request.proposed_total_paise - quote.shipping_paise)
         item_proposals: list[QuoteItemProposal] = []
-        total_items = max(1, sum(itm.quantity for itm in quote.items))
         for itm in quote.items:
             prod = itm.variant.product
+            prop_share = itm.total_price_paise / max(1, quote.subtotal_paise)
+            item_proposed_total = int(proposed_goods_paise * prop_share)
+            item_proposed_unit = item_proposed_total // max(1, itm.quantity)
             item_proposals.append(
                 QuoteItemProposal(
                     sku=prod.sku,
                     quantity=itm.quantity,
-                    unit_base_price_paise=prod.base_price_paise,
+                    unit_base_price_paise=itm.unit_price_paise,
                     unit_floor_price_paise=prod.floor_price_paise,
-                    proposed_unit_price_paise=request.proposed_total_paise // total_items,
+                    proposed_unit_price_paise=item_proposed_unit,
                     unit_cost_price_paise=int(prod.floor_price_paise * 0.8),
                     is_negotiable=prod.is_negotiable,
                 )
             )
 
-        gross_before_discount = quote.subtotal_paise + quote.shipping_paise
-        calculated_discount = max(0, gross_before_discount - request.proposed_total_paise)
+        calculated_discount = max(0, quote.subtotal_paise - proposed_goods_paise)
         proposal = QuoteProposal(
             items=item_proposals,
             subtotal_paise=quote.subtotal_paise,
@@ -1268,7 +1313,9 @@ class CanonicalCommerceGateway:
             max_single_transaction_paise=context.max_single_transaction_paise,
             session_capabilities=context.capabilities,
         )
-        eval_res = DeterministicPolicyEngine.evaluate_quote(proposal, policy_ctx)
+        eval_res = DeterministicPolicyEngine.evaluate_quote(
+            proposal, policy_ctx, required_capability="buyer:negotiate"
+        )
 
         if eval_res.verdict == PolicyVerdict.DENY:
             return self._rejected_envelope(
@@ -1297,7 +1344,7 @@ class CanonicalCommerceGateway:
                 state=StateOrientedContext(
                     entity_type="PriceQuote",
                     entity_id=str(quote.id),
-                    state="PENDING_APPROVAL",
+                    state=quote.status,
                     version=quote.version,
                     allowed_actions=["get_quote", "terminate_session"],
                     next_action="Awaiting merchant approval for counter-offer",
@@ -1532,7 +1579,7 @@ class CanonicalCommerceGateway:
         allowed = []
         if order.status == "PENDING_PAYMENT":
             allowed = ["request_checkout", "get_payment_status"]
-        elif order.status in {"PAID", "COMPLETED"}:
+        elif order.status in {"PAID", "COMPLETED", "FULFILLMENT_PENDING"}:
             allowed = ["get_order_status"]
 
         return GatewayResponseEnvelope[GetOrderStatusResponse](
@@ -1548,7 +1595,11 @@ class CanonicalCommerceGateway:
                 next_action=(
                     "Order completed and settled"
                     if order.status in {"PAID", "COMPLETED"}
-                    else "Awaiting payment settlement"
+                    else (
+                        "Order paid and awaiting fulfillment"
+                        if order.status == "FULFILLMENT_PENDING"
+                        else "Awaiting payment settlement"
+                    )
                 ),
             ),
         )
@@ -1612,6 +1663,7 @@ class CanonicalCommerceGateway:
                 merchant_id=context.merchant_id,
                 session_id=context.session_id,
                 idempotency_key=idempotency_key,
+                capability=capability_name,
             )
             if cached_resp is not None:
                 return cached_resp
@@ -1620,6 +1672,7 @@ class CanonicalCommerceGateway:
                 merchant_id=context.merchant_id,
                 session_id=context.session_id,
                 idempotency_key=idempotency_key,
+                capability=capability_name,
             )
             if not lock_acquired:
                 return self._rejected_envelope(
@@ -1652,11 +1705,13 @@ class CanonicalCommerceGateway:
                     session_id=context.session_id,
                     idempotency_key=idempotency_key,
                     envelope=result_envelope,
+                    capability=capability_name,
                 )
 
             return result_envelope
 
         except TimeoutError:
+            await session.rollback()
             logger.error(
                 "Timeout boundary exceeded during capability execution: %s",
                 capability_name,
@@ -1674,10 +1729,11 @@ class CanonicalCommerceGateway:
                 capability_name,
                 GatewayErrorCode.MALFORMED_REQUEST_SCHEMA.value,
                 f"Schema validation error: {exc}",
-                retryable=True,
+                retryable=False,
                 request_id=request_id,
             )
         except Exception as exc:
+            await session.rollback()
             return sanitize_error_response(
                 capability=capability_name,
                 exc=exc,
@@ -1690,6 +1746,7 @@ class CanonicalCommerceGateway:
                     merchant_id=context.merchant_id,
                     session_id=context.session_id,
                     idempotency_key=idempotency_key,
+                    capability=capability_name,
                 )
             duration_ms = (time.time() - start_time) * 1000.0
             logger.debug(

@@ -101,6 +101,8 @@ class Settings(BaseSettings):
     # 6. Rate Limiting & Security Guards
     # --------------------------------------------------------------------------
     SESSION_RATE_LIMIT_PER_MINUTE: int = 20
+    GATEWAY_RATE_LIMIT_PER_MINUTE: int = 60
+    GATEWAY_REQUEST_TIMEOUT_SECONDS: float = 10.0
     MAX_ACTIVE_QUOTES_PER_BUYER: int = 3
     LOG_LEVEL: str = "INFO"
 

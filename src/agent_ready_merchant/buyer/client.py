@@ -542,13 +542,23 @@ class AIBuyerClient:
             signature_header=signature,
             webhook_secret=secret_str,
         )
-        self.context.current_state = BuyerCommerceState.PAYMENT_SUCCEEDED
-        self._record_step(
-            "authorize_test_payment",
-            "SUCCESS",
-            BuyerCommerceState.PAYMENT_SUCCEEDED.value,
-            {"payment_id": pay_id, "reco_status": reco_result.get("status")},
-        )
+        reco_status = reco_result.get("status") if isinstance(reco_result, dict) else None
+        if reco_status in {"PROCESSED", "DUPLICATE_IGNORED"}:
+            self.context.current_state = BuyerCommerceState.PAYMENT_SUCCEEDED
+            self._record_step(
+                "authorize_test_payment",
+                "SUCCESS",
+                BuyerCommerceState.PAYMENT_SUCCEEDED.value,
+                {"payment_id": pay_id, "reco_status": reco_status},
+            )
+        else:
+            self.context.current_failure = BuyerFailureState.PAYMENT_FAILED
+            self._record_step(
+                "authorize_test_payment",
+                "FAILED",
+                BuyerFailureState.PAYMENT_FAILED.value,
+                {"payment_id": pay_id, "reco_result": reco_result},
+            )
         return reco_result
 
     # -------------------------------------------------------------------------
@@ -727,7 +737,7 @@ class AIBuyerClient:
             final_state=final_state,
             quote_id=quote_id or self.context.active_quote_id,
             order_id=order_id or self.context.active_order_id,
-            amount_paise=self.context.active_quote_total_paise,
+            amount_paise=self.context.active_quote_total_paise if is_success else None,
             currency="INR",
             error_code=err_code,
             error_message=err_msg,
