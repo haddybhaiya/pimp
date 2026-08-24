@@ -20,6 +20,9 @@ class GatewayContext:
     max_discount_percentage: float = 15.0
     min_margin_percentage: float = 20.0
     max_single_transaction_paise: int = 5_000_000
+    request_id: uuid.UUID | None = None
+    idempotency_key: str | None = None
+    schema_version: str = "2026-03-01"
 
     def has_capability(self, required_cap: str | None) -> bool:
         if required_cap is None:
