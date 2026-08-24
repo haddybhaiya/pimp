@@ -117,6 +117,22 @@ class RequestCheckoutParams(BaseModel):
     shipping_address: ShippingAddressParam | None = Field(default=None)
 
 
+class AcceptQuoteParams(BaseModel):
+    """Parameters for accept_quote tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quote_id: uuid.UUID = Field(...)
+
+
+class GetOrderStatusParams(BaseModel):
+    """Parameters for get_order_status tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID = Field(...)
+
+
 class ToolExecutionResult(BaseModel):
     """Standardized envelope returned by tool execution."""
 
