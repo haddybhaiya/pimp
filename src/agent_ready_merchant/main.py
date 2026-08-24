@@ -293,6 +293,8 @@ def create_app() -> FastAPI:
         session_id: uuid.UUID | None,
         capabilities_hdr: str | None,
         settings: Settings,
+        request_id: uuid.UUID | None = None,
+        idempotency_key: str | None = None,
     ) -> GatewayContext:
         if capabilities_hdr:
             caps = {c.strip() for c in capabilities_hdr.split(",") if c.strip()}
@@ -313,6 +315,8 @@ def create_app() -> FastAPI:
             max_discount_percentage=settings.DEFAULT_MAX_DISCOUNT_PERCENTAGE,
             min_margin_percentage=settings.DEFAULT_MIN_MARGIN_PERCENTAGE,
             max_single_transaction_paise=settings.MAX_SINGLE_TRANSACTION_PAISE,
+            request_id=request_id or uuid.uuid4(),
+            idempotency_key=idempotency_key,
         )
 
     gateway_instance = CanonicalCommerceGateway()
@@ -586,6 +590,59 @@ def create_app() -> FastAPI:
         return await gateway_instance.get_order_status(
             db, GetOrderStatusRequest(order_id=order_id), ctx
         )
+
+    # =========================================================================
+    # Protocol Adapter Endpoints (Phase 2.3)
+    # =========================================================================
+    from agent_ready_merchant.protocols.acp import AgentCommerceProtocolAdapter
+    from agent_ready_merchant.protocols.base import (
+        ProtocolRequestMessage,
+        ProtocolResponseMessage,
+    )
+
+    acp_adapter = AgentCommerceProtocolAdapter()
+
+    @app.post(
+        "/api/v1/protocol/acp",
+        summary="Agent Commerce Protocol (ACP) Wire Endpoint",
+        tags=["Protocols"],
+        response_model=ProtocolResponseMessage,
+    )
+    async def acp_wire_endpoint(
+        msg: ProtocolRequestMessage,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
+        x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_request_id: uuid.UUID | None = Header(default=None, alias="X-Request-ID"),
+        x_idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> ProtocolResponseMessage:
+        """Translates ACP wire message to canonical gateway invocation and returns ACP response."""
+        req_id = msg.request_id or x_request_id or uuid.uuid4()
+        idemp_key = msg.idempotency_key or x_idempotency_key
+        ctx = _get_context(
+            merchant_id=x_merchant_id,
+            session_id=x_session_id,
+            capabilities_hdr=x_capabilities,
+            settings=current_settings,
+            request_id=req_id,
+            idempotency_key=idemp_key,
+        )
+
+        try:
+            capability, payload = acp_adapter.to_canonical_request(msg)
+        except ValueError as exc:
+            return acp_adapter.format_error_response(
+                error_code="INVALID_PROTOCOL_MESSAGE",
+                message=str(exc),
+                request_id=req_id,
+                action=msg.action,
+                retryable=False,
+            )
+
+        envelope = await gateway_instance.execute_capability(db, capability, payload, ctx)
+        return acp_adapter.from_canonical_envelope(capability, envelope, msg)
 
     return app
 

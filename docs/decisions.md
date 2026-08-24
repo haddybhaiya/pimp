@@ -90,4 +90,19 @@
   - *Positive:* Full autonomous commerce lifecycle support with zero bypass around authorization, inventory reservations, policy evaluation, or audit ledgers. Proven resilient against prompt injection, quote tampering, cross-tenant leaks, and concurrency races.
   - *Negative:* Autonomous buyers must strictly handle state transitions and retryable failure envelopes.
 
+---
+
+## ADR-009: Protocol Boundary, Adapter Interface & Production Hardening
+
+- **Status:** ACCEPTED
+- **Context:** External AI agent frameworks require a standardized protocol interface to consume merchant capabilities while insulating the core domain from protocol-specific churn and protecting against operational threats (replays, burst traffic, unbounded payloads, execution timeouts, secret leaks, and blind financial retries).
+- **Decision:**
+  1. Build replaceable `BaseProtocolAdapter` and concrete `AgentCommerceProtocolAdapter` (ACP) implementing `ProtocolRequestMessage` $\leftrightarrow$ `ProtocolResponseMessage` bidirectional translation without protocol bypass.
+  2. Implement `AgentProtocolClient` allowing autonomous agent systems to consume capabilities exclusively via protocol wire messages with safe retry policies (retrying safe reads and idempotent mutations while prohibiting blind retries on financial mutations).
+  3. Enforce contract versioning (`COMMERCE_PROTOCOL_VERSION = "2026-03-01"`), `request_id` end-to-end trace propagation, thread-safe `IdempotencyManager` deduplication, sliding-window `GatewayRateLimiter`, 64 KB `BoundedPayloadGuard`, execution timeout boundaries, structured observability, and safe error sanitization (`GatewayErrorCode.INTERNAL_GATEWAY_ERROR`) preventing database schema and secret leakage.
+- **Consequences:**
+  - *Positive:* Protocol-agnostic core domain; external protocol adapters are swappable without modifying canonical services; deterministic machine-readable errors; hardened against concurrent mutation races, replay attacks, and denial-of-service bursts.
+  - *Negative:* Additional translation hop between external wire messages and canonical gateway requests.
+
+
 
