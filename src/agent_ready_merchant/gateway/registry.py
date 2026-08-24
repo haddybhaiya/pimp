@@ -1,6 +1,6 @@
 """Canonical Capability Registry for the Commerce Gateway.
 
-Adheres strictly to Phase 2.1 specifications:
+Adheres strictly to Phase 2.1 & Phase 2.2 specifications:
 - Full capability metadata declaration (schemas, classification, side-effects, etc.)
 - Strict Pydantic models with extra="forbid"
 """
@@ -12,6 +12,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent_ready_merchant.gateway.schemas import (
+    AcceptQuoteGatewayRequest,
+    AcceptQuoteGatewayResponse,
     CalculateShippingRequest,
     CalculateShippingResponse,
     CheckInventoryRequest,
@@ -20,14 +22,22 @@ from agent_ready_merchant.gateway.schemas import (
     CreateOrderGatewayResponse,
     DiscoverProductsRequest,
     DiscoverProductsResponse,
+    GetOrderStatusRequest,
+    GetOrderStatusResponse,
     GetPaymentStatusRequest,
     GetPaymentStatusResponse,
     GetProductRequest,
     GetProductResponse,
     GetQuoteRequest,
     GetQuoteResponse,
+    InitializeSessionRequest,
+    InitializeSessionResponse,
+    NegotiateQuoteGatewayRequest,
+    NegotiateQuoteGatewayResponse,
     RequestCheckoutRequest,
     RequestCheckoutResponse,
+    TerminateSessionRequest,
+    TerminateSessionResponse,
 )
 from agent_ready_merchant.tools.base import GatewayContext
 
@@ -64,6 +74,36 @@ class CapabilityRegistry:
     """Central registry and catalog for all canonical merchant gateway capabilities."""
 
     _CAPABILITIES: dict[str, CapabilityDefinition] = {
+        "initialize_session": CapabilityDefinition(
+            name="initialize_session",
+            description="Initialize an authoritative buyer agent session with the merchant.",
+            input_schema_name="InitializeSessionRequest",
+            output_schema_name="InitializeSessionResponse",
+            input_schema=InitializeSessionRequest.model_json_schema(),
+            output_schema=InitializeSessionResponse.model_json_schema(),
+            classification="TRANSIENT_STATE",
+            side_effects=["creates_buyer_session", "appends_audit_event"],
+            monetary_impact=False,
+            required_capability="buyer:discover",
+            approval_requirement="NONE",
+            idempotency_requirement=False,
+            failure_states=["INVALID_MERCHANT", "UNAUTHORIZED"],
+        ),
+        "terminate_session": CapabilityDefinition(
+            name="terminate_session",
+            description="Terminate an active buyer agent session with the merchant.",
+            input_schema_name="TerminateSessionRequest",
+            output_schema_name="TerminateSessionResponse",
+            input_schema=TerminateSessionRequest.model_json_schema(),
+            output_schema=TerminateSessionResponse.model_json_schema(),
+            classification="TRANSIENT_STATE",
+            side_effects=["terminates_buyer_session", "appends_audit_event"],
+            monetary_impact=False,
+            required_capability="buyer:discover",
+            approval_requirement="NONE",
+            idempotency_requirement=False,
+            failure_states=["SESSION_NOT_FOUND", "UNAUTHORIZED"],
+        ),
         "discover_products": CapabilityDefinition(
             name="discover_products",
             description="Search and filter catalog products by query, category, and price.",
@@ -129,6 +169,48 @@ class CapabilityRegistry:
                 "QUOTE_EXPIRED",
                 "FLOOR_PRICE_BREACH",
                 "MAX_DISCOUNT_EXCEEDED",
+                "UNAUTHORIZED",
+            ],
+        ),
+        "negotiate_quote": CapabilityDefinition(
+            name="negotiate_quote",
+            description="Submit a counter-offer against an active PriceQuote for evaluation.",
+            input_schema_name="NegotiateQuoteGatewayRequest",
+            output_schema_name="NegotiateQuoteGatewayResponse",
+            input_schema=NegotiateQuoteGatewayRequest.model_json_schema(),
+            output_schema=NegotiateQuoteGatewayResponse.model_json_schema(),
+            classification="TRANSIENT_STATE",
+            side_effects=["transitions_quote_state", "appends_audit_event"],
+            monetary_impact=True,
+            required_capability="buyer:negotiate",
+            approval_requirement="ESCALATE_IF_EXCEEDS_DISCOUNT_OR_BELOW_MARGIN",
+            idempotency_requirement=True,
+            failure_states=[
+                "QUOTE_NOT_FOUND",
+                "QUOTE_EXPIRED",
+                "FLOOR_PRICE_BREACH",
+                "MAX_DISCOUNT_EXCEEDED",
+                "POLICY_REJECTED",
+                "UNAUTHORIZED",
+            ],
+        ),
+        "accept_quote": CapabilityDefinition(
+            name="accept_quote",
+            description="Accept an active proposed PriceQuote to prepare for checkout.",
+            input_schema_name="AcceptQuoteGatewayRequest",
+            output_schema_name="AcceptQuoteGatewayResponse",
+            input_schema=AcceptQuoteGatewayRequest.model_json_schema(),
+            output_schema=AcceptQuoteGatewayResponse.model_json_schema(),
+            classification="TRANSIENT_STATE",
+            side_effects=["transitions_quote_state", "appends_audit_event"],
+            monetary_impact=True,
+            required_capability="buyer:quote",
+            approval_requirement="NONE",
+            idempotency_requirement=True,
+            failure_states=[
+                "QUOTE_NOT_FOUND",
+                "QUOTE_EXPIRED",
+                "INVALID_STATE_TRANSITION",
                 "UNAUTHORIZED",
             ],
         ),
@@ -211,6 +293,21 @@ class CapabilityRegistry:
             side_effects=["none"],
             monetary_impact=True,
             required_capability="buyer:payment_status",
+            approval_requirement="NONE",
+            idempotency_requirement=False,
+            failure_states=["ORDER_NOT_FOUND", "UNAUTHORIZED"],
+        ),
+        "get_order_status": CapabilityDefinition(
+            name="get_order_status",
+            description="Retrieve order details, shipping information, and settlement state.",
+            input_schema_name="GetOrderStatusRequest",
+            output_schema_name="GetOrderStatusResponse",
+            input_schema=GetOrderStatusRequest.model_json_schema(),
+            output_schema=GetOrderStatusResponse.model_json_schema(),
+            classification="READ_ONLY",
+            side_effects=["none"],
+            monetary_impact=True,
+            required_capability="buyer:read",
             approval_requirement="NONE",
             idempotency_requirement=False,
             failure_states=["ORDER_NOT_FOUND", "UNAUTHORIZED"],

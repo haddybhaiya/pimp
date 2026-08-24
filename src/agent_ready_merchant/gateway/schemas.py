@@ -453,3 +453,162 @@ class GetPaymentStatusResponse(BaseModel):
     settled_at: datetime | None = Field(
         default=None, description="Settlement timestamp if order is paid"
     )
+
+
+# -----------------------------------------------------------------------------
+# 9. Session Lifecycle Schemas
+# -----------------------------------------------------------------------------
+class InitializeSessionRequest(BaseModel):
+    """Request parameter to initialize an authoritative buyer agent session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    buyer_agent_identifier: str = Field(
+        ..., min_length=1, max_length=255, description="Unique buyer agent identifier"
+    )
+    auth_token_raw: str | None = Field(
+        default=None, min_length=8, description="Optional raw token to hash for session auth"
+    )
+    duration_minutes: int = Field(
+        default=60, ge=5, le=1440, description="Session validity duration in minutes"
+    )
+    requested_capabilities: list[str] = Field(
+        default_factory=lambda: [
+            "buyer:discover",
+            "buyer:read",
+            "buyer:quote",
+            "buyer:negotiate",
+            "buyer:checkout",
+            "buyer:payment_status",
+        ],
+        description="List of requested security capabilities",
+    )
+
+
+class InitializeSessionResponse(BaseModel):
+    """Created buyer agent session metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: uuid.UUID = Field(..., description="Authoritative session identifier")
+    merchant_id: uuid.UUID = Field(..., description="Target merchant identifier")
+    buyer_agent_identifier: str = Field(..., description="Registered buyer agent identity")
+    status: str = Field(default="ACTIVE", description="Session state (ACTIVE, EXPIRED, TERMINATED)")
+    granted_capabilities: list[str] = Field(..., description="Authorized capabilities for session")
+    auth_token_hash: str = Field(..., description="Cryptographic SHA-256 hash of auth token")
+    expires_at: datetime = Field(..., description="Session expiration timestamp")
+    created_at: datetime = Field(..., description="Session initialization timestamp")
+
+
+class TerminateSessionRequest(BaseModel):
+    """Request parameter to explicitly terminate an active buyer agent session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: uuid.UUID = Field(..., description="Session identifier to terminate")
+    reason: str | None = Field(
+        default="Buyer session completed normally",
+        description="Termination rationale",
+    )
+
+
+class TerminateSessionResponse(BaseModel):
+    """Session termination confirmation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: uuid.UUID = Field(..., description="Terminated session ID")
+    status: str = Field(default="TERMINATED", description="Updated session status")
+    terminated_at: datetime = Field(..., description="Timestamp of termination")
+
+
+# -----------------------------------------------------------------------------
+# 10. Bounded Quote Negotiation & Acceptance Schemas
+# -----------------------------------------------------------------------------
+class NegotiateQuoteGatewayRequest(BaseModel):
+    """Request parameter to submit a counter-offer against an active PriceQuote."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quote_id: uuid.UUID = Field(..., description="ID of the PriceQuote to negotiate")
+    proposed_total_paise: int = Field(
+        ..., gt=0, description="Buyer proposed total price in integer paise"
+    )
+    rationale: str | None = Field(
+        default=None, max_length=500, description="Negotiation justification/rationale"
+    )
+
+
+class NegotiateQuoteGatewayResponse(BaseModel):
+    """Authoritative outcome of quote negotiation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quote_id: uuid.UUID = Field(..., description="Negotiated quote ID")
+    status: str = Field(
+        ..., description="Quote status after negotiation (e.g. PROPOSED, PENDING_APPROVAL)"
+    )
+    currency: str = Field(default="INR", description="Currency code")
+    subtotal_paise: int = Field(..., ge=0, description="Subtotal before discounts")
+    discount_paise: int = Field(..., ge=0, description="Applied discount in paise")
+    shipping_paise: int = Field(..., ge=0, description="Shipping cost in paise")
+    total_paise: int = Field(..., gt=0, description="Effective total in paise")
+    verdict: str = Field(
+        ..., description="Policy evaluation verdict (ALLOW, ESCALATE_APPROVAL, DENY)"
+    )
+    rule_code: str | None = Field(default=None, description="Triggered policy rule code if any")
+    reason: str | None = Field(default=None, description="Policy evaluation reason or requirement")
+    expires_at: datetime = Field(..., description="Quote expiration timestamp")
+
+
+class AcceptQuoteGatewayRequest(BaseModel):
+    """Request parameter to accept a binding proposed PriceQuote."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quote_id: uuid.UUID = Field(..., description="ID of the PriceQuote to accept")
+
+
+class AcceptQuoteGatewayResponse(BaseModel):
+    """Quote acceptance confirmation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quote_id: uuid.UUID = Field(..., description="Accepted quote ID")
+    status: str = Field(default="ACCEPTED", description="Authoritative quote status (ACCEPTED)")
+    total_paise: int = Field(..., gt=0, description="Final accepted total in paise")
+    currency: str = Field(default="INR", description="Currency standard (INR)")
+    accepted_at: datetime = Field(..., description="Acceptance timestamp")
+    expires_at: datetime = Field(..., description="Quote expiration timestamp")
+
+
+# -----------------------------------------------------------------------------
+# 11. get_order_status
+# -----------------------------------------------------------------------------
+class GetOrderStatusRequest(BaseModel):
+    """Request parameter to query authoritative order details and status."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID = Field(..., description="Merchant order ID to query")
+
+
+class GetOrderStatusResponse(BaseModel):
+    """Authoritative order status and details."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID = Field(..., description="Unique merchant order identifier")
+    quote_id: uuid.UUID = Field(..., description="Originating quote ID")
+    status: str = Field(..., description="Order state (e.g. PAID, PENDING_PAYMENT, COMPLETED)")
+    amount_paise: int = Field(..., gt=0, description="Total order amount in paise")
+    currency: str = Field(default="INR", description="Currency standard (INR)")
+    buyer_email: str = Field(..., description="Buyer notification email")
+    rzp_order_id: str | None = Field(default=None, description="Associated Razorpay order ID")
+    shipping_address: ShippingAddressGateway = Field(
+        ..., description="Destination shipping address"
+    )
+    created_at: datetime = Field(..., description="Order creation timestamp")
+    is_settled: bool = Field(
+        ..., description="Whether payment for this order is captured and settled"
+    )

@@ -9,6 +9,7 @@ Adheres strictly to Phase 2.1 specifications:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -26,6 +27,8 @@ from agent_ready_merchant.gateway.representation import (
     build_merchant_representation,
 )
 from agent_ready_merchant.gateway.schemas import (
+    AcceptQuoteGatewayRequest,
+    AcceptQuoteGatewayResponse,
     CalculateShippingRequest,
     CalculateShippingResponse,
     CheckInventoryRequest,
@@ -36,18 +39,27 @@ from agent_ready_merchant.gateway.schemas import (
     DiscoverProductsResponse,
     GatewayError,
     GatewayResponseEnvelope,
+    GetOrderStatusRequest,
+    GetOrderStatusResponse,
     GetPaymentStatusRequest,
     GetPaymentStatusResponse,
     GetProductRequest,
     GetProductResponse,
     GetQuoteRequest,
     GetQuoteResponse,
+    InitializeSessionRequest,
+    InitializeSessionResponse,
+    NegotiateQuoteGatewayRequest,
+    NegotiateQuoteGatewayResponse,
     PaymentAttemptItem,
     ProductSummaryItem,
     QuoteLineItemDetail,
     RequestCheckoutRequest,
     RequestCheckoutResponse,
+    ShippingAddressGateway,
     StateOrientedContext,
+    TerminateSessionRequest,
+    TerminateSessionResponse,
     VariantDetailItem,
 )
 from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
@@ -56,6 +68,7 @@ from agent_ready_merchant.models.order import Order
 from agent_ready_merchant.models.payment import PaymentAttempt
 from agent_ready_merchant.models.product import Product, ProductVariant
 from agent_ready_merchant.models.quote import PriceQuote, QuoteItem
+from agent_ready_merchant.models.session import BuyerAgentSession
 from agent_ready_merchant.policy.engine import DeterministicPolicyEngine
 from agent_ready_merchant.policy.models import (
     PolicyContext,
@@ -64,6 +77,7 @@ from agent_ready_merchant.policy.models import (
     QuoteProposal,
 )
 from agent_ready_merchant.services.payment_service import PaymentService
+from agent_ready_merchant.state_machines.price_quote import PriceQuoteStateMachine
 from agent_ready_merchant.tools.base import GatewayContext
 from agent_ready_merchant.tools.gateway import ToolGateway
 
@@ -1024,6 +1038,515 @@ class CanonicalCommerceGateway:
         )
 
     # -------------------------------------------------------------------------
+    # 9. Session Lifecycle: initialize_session & terminate_session
+    # -------------------------------------------------------------------------
+    async def initialize_session(
+        self,
+        session: AsyncSession,
+        request: InitializeSessionRequest,
+        merchant_id: uuid.UUID,
+    ) -> GatewayResponseEnvelope[InitializeSessionResponse]:
+        """Initializes a new authoritative BuyerAgentSession for an external AI buyer."""
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(minutes=request.duration_minutes)
+        raw_token = request.auth_token_raw or f"token_{uuid.uuid4().hex}"
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+        buyer_session = BuyerAgentSession(
+            merchant_id=merchant_id,
+            buyer_agent_identifier=request.buyer_agent_identifier,
+            auth_token_hash=token_hash,
+            status="ACTIVE",
+            expires_at=expires_at,
+        )
+        session.add(buyer_session)
+        await session.flush()
+
+        audit_event = await AuditEvent.create_event(
+            session=session,
+            merchant_id=merchant_id,
+            actor_type="BUYER_AGENT",
+            event_type="BUYER_SESSION_INITIALIZED",
+            payload={
+                "session_id": str(buyer_session.id),
+                "buyer_agent_identifier": request.buyer_agent_identifier,
+                "expires_at": expires_at.isoformat(),
+            },
+            session_id=buyer_session.id,
+        )
+
+        resp_data = InitializeSessionResponse(
+            session_id=buyer_session.id,
+            merchant_id=merchant_id,
+            buyer_agent_identifier=request.buyer_agent_identifier,
+            status="ACTIVE",
+            granted_capabilities=request.requested_capabilities,
+            auth_token_hash=token_hash,
+            expires_at=expires_at,
+            created_at=buyer_session.created_at or now,
+        )
+        return GatewayResponseEnvelope[InitializeSessionResponse](
+            status="SUCCESS",
+            capability="initialize_session",
+            data=resp_data,
+            audit_event_id=audit_event.id,
+            state=StateOrientedContext(
+                entity_type="BuyerAgentSession",
+                entity_id=str(buyer_session.id),
+                state="ACTIVE",
+                allowed_actions=[
+                    "discover_products",
+                    "get_product",
+                    "check_inventory",
+                    "get_quote",
+                ],
+                next_action="Discover catalog products or query specific SKUs",
+                expires_at=expires_at,
+            ),
+        )
+
+    async def terminate_session(
+        self,
+        session: AsyncSession,
+        request: TerminateSessionRequest,
+        context: GatewayContext,
+    ) -> GatewayResponseEnvelope[TerminateSessionResponse]:
+        """Terminates an active BuyerAgentSession."""
+        if request.session_id != context.session_id:
+            return self._rejected_envelope(
+                "terminate_session",
+                "UNAUTHORIZED_SESSION",
+                (
+                    f"Session ID '{request.session_id}' does not match "
+                    f"active gateway session '{context.session_id}'."
+                ),
+            )
+
+        stmt = select(BuyerAgentSession).where(
+            BuyerAgentSession.id == request.session_id,
+            BuyerAgentSession.merchant_id == context.merchant_id,
+        )
+        sess = (await session.execute(stmt)).scalar_one_or_none()
+        if not sess:
+            return self._rejected_envelope(
+                "terminate_session",
+                "SESSION_NOT_FOUND",
+                f"Session with ID '{request.session_id}' not found.",
+            )
+
+        sess.status = "TERMINATED"
+        now = datetime.now(UTC)
+        await session.flush()
+
+        audit_event = await AuditEvent.create_event(
+            session=session,
+            merchant_id=context.merchant_id,
+            actor_type="BUYER_AGENT",
+            event_type="BUYER_SESSION_TERMINATED",
+            payload={
+                "session_id": str(sess.id),
+                "reason": request.reason,
+            },
+            session_id=sess.id,
+        )
+
+        resp_data = TerminateSessionResponse(
+            session_id=sess.id,
+            status="TERMINATED",
+            terminated_at=now,
+        )
+        return GatewayResponseEnvelope[TerminateSessionResponse](
+            status="SUCCESS",
+            capability="terminate_session",
+            data=resp_data,
+            audit_event_id=audit_event.id,
+            state=StateOrientedContext(
+                entity_type="BuyerAgentSession",
+                entity_id=str(sess.id),
+                state="TERMINATED",
+                allowed_actions=[],
+                next_action="Session terminated; no further actions permitted",
+            ),
+        )
+
+    # -------------------------------------------------------------------------
+    # 10. Quote Negotiation & Acceptance
+    # -------------------------------------------------------------------------
+    async def negotiate_quote(
+        self,
+        session: AsyncSession,
+        request: NegotiateQuoteGatewayRequest,
+        context: GatewayContext,
+    ) -> GatewayResponseEnvelope[NegotiateQuoteGatewayResponse]:
+        """Submits a bounded price counter-offer against an active PriceQuote."""
+        auth_ok, auth_err = CapabilityRegistry.check_authorization("negotiate_quote", context)
+        if not auth_ok:
+            return self._rejected_envelope(
+                "negotiate_quote", "CAPABILITY_DENIED", auth_err or "Unauthorized"
+            )
+
+        stmt = (
+            select(PriceQuote)
+            .options(
+                selectinload(PriceQuote.items)
+                .selectinload(QuoteItem.variant)
+                .selectinload(ProductVariant.product)
+            )
+            .where(
+                PriceQuote.id == request.quote_id,
+                PriceQuote.merchant_id == context.merchant_id,
+                PriceQuote.session_id == context.session_id,
+            )
+        )
+        quote = (await session.execute(stmt)).scalar_one_or_none()
+        if not quote:
+            return self._rejected_envelope(
+                "negotiate_quote",
+                "QUOTE_NOT_FOUND",
+                f"PriceQuote '{request.quote_id}' not found for active merchant and session.",
+            )
+
+        now = datetime.now(UTC)
+        quote_expires = (
+            quote.expires_at
+            if quote.expires_at.tzinfo is not None
+            else quote.expires_at.replace(tzinfo=UTC)
+        )
+        if now > quote_expires:
+            return self._rejected_envelope(
+                "negotiate_quote",
+                "QUOTE_EXPIRED",
+                f"PriceQuote '{request.quote_id}' expired at {quote_expires.isoformat()}.",
+            )
+
+        if quote.status not in {"PROPOSED", "NEGOTIATING"}:
+            return self._rejected_envelope(
+                "negotiate_quote",
+                "INVALID_STATE",
+                (
+                    f"Cannot negotiate quote in status '{quote.status}', "
+                    "must be 'PROPOSED' or 'NEGOTIATING'."
+                ),
+            )
+
+        item_proposals: list[QuoteItemProposal] = []
+        total_items = max(1, sum(itm.quantity for itm in quote.items))
+        for itm in quote.items:
+            prod = itm.variant.product
+            item_proposals.append(
+                QuoteItemProposal(
+                    sku=prod.sku,
+                    quantity=itm.quantity,
+                    unit_base_price_paise=prod.base_price_paise,
+                    unit_floor_price_paise=prod.floor_price_paise,
+                    proposed_unit_price_paise=request.proposed_total_paise // total_items,
+                    unit_cost_price_paise=int(prod.floor_price_paise * 0.8),
+                    is_negotiable=prod.is_negotiable,
+                )
+            )
+
+        gross_before_discount = quote.subtotal_paise + quote.shipping_paise
+        calculated_discount = max(0, gross_before_discount - request.proposed_total_paise)
+        proposal = QuoteProposal(
+            items=item_proposals,
+            subtotal_paise=quote.subtotal_paise,
+            discount_paise=calculated_discount,
+            shipping_paise=quote.shipping_paise,
+            total_paise=request.proposed_total_paise,
+        )
+        policy_ctx = PolicyContext(
+            merchant_autonomy_level=context.autonomy_level,
+            max_discount_percentage=context.max_discount_percentage,
+            min_margin_percentage=context.min_margin_percentage,
+            max_single_transaction_paise=context.max_single_transaction_paise,
+            session_capabilities=context.capabilities,
+        )
+        eval_res = DeterministicPolicyEngine.evaluate_quote(proposal, policy_ctx)
+
+        if eval_res.verdict == PolicyVerdict.DENY:
+            return self._rejected_envelope(
+                "negotiate_quote",
+                eval_res.rule_code or "POLICY_REJECTED",
+                f"Counter-offer rejected by policy: {eval_res.reason}",
+            )
+        elif eval_res.verdict == PolicyVerdict.ESCALATE_APPROVAL:
+            resp_data = NegotiateQuoteGatewayResponse(
+                quote_id=quote.id,
+                status="PENDING_APPROVAL",
+                currency="INR",
+                subtotal_paise=quote.subtotal_paise,
+                discount_paise=quote.discount_paise,
+                shipping_paise=quote.shipping_paise,
+                total_paise=quote.total_paise,
+                verdict="ESCALATE_APPROVAL",
+                rule_code=eval_res.rule_code,
+                reason=f"Counter-offer requires merchant human approval: {eval_res.reason}",
+                expires_at=quote.expires_at,
+            )
+            return GatewayResponseEnvelope[NegotiateQuoteGatewayResponse](
+                status="SUCCESS",
+                capability="negotiate_quote",
+                data=resp_data,
+                state=StateOrientedContext(
+                    entity_type="PriceQuote",
+                    entity_id=str(quote.id),
+                    state="PENDING_APPROVAL",
+                    version=quote.version,
+                    allowed_actions=["get_quote", "terminate_session"],
+                    next_action="Awaiting merchant approval for counter-offer",
+                    expires_at=quote.expires_at,
+                ),
+            )
+
+        # Policy ALLOW: advance quote state
+        if quote.status == "PROPOSED":
+            await PriceQuoteStateMachine.transition(
+                session=session,
+                quote=quote,
+                target_state="NEGOTIATING",
+                expected_version=quote.version,
+                actor_type="BUYER_AGENT",
+                reason="Buyer counter-offer submitted",
+            )
+        await PriceQuoteStateMachine.transition(
+            session=session,
+            quote=quote,
+            target_state="PROPOSED",
+            expected_version=quote.version,
+            actor_type="BUYER_AGENT",
+            reason="Counter-offer accepted by policy",
+            additional_updates={
+                "discount_paise": calculated_discount,
+                "total_paise": request.proposed_total_paise,
+                "discount_reason": request.rationale or "Negotiated discount approved",
+            },
+        )
+        await session.flush()
+
+        audit_event = await AuditEvent.create_event(
+            session=session,
+            merchant_id=context.merchant_id,
+            actor_type="BUYER_AGENT",
+            event_type="PRICE_QUOTE_NEGOTIATED",
+            payload={
+                "quote_id": str(quote.id),
+                "proposed_total_paise": request.proposed_total_paise,
+                "discount_paise": calculated_discount,
+                "verdict": "ALLOW",
+            },
+            session_id=context.session_id,
+        )
+
+        resp_data = NegotiateQuoteGatewayResponse(
+            quote_id=quote.id,
+            status="PROPOSED",
+            currency="INR",
+            subtotal_paise=quote.subtotal_paise,
+            discount_paise=calculated_discount,
+            shipping_paise=quote.shipping_paise,
+            total_paise=request.proposed_total_paise,
+            verdict="ALLOW",
+            rule_code=eval_res.rule_code,
+            reason="Counter-offer within authorized autonomy bounds",
+            expires_at=quote.expires_at,
+        )
+        return GatewayResponseEnvelope[NegotiateQuoteGatewayResponse](
+            status="SUCCESS",
+            capability="negotiate_quote",
+            data=resp_data,
+            audit_event_id=audit_event.id,
+            state=StateOrientedContext(
+                entity_type="PriceQuote",
+                entity_id=str(quote.id),
+                state="PROPOSED",
+                version=quote.version,
+                allowed_actions=["accept_quote", "negotiate_quote", "get_quote"],
+                next_action="Accept negotiated quote or propose alternative terms before expiry",
+                expires_at=quote.expires_at,
+            ),
+        )
+
+    async def accept_quote(
+        self,
+        session: AsyncSession,
+        request: AcceptQuoteGatewayRequest,
+        context: GatewayContext,
+    ) -> GatewayResponseEnvelope[AcceptQuoteGatewayResponse]:
+        """Accepts an active PROPOSED PriceQuote and locks terms for checkout."""
+        auth_ok, auth_err = CapabilityRegistry.check_authorization("accept_quote", context)
+        if not auth_ok:
+            return self._rejected_envelope(
+                "accept_quote", "CAPABILITY_DENIED", auth_err or "Unauthorized"
+            )
+
+        stmt = select(PriceQuote).where(
+            PriceQuote.id == request.quote_id,
+            PriceQuote.merchant_id == context.merchant_id,
+            PriceQuote.session_id == context.session_id,
+        )
+        quote = (await session.execute(stmt)).scalar_one_or_none()
+        if not quote:
+            return self._rejected_envelope(
+                "accept_quote",
+                "QUOTE_NOT_FOUND",
+                f"PriceQuote '{request.quote_id}' not found for active merchant and session.",
+            )
+
+        now = datetime.now(UTC)
+        quote_expires = (
+            quote.expires_at
+            if quote.expires_at.tzinfo is not None
+            else quote.expires_at.replace(tzinfo=UTC)
+        )
+        if now > quote_expires:
+            return self._rejected_envelope(
+                "accept_quote",
+                "QUOTE_EXPIRED",
+                f"PriceQuote '{request.quote_id}' expired at {quote_expires.isoformat()}.",
+            )
+
+        if quote.status == "ACCEPTED":
+            resp_data = AcceptQuoteGatewayResponse(
+                quote_id=quote.id,
+                status="ACCEPTED",
+                total_paise=quote.total_paise,
+                currency="INR",
+                accepted_at=now,
+                expires_at=quote.expires_at,
+            )
+            return GatewayResponseEnvelope[AcceptQuoteGatewayResponse](
+                status="SUCCESS",
+                capability="accept_quote",
+                data=resp_data,
+                state=StateOrientedContext(
+                    entity_type="PriceQuote",
+                    entity_id=str(quote.id),
+                    state="ACCEPTED",
+                    version=quote.version,
+                    allowed_actions=["create_order", "request_checkout"],
+                    next_action="Proceed to create order or checkout",
+                    expires_at=quote.expires_at,
+                ),
+            )
+
+        if quote.status != "PROPOSED":
+            return self._rejected_envelope(
+                "accept_quote",
+                "INVALID_STATE_TRANSITION",
+                f"Cannot accept quote in state '{quote.status}', must be 'PROPOSED'.",
+            )
+
+        await PriceQuoteStateMachine.transition(
+            session=session,
+            quote=quote,
+            target_state="ACCEPTED",
+            expected_version=quote.version,
+            actor_type="BUYER_AGENT",
+            reason="Buyer agent accepted quote terms",
+        )
+        await session.flush()
+
+        audit_event = await AuditEvent.create_event(
+            session=session,
+            merchant_id=context.merchant_id,
+            actor_type="BUYER_AGENT",
+            event_type="PRICE_QUOTE_ACCEPTED",
+            payload={
+                "quote_id": str(quote.id),
+                "total_paise": quote.total_paise,
+            },
+            session_id=context.session_id,
+        )
+
+        resp_data = AcceptQuoteGatewayResponse(
+            quote_id=quote.id,
+            status="ACCEPTED",
+            total_paise=quote.total_paise,
+            currency="INR",
+            accepted_at=now,
+            expires_at=quote.expires_at,
+        )
+        return GatewayResponseEnvelope[AcceptQuoteGatewayResponse](
+            status="SUCCESS",
+            capability="accept_quote",
+            data=resp_data,
+            audit_event_id=audit_event.id,
+            state=StateOrientedContext(
+                entity_type="PriceQuote",
+                entity_id=str(quote.id),
+                state="ACCEPTED",
+                version=quote.version,
+                allowed_actions=["create_order", "request_checkout"],
+                next_action="Proceed to create order or checkout",
+                expires_at=quote.expires_at,
+            ),
+        )
+
+    # -------------------------------------------------------------------------
+    # 11. get_order_status
+    # -------------------------------------------------------------------------
+    async def get_order_status(
+        self,
+        session: AsyncSession,
+        request: GetOrderStatusRequest,
+        context: GatewayContext,
+    ) -> GatewayResponseEnvelope[GetOrderStatusResponse]:
+        """Retrieves authoritative order details, fulfillment status, and settlement."""
+        auth_ok, auth_err = CapabilityRegistry.check_authorization("get_order_status", context)
+        if not auth_ok:
+            return self._rejected_envelope(
+                "get_order_status", "CAPABILITY_DENIED", auth_err or "Unauthorized"
+            )
+
+        stmt = select(Order).where(
+            Order.id == request.order_id,
+            Order.merchant_id == context.merchant_id,
+        )
+        order = (await session.execute(stmt)).scalar_one_or_none()
+        if not order:
+            return self._rejected_envelope(
+                "get_order_status",
+                "ORDER_NOT_FOUND",
+                f"Order '{request.order_id}' not found for active merchant.",
+            )
+
+        resp_data = GetOrderStatusResponse(
+            order_id=order.id,
+            quote_id=order.quote_id,
+            status=order.status,
+            amount_paise=order.amount_paise,
+            currency=order.currency,
+            buyer_email=order.buyer_email,
+            rzp_order_id=order.rzp_order_id,
+            shipping_address=ShippingAddressGateway.model_validate(order.shipping_address),
+            created_at=order.created_at,
+            is_settled=(order.status in {"PAID", "FULFILLMENT_PENDING", "COMPLETED"}),
+        )
+        allowed = []
+        if order.status == "PENDING_PAYMENT":
+            allowed = ["request_checkout", "get_payment_status"]
+        elif order.status in {"PAID", "COMPLETED"}:
+            allowed = ["get_order_status"]
+
+        return GatewayResponseEnvelope[GetOrderStatusResponse](
+            status="SUCCESS",
+            capability="get_order_status",
+            data=resp_data,
+            state=StateOrientedContext(
+                entity_type="Order",
+                entity_id=str(order.id),
+                state=order.status,
+                version=order.version,
+                allowed_actions=allowed,
+                next_action=(
+                    "Order completed and settled"
+                    if order.status in {"PAID", "COMPLETED"}
+                    else "Awaiting payment settlement"
+                ),
+            ),
+        )
+
+    # -------------------------------------------------------------------------
     # Unified Capability Dispatcher
     # -------------------------------------------------------------------------
     async def execute_capability(
@@ -1043,7 +1566,15 @@ class CanonicalCommerceGateway:
             )
 
         try:
-            if capability_name == "discover_products":
+            if capability_name == "initialize_session":
+                req_sess = InitializeSessionRequest.model_validate(payload)
+                return await self.initialize_session(session, req_sess, context.merchant_id)
+
+            elif capability_name == "terminate_session":
+                req_term = TerminateSessionRequest.model_validate(payload)
+                return await self.terminate_session(session, req_term, context)
+
+            elif capability_name == "discover_products":
                 req_disc = DiscoverProductsRequest.model_validate(payload)
                 return await self.discover_products(session, req_disc, context)
 
@@ -1058,6 +1589,14 @@ class CanonicalCommerceGateway:
             elif capability_name == "get_quote":
                 req_q = GetQuoteRequest.model_validate(payload)
                 return await self.get_quote(session, req_q, context)
+
+            elif capability_name == "negotiate_quote":
+                req_neg = NegotiateQuoteGatewayRequest.model_validate(payload)
+                return await self.negotiate_quote(session, req_neg, context)
+
+            elif capability_name == "accept_quote":
+                req_acc = AcceptQuoteGatewayRequest.model_validate(payload)
+                return await self.accept_quote(session, req_acc, context)
 
             elif capability_name == "calculate_shipping":
                 req_ship = CalculateShippingRequest.model_validate(payload)
@@ -1074,6 +1613,10 @@ class CanonicalCommerceGateway:
             elif capability_name == "get_payment_status":
                 req_pay = GetPaymentStatusRequest.model_validate(payload)
                 return await self.get_payment_status(session, req_pay, context)
+
+            elif capability_name == "get_order_status":
+                req_ord_stat = GetOrderStatusRequest.model_validate(payload)
+                return await self.get_order_status(session, req_ord_stat, context)
 
             else:
                 return self._rejected_envelope(
