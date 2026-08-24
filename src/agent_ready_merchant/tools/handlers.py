@@ -25,11 +25,13 @@ from agent_ready_merchant.services.payment_service import PaymentService
 from agent_ready_merchant.state_machines.price_quote import PriceQuoteStateMachine
 from agent_ready_merchant.tools.base import BaseTool, GatewayContext
 from agent_ready_merchant.tools.models import (
+    AcceptQuoteParams,
     CalculateShippingParams,
     CheckInventoryParams,
     CheckPaymentStatusParams,
     CreateOrderParams,
     DiscoverCatalogParams,
+    GetOrderStatusParams,
     GetProductDetailsParams,
     NegotiateQuoteParams,
     RequestCheckoutParams,
@@ -728,6 +730,123 @@ class RequestCheckoutTool(BaseTool):
             "status": order.status,
             "key_id": settings.RAZORPAY_KEY_ID,
             "supported_payment_methods": ["upi", "card", "netbanking", "wallet"],
+        }
+
+
+class AcceptQuoteTool(BaseTool):
+    """Tool to accept a proposed PriceQuote."""
+
+    name = "accept_quote"
+    description = "Accept a binding proposed PriceQuote for checkout."
+    side_effect_class = "TRANSIENT_STATE"
+    required_capability = "buyer:quote"
+    param_schema = AcceptQuoteParams
+
+    async def execute(
+        self,
+        session: AsyncSession,
+        params: BaseModel,
+        context: GatewayContext,
+    ) -> dict[str, Any]:
+        p = AcceptQuoteParams.model_validate(params)
+        stmt = select(PriceQuote).where(
+            PriceQuote.id == p.quote_id,
+            PriceQuote.merchant_id == context.merchant_id,
+            PriceQuote.session_id == context.session_id,
+        )
+        quote = (await session.execute(stmt)).scalar_one_or_none()
+        if not quote:
+            return {
+                "error": {
+                    "code": "QUOTE_NOT_FOUND",
+                    "message": f"PriceQuote with ID {p.quote_id} not found.",
+                }
+            }
+
+        now = datetime.now(UTC)
+        quote_expires = (
+            quote.expires_at
+            if quote.expires_at.tzinfo is not None
+            else quote.expires_at.replace(tzinfo=UTC)
+        )
+        if now > quote_expires:
+            return {
+                "error": {
+                    "code": "QUOTE_EXPIRED",
+                    "message": "Quote has expired and cannot be accepted.",
+                }
+            }
+
+        if quote.status != "PROPOSED":
+            if quote.status == "ACCEPTED":
+                return {
+                    "quote_id": str(quote.id),
+                    "status": "ACCEPTED",
+                    "total_paise": quote.total_paise,
+                }
+            return {
+                "error": {
+                    "code": "INVALID_STATE_TRANSITION",
+                    "message": f"Cannot accept quote in '{quote.status}' status.",
+                }
+            }
+
+        await PriceQuoteStateMachine.transition(
+            session=session,
+            quote=quote,
+            target_state="ACCEPTED",
+            expected_version=quote.version,
+            actor_type="BUYER_AGENT",
+            reason="Buyer accepted quote",
+        )
+        await session.flush()
+        return {
+            "quote_id": str(quote.id),
+            "status": "ACCEPTED",
+            "total_paise": quote.total_paise,
+        }
+
+
+class GetOrderStatusTool(BaseTool):
+    """Tool to retrieve authoritative order details and status."""
+
+    name = "get_order_status"
+    description = "Retrieve authoritative order status, shipping information, and settlement state."
+    side_effect_class = "READ_ONLY"
+    required_capability = "buyer:read"
+    param_schema = GetOrderStatusParams
+
+    async def execute(
+        self,
+        session: AsyncSession,
+        params: BaseModel,
+        context: GatewayContext,
+    ) -> dict[str, Any]:
+        p = GetOrderStatusParams.model_validate(params)
+        stmt = select(Order).where(
+            Order.id == p.order_id,
+            Order.merchant_id == context.merchant_id,
+        )
+        order = (await session.execute(stmt)).scalar_one_or_none()
+        if not order:
+            return {
+                "error": {
+                    "code": "ORDER_NOT_FOUND",
+                    "message": f"Order with ID {p.order_id} not found.",
+                }
+            }
+
+        return {
+            "order_id": str(order.id),
+            "quote_id": str(order.quote_id),
+            "status": order.status,
+            "amount_paise": order.amount_paise,
+            "currency": order.currency,
+            "buyer_email": order.buyer_email,
+            "rzp_order_id": order.rzp_order_id,
+            "shipping_address": order.shipping_address,
+            "created_at": order.created_at.isoformat(),
+            "is_settled": (order.status in {"PAID", "FULFILLMENT_PENDING", "COMPLETED"}),
         }
 
 

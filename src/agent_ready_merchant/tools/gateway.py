@@ -14,12 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.tools.base import BaseTool, GatewayContext
 from agent_ready_merchant.tools.handlers import (
+    AcceptQuoteTool,
     CalculateShippingTool,
     CheckInventoryTool,
     CheckPaymentStatusTool,
     CreateOrderTool,
     DiscoverCatalogTool,
     DiscoverProductsTool,
+    GetOrderStatusTool,
     GetPaymentStatusTool,
     GetProductDetailsTool,
     GetProductTool,
@@ -49,10 +51,12 @@ class ToolGateway:
             CheckInventoryTool(),
             RequestPriceQuoteTool(),
             NegotiateQuoteTool(),
+            AcceptQuoteTool(),
             CalculateShippingTool(),
             CreateOrderTool(),
             RequestCheckoutTool(),
             CheckPaymentStatusTool(),
+            GetOrderStatusTool(),
             # Canonical aliases
             DiscoverProductsTool(),
             GetProductTool(),
