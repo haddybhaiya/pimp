@@ -55,6 +55,7 @@ class GatewayErrorCode(StrEnum):
     COMMERCE_QUOTE_ALREADY_ACCEPTED = "COMMERCE_QUOTE_ALREADY_ACCEPTED"
     COMMERCE_ORDER_NOT_FOUND = "COMMERCE_ORDER_NOT_FOUND"
     COMMERCE_ORDER_ALREADY_PAID = "COMMERCE_ORDER_ALREADY_PAID"
+    COMMERCE_PAYMENT_GATEWAY_ERROR = "COMMERCE_PAYMENT_GATEWAY_ERROR"
 
     # Policy & Governance
     POLICY_FLOOR_PRICE_BREACH = "POLICY_FLOOR_PRICE_BREACH"
@@ -82,8 +83,9 @@ class IdempotencyRecord:
     """Cached idempotent response record with execution metadata."""
 
     envelope: GatewayResponseEnvelope[Any]
+    merchant_id: uuid.UUID
+    capability: str = "unknown"
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    merchant_id: uuid.UUID = field(default_factory=uuid.uuid4)
 
 
 class IdempotencyManager:
@@ -103,21 +105,24 @@ class IdempotencyManager:
         merchant_id: uuid.UUID,
         session_id: uuid.UUID | None,
         idempotency_key: str,
+        capability: str | None = None,
     ) -> str:
         s_part = str(session_id) if session_id else "global"
-        return f"{merchant_id}:{s_part}:{idempotency_key}"
+        c_part = capability or "any"
+        return f"{merchant_id}:{s_part}:{c_part}:{idempotency_key}"
 
     async def check_idempotency(
         self,
         merchant_id: uuid.UUID,
         session_id: uuid.UUID | None,
         idempotency_key: str | None,
+        capability: str | None = None,
     ) -> GatewayResponseEnvelope[Any] | None:
         """Checks if a cached result exists for the given idempotency key."""
         if not idempotency_key:
             return None
 
-        key = self._build_key(merchant_id, session_id, idempotency_key)
+        key = self._build_key(merchant_id, session_id, idempotency_key, capability)
         async with self._lock:
             record = self._cache.get(key)
             if not record:
@@ -137,12 +142,13 @@ class IdempotencyManager:
         merchant_id: uuid.UUID,
         session_id: uuid.UUID | None,
         idempotency_key: str | None,
+        capability: str | None = None,
     ) -> bool:
         """Acquires lock for in-flight mutation; returns False if concurrent duplicate in-flight."""
         if not idempotency_key:
             return True
 
-        key = self._build_key(merchant_id, session_id, idempotency_key)
+        key = self._build_key(merchant_id, session_id, idempotency_key, capability)
         async with self._lock:
             if key in self._in_flight:
                 return False
@@ -154,12 +160,13 @@ class IdempotencyManager:
         merchant_id: uuid.UUID,
         session_id: uuid.UUID | None,
         idempotency_key: str | None,
+        capability: str | None = None,
     ) -> None:
         """Releases the in-flight mutation lock."""
         if not idempotency_key:
             return
 
-        key = self._build_key(merchant_id, session_id, idempotency_key)
+        key = self._build_key(merchant_id, session_id, idempotency_key, capability)
         async with self._lock:
             self._in_flight.discard(key)
 
@@ -169,16 +176,18 @@ class IdempotencyManager:
         session_id: uuid.UUID | None,
         idempotency_key: str | None,
         envelope: GatewayResponseEnvelope[Any],
+        capability: str | None = None,
     ) -> None:
         """Caches the final response envelope for an idempotency key."""
         if not idempotency_key:
             return
 
-        key = self._build_key(merchant_id, session_id, idempotency_key)
+        key = self._build_key(merchant_id, session_id, idempotency_key, capability)
         async with self._lock:
             self._cache[key] = IdempotencyRecord(
                 envelope=envelope,
                 merchant_id=merchant_id,
+                capability=capability or "unknown",
             )
             self._in_flight.discard(key)
             logger.debug("Cached idempotency record for '%s'", idempotency_key)
@@ -216,9 +225,15 @@ class GatewayRateLimiter:
         async with self._lock:
             timestamps = self._requests[client_key]
             # Prune old timestamps
-            self._requests[client_key] = [t for t in timestamps if t > cutoff]
+            active_timestamps = [t for t in timestamps if t > cutoff]
 
-            if len(self._requests[client_key]) >= limit:
+            if not active_timestamps:
+                if client_key in self._requests:
+                    del self._requests[client_key]
+            else:
+                self._requests[client_key] = active_timestamps
+
+            if len(self._requests.get(client_key, [])) >= limit:
                 oldest = self._requests[client_key][0]
                 retry_after = max(1, int(window_seconds - (now - oldest)))
                 logger.warning(
@@ -230,6 +245,8 @@ class GatewayRateLimiter:
                 )
                 return False, retry_after
 
+            if client_key not in self._requests:
+                self._requests[client_key] = []
             self._requests[client_key].append(now)
             return True, 0
 

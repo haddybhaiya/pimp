@@ -128,7 +128,11 @@ class AgentCommerceProtocolAdapter(BaseProtocolAdapter):
             if protocol_req
             else self.CAPABILITY_TO_ACTION.get(capability, capability)
         )
-        req_id = protocol_req.request_id if protocol_req else envelope.request_id
+        req_id = (
+            protocol_req.request_id
+            if protocol_req and protocol_req.request_id
+            else envelope.request_id
+        ) or uuid.uuid4()
         version = protocol_req.version if protocol_req else envelope.schema_version
 
         result_dict: dict[str, Any] | None = None
@@ -167,7 +171,7 @@ class AgentCommerceProtocolAdapter(BaseProtocolAdapter):
             protocol=self.protocol_name,
             version=COMMERCE_PROTOCOL_VERSION,
             request_id=request_id,
-            status="REJECTED" if retryable else "ERROR",
+            status="ERROR" if retryable else "REJECTED",
             action=action,
             result=None,
             error=GatewayError(

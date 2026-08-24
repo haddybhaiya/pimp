@@ -34,8 +34,8 @@ class ProtocolRequestMessage(BaseModel):
         default=COMMERCE_PROTOCOL_VERSION,
         description="Negotiated protocol contract version",
     )
-    request_id: uuid.UUID = Field(
-        default_factory=uuid.uuid4,
+    request_id: uuid.UUID | None = Field(
+        default=None,
         description="Trace identifier for request tracking and audit",
     )
     action: str = Field(..., description="Requested external protocol action")
