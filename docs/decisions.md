@@ -79,3 +79,15 @@
   - *Positive:* Completely eliminates bypass paths around authorization, policy, inventory, and payment; provides clear state machine guidance (`next_action`, `allowed_actions`) to AI buyers; ensures strict multi-tenant isolation.
   - *Negative:* Requires strict schema adherence and rejects undeclared fields fail-closed.
 
+---
+
+## ADR-008: External AI Buyer Flow & Autonomous Lifecycle Execution
+
+- **Status:** ACCEPTED
+- **Context:** External autonomous AI buyers require a structured, end-to-end commerce client to complete the full commerce lifecycle (`DISCOVERED` -> `PRODUCT_SELECTED` -> `QUOTED` -> `NEGOTIATION_PENDING` -> `OFFER_ACCEPTED` -> `ORDER_CREATED` -> `PAYMENT_PENDING` -> `PAYMENT_SUCCEEDED` -> `COMPLETED`) while preserving the critical invariant: `AI buyer -> Gateway -> deterministic authority -> domain service -> Razorpay`.
+- **Decision:** Implement `AIBuyerClient` and structured buyer schemas in `src/agent_ready_merchant/buyer/` communicating strictly through `CanonicalCommerceGateway`. Direct database mutations, direct Razorpay API mutations, and unrestricted financial operations are completely prohibited. All quote negotiations execute through `DeterministicPolicyEngine`, quote state advances through version-checked `PriceQuoteStateMachine`, inventory is atomically reserved during order creation, and payment settlement verifies cryptographic HMAC signatures. Explicit response and failure states (`INVENTORY_CHANGED`, `POLICY_REJECTED`, `QUOTE_EXPIRED`, etc.) provide deterministic recovery paths for autonomous buyers.
+- **Consequences:**
+  - *Positive:* Full autonomous commerce lifecycle support with zero bypass around authorization, inventory reservations, policy evaluation, or audit ledgers. Proven resilient against prompt injection, quote tampering, cross-tenant leaks, and concurrency races.
+  - *Negative:* Autonomous buyers must strictly handle state transitions and retryable failure envelopes.
+
+
