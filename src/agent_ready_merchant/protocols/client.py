@@ -23,6 +23,7 @@ from agent_ready_merchant.buyer.schemas import (
     BuyerFailureState,
     BuyerFlowContext,
     BuyerFlowResult,
+    BuyerFlowStep,
 )
 from agent_ready_merchant.config import get_settings
 from agent_ready_merchant.gateway.canonical import CanonicalCommerceGateway
@@ -85,9 +86,12 @@ class AgentProtocolClient:
         self, request_id: uuid.UUID | None = None, idempotency_key: str | None = None
     ) -> GatewayContext:
         settings = get_settings()
+        stable_session_id = self.context.session_id or uuid.UUID(
+            "00000000-0000-0000-0000-000000000000"
+        )
         return GatewayContext(
             merchant_id=self.merchant_id,
-            session_id=self.context.session_id or uuid.uuid4(),
+            session_id=stable_session_id,
             capabilities=self.capabilities,
             autonomy_level=settings.DEFAULT_MERCHANT_AUTONOMY_LEVEL,
             max_discount_percentage=settings.DEFAULT_MAX_DISCOUNT_PERCENTAGE,
@@ -97,6 +101,21 @@ class AgentProtocolClient:
             idempotency_key=idempotency_key,
             schema_version=COMMERCE_PROTOCOL_VERSION,
         )
+
+    def _record_step(
+        self,
+        step_name: str,
+        status: str,
+        state: str,
+        details: dict[str, Any],
+    ) -> None:
+        step = BuyerFlowStep(
+            step_name=step_name,
+            status=status,
+            state_after_step=state,
+            details=details,
+        )
+        self.context.history.append(step)
 
     async def send_protocol_message(
         self,
@@ -443,7 +462,11 @@ class AgentProtocolClient:
         if not status_res.result:
             raise ValueError(f"Cannot authorize payment: order {order_id} not found")
 
-        rzp_order_id = status_res.result.get("rzp_order_id") or f"order_{uuid.uuid4().hex[:14]}"
+        rzp_order_id = status_res.result.get("rzp_order_id")
+        if not rzp_order_id:
+            raise ValueError(
+                f"Order {order_id} has not been checked out or has no Razorpay order ID"
+            )
         pay_id = rzp_payment_id or f"pay_{uuid.uuid4().hex[:14]}"
         amount_paise = status_res.result.get("amount_paise", 0)
 
@@ -488,7 +511,23 @@ class AgentProtocolClient:
             signature_header=signature,
             webhook_secret=secret_str,
         )
-        self.context.current_state = BuyerCommerceState.PAYMENT_SUCCEEDED
+        reco_status = reco_result.get("status") if isinstance(reco_result, dict) else None
+        if reco_status in {"PROCESSED", "DUPLICATE_IGNORED"}:
+            self.context.current_state = BuyerCommerceState.PAYMENT_SUCCEEDED
+            self._record_step(
+                "authorize_test_payment",
+                "SUCCESS",
+                BuyerCommerceState.PAYMENT_SUCCEEDED.value,
+                {"order_id": str(order_id), "status": reco_status},
+            )
+        else:
+            self.context.current_failure = BuyerFailureState.PAYMENT_FAILED
+            self._record_step(
+                "authorize_test_payment",
+                "FAILED",
+                BuyerFailureState.PAYMENT_FAILED.value,
+                {"order_id": str(order_id), "reco_result": reco_result},
+            )
         return reco_result
 
     # -------------------------------------------------------------------------

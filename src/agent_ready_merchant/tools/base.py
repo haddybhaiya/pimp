@@ -8,6 +8,8 @@ from typing import Any, Literal
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent_ready_merchant.gateway.schemas import COMMERCE_PROTOCOL_VERSION
+
 
 @dataclass
 class GatewayContext:
@@ -22,7 +24,7 @@ class GatewayContext:
     max_single_transaction_paise: int = 5_000_000
     request_id: uuid.UUID | None = None
     idempotency_key: str | None = None
-    schema_version: str = "2026-03-01"
+    schema_version: str = COMMERCE_PROTOCOL_VERSION
 
     def has_capability(self, required_cap: str | None) -> bool:
         if required_cap is None:
