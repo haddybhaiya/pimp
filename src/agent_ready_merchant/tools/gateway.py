@@ -14,11 +14,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.tools.base import BaseTool, GatewayContext
 from agent_ready_merchant.tools.handlers import (
+    CalculateShippingTool,
+    CheckInventoryTool,
     CheckPaymentStatusTool,
     CreateOrderTool,
     DiscoverCatalogTool,
+    DiscoverProductsTool,
+    GetPaymentStatusTool,
     GetProductDetailsTool,
+    GetProductTool,
+    GetQuoteTool,
     NegotiateQuoteTool,
+    RequestCheckoutTool,
     RequestPriceQuoteTool,
 )
 from agent_ready_merchant.tools.models import ToolExecutionResult
@@ -39,10 +46,18 @@ class ToolGateway:
         default_tools: list[BaseTool] = [
             DiscoverCatalogTool(),
             GetProductDetailsTool(),
+            CheckInventoryTool(),
             RequestPriceQuoteTool(),
             NegotiateQuoteTool(),
+            CalculateShippingTool(),
             CreateOrderTool(),
+            RequestCheckoutTool(),
             CheckPaymentStatusTool(),
+            # Canonical aliases
+            DiscoverProductsTool(),
+            GetProductTool(),
+            GetQuoteTool(),
+            GetPaymentStatusTool(),
         ]
         for tool in custom_tools or default_tools:
             self.register_tool(tool)
