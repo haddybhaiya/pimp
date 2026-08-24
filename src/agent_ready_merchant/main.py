@@ -251,6 +251,249 @@ def create_app() -> FastAPI:
                 detail=str(exc),
             ) from exc
 
+    # =========================================================================
+    # Canonical Commerce Gateway Endpoints (Phase 2.1)
+    # =========================================================================
+    from agent_ready_merchant.gateway.canonical import CanonicalCommerceGateway
+    from agent_ready_merchant.gateway.registry import CapabilityDefinition, CapabilityRegistry
+    from agent_ready_merchant.gateway.representation import MerchantAIRepresentation
+    from agent_ready_merchant.gateway.schemas import (
+        CalculateShippingRequest,
+        CalculateShippingResponse,
+        CheckInventoryRequest,
+        CheckInventoryResponse,
+        CreateOrderGatewayRequest,
+        CreateOrderGatewayResponse,
+        DiscoverProductsRequest,
+        DiscoverProductsResponse,
+        GatewayResponseEnvelope,
+        GetPaymentStatusRequest,
+        GetPaymentStatusResponse,
+        GetProductRequest,
+        GetProductResponse,
+        GetQuoteRequest,
+        GetQuoteResponse,
+        RequestCheckoutRequest,
+        RequestCheckoutResponse,
+    )
+    from agent_ready_merchant.tools.base import GatewayContext
+
+    def _get_context(
+        merchant_id: uuid.UUID,
+        session_id: uuid.UUID | None,
+        capabilities_hdr: str | None,
+        settings: Settings,
+    ) -> GatewayContext:
+        if capabilities_hdr:
+            caps = {c.strip() for c in capabilities_hdr.split(",") if c.strip()}
+        else:
+            caps = {
+                "buyer:discover",
+                "buyer:read",
+                "buyer:quote",
+                "buyer:negotiate",
+                "buyer:checkout",
+                "buyer:payment_status",
+            }
+        return GatewayContext(
+            merchant_id=merchant_id,
+            session_id=session_id or uuid.uuid4(),
+            capabilities=caps,
+            autonomy_level=settings.DEFAULT_MERCHANT_AUTONOMY_LEVEL,
+            max_discount_percentage=settings.DEFAULT_MAX_DISCOUNT_PERCENTAGE,
+            min_margin_percentage=settings.DEFAULT_MIN_MARGIN_PERCENTAGE,
+            max_single_transaction_paise=settings.MAX_SINGLE_TRANSACTION_PAISE,
+        )
+
+    gateway_instance = CanonicalCommerceGateway()
+
+    @app.get(
+        "/api/v1/gateway/merchant-representation",
+        summary="Get Authoritative Merchant AI Representation",
+        tags=["Canonical Gateway"],
+        response_model=MerchantAIRepresentation,
+    )
+    async def get_merchant_representation_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
+        x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> MerchantAIRepresentation:
+        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        try:
+            return await gateway_instance.get_merchant_representation(db, x_merchant_id, ctx)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/gateway/capabilities",
+        summary="List Canonical Capabilities Catalog",
+        tags=["Canonical Gateway"],
+        response_model=list[CapabilityDefinition],
+    )
+    async def list_capabilities_endpoint() -> list[CapabilityDefinition]:
+        return CapabilityRegistry.get_all_capabilities()
+
+    class GatewayExecuteRequest(BaseModel):
+        capability: str
+        payload: dict[str, Any] = Field(default_factory=dict)
+
+    @app.post(
+        "/api/v1/gateway/execute",
+        summary="Unified Gateway Capability Dispatcher",
+        tags=["Canonical Gateway"],
+        response_model=GatewayResponseEnvelope[Any],
+    )
+    async def execute_gateway_capability(
+        req: GatewayExecuteRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
+        x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> GatewayResponseEnvelope[Any]:
+        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        return await gateway_instance.execute_capability(db, req.capability, req.payload, ctx)
+
+    @app.post(
+        "/api/v1/gateway/discover-products",
+        summary="Discover Products Capability",
+        tags=["Canonical Gateway"],
+        response_model=GatewayResponseEnvelope[DiscoverProductsResponse],
+    )
+    async def discover_products_endpoint(
+        req: DiscoverProductsRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
+        x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> GatewayResponseEnvelope[DiscoverProductsResponse]:
+        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        return await gateway_instance.discover_products(db, req, ctx)
+
+    @app.get(
+        "/api/v1/gateway/products/{sku}",
+        summary="Get Product Details Capability",
+        tags=["Canonical Gateway"],
+        response_model=GatewayResponseEnvelope[GetProductResponse],
+    )
+    async def get_product_endpoint(
+        sku: str,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
+        x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> GatewayResponseEnvelope[GetProductResponse]:
+        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        return await gateway_instance.get_product(db, GetProductRequest(sku=sku), ctx)
+
+    @app.post(
+        "/api/v1/gateway/inventory/check",
+        summary="Check Inventory Capability",
+        tags=["Canonical Gateway"],
+        response_model=GatewayResponseEnvelope[CheckInventoryResponse],
+    )
+    async def check_inventory_endpoint(
+        req: CheckInventoryRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
+        x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> GatewayResponseEnvelope[CheckInventoryResponse]:
+        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        return await gateway_instance.check_inventory(db, req, ctx)
+
+    @app.post(
+        "/api/v1/gateway/quotes",
+        summary="Get / Create Quote Capability",
+        tags=["Canonical Gateway"],
+        response_model=GatewayResponseEnvelope[GetQuoteResponse],
+    )
+    async def get_quote_endpoint(
+        req: GetQuoteRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
+        x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> GatewayResponseEnvelope[GetQuoteResponse]:
+        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        return await gateway_instance.get_quote(db, req, ctx)
+
+    @app.post(
+        "/api/v1/gateway/shipping/calculate",
+        summary="Calculate Shipping Capability",
+        tags=["Canonical Gateway"],
+        response_model=GatewayResponseEnvelope[CalculateShippingResponse],
+    )
+    async def calculate_shipping_endpoint(
+        req: CalculateShippingRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
+        x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> GatewayResponseEnvelope[CalculateShippingResponse]:
+        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        return await gateway_instance.calculate_shipping(db, req, ctx)
+
+    @app.post(
+        "/api/v1/gateway/orders",
+        summary="Create Order Capability",
+        tags=["Canonical Gateway"],
+        response_model=GatewayResponseEnvelope[CreateOrderGatewayResponse],
+    )
+    async def create_order_endpoint(
+        req: CreateOrderGatewayRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
+        x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> GatewayResponseEnvelope[CreateOrderGatewayResponse]:
+        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        return await gateway_instance.create_order(db, req, ctx)
+
+    @app.post(
+        "/api/v1/gateway/checkout",
+        summary="Request Checkout Capability",
+        tags=["Canonical Gateway"],
+        response_model=GatewayResponseEnvelope[RequestCheckoutResponse],
+    )
+    async def request_checkout_endpoint(
+        req: RequestCheckoutRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
+        x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> GatewayResponseEnvelope[RequestCheckoutResponse]:
+        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        return await gateway_instance.request_checkout(db, req, ctx)
+
+    @app.get(
+        "/api/v1/gateway/payments/{order_id}/status",
+        summary="Get Payment Status Capability",
+        tags=["Canonical Gateway"],
+        response_model=GatewayResponseEnvelope[GetPaymentStatusResponse],
+    )
+    async def get_payment_status_endpoint(
+        order_id: uuid.UUID,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
+        x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> GatewayResponseEnvelope[GetPaymentStatusResponse]:
+        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        return await gateway_instance.get_payment_status(
+            db, GetPaymentStatusRequest(order_id=order_id), ctx
+        )
+
     return app
 
 

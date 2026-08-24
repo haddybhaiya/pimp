@@ -67,3 +67,15 @@
 - **Consequences:**
   - *Positive:* Fast, deterministic feedback loop; prevents syntax regressions, type mismatches, and secret leakage before merging.
   - *Negative:* Strict static typing overhead during rapid development.
+
+---
+
+## ADR-007: Canonical Commerce Gateway & Authoritative Merchant AI Representation
+
+- **Status:** ACCEPTED
+- **Context:** Arbitrary AI buyers and external protocol adapters require a standardized, deterministic boundary to interact with merchant commerce capabilities without bypassing security policies, financial floor price guards, state machines, inventory locks, or audit ledgers.
+- **Decision:** Implement `CanonicalCommerceGateway` exposing 8 canonical capabilities (`discover_products`, `get_product`, `check_inventory`, `get_quote`, `calculate_shipping`, `create_order`, `request_checkout`, `get_payment_status`) with strict Pydantic schemas (`extra="forbid"`), state-oriented response envelopes (`GatewayResponseEnvelope[T]`), and an immutable `CapabilityRegistry`. Construct `MerchantAIRepresentation` derived purely from authoritative server state with SHA-256 policy hashing, ensuring clients and LLMs cannot alter or spoof merchant capabilities.
+- **Consequences:**
+  - *Positive:* Completely eliminates bypass paths around authorization, policy, inventory, and payment; provides clear state machine guidance (`next_action`, `allowed_actions`) to AI buyers; ensures strict multi-tenant isolation.
+  - *Negative:* Requires strict schema adherence and rejects undeclared fields fail-closed.
+
