@@ -1403,6 +1403,19 @@ class CanonicalCommerceGateway:
             )
 
         # Policy ALLOW: advance quote state
+        # Update quote line items to reflect negotiated prices proportionally
+        for itm, prop in zip(quote.items, item_proposals, strict=False):
+            itm.unit_price_paise = prop.proposed_unit_price_paise
+            itm.total_price_paise = prop.proposed_unit_price_paise * itm.quantity
+
+        item_sum = sum(itm.total_price_paise for itm in quote.items)
+        remainder = proposed_goods_paise - item_sum
+        if remainder != 0 and quote.items:
+            quote.items[0].total_price_paise += remainder
+            quote.items[0].unit_price_paise = (
+                quote.items[0].total_price_paise // quote.items[0].quantity
+            )
+
         if quote.status == "PROPOSED":
             await PriceQuoteStateMachine.transition(
                 session=session,
@@ -1744,6 +1757,24 @@ class CanonicalCommerceGateway:
                     request_id=request_id,
                 )
 
+            # Authoritative Token Authentication: fail-closed verification
+            if db_sess.auth_token_hash:
+                if not context.auth_token:
+                    return self._rejected_envelope(
+                        capability_name,
+                        GatewayErrorCode.AUTH_INVALID_CREDENTIAL.value,
+                        "Authentication token required for active session.",
+                        request_id=request_id,
+                    )
+                presented_hash = hashlib.sha256(context.auth_token.encode("utf-8")).hexdigest()
+                if presented_hash != db_sess.auth_token_hash:
+                    return self._rejected_envelope(
+                        capability_name,
+                        GatewayErrorCode.AUTH_INVALID_CREDENTIAL.value,
+                        "Invalid session authentication token.",
+                        request_id=request_id,
+                    )
+
         # 2. Bounded Payload Size Validation (Max 64 KB)
         is_payload_valid, payload_size = validate_payload_size(payload)
         if not is_payload_valid:
@@ -1778,6 +1809,7 @@ class CanonicalCommerceGateway:
                 session_id=context.session_id,
                 idempotency_key=idempotency_key,
                 capability=capability_name,
+                payload=payload,
             )
             if cached_resp is not None:
                 return cached_resp
@@ -1820,6 +1852,7 @@ class CanonicalCommerceGateway:
                     idempotency_key=idempotency_key,
                     envelope=result_envelope,
                     capability=capability_name,
+                    payload=payload,
                 )
 
             return result_envelope
@@ -1830,11 +1863,12 @@ class CanonicalCommerceGateway:
                 "Timeout boundary exceeded during capability execution: %s",
                 capability_name,
             )
+            is_financial = cap_def.classification == "PRIVILEGED_FINANCIAL"
             return self._error_envelope(
                 capability_name,
                 GatewayErrorCode.TIMEOUT_BOUNDARY_EXCEEDED.value,
                 f"Execution timeout of {timeout_sec}s exceeded for capability '{capability_name}'.",
-                retryable=True,
+                retryable=not is_financial,
                 request_id=request_id,
             )
         except ValidationError as exc:

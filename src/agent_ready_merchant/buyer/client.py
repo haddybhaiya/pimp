@@ -109,6 +109,7 @@ class AIBuyerClient:
             max_discount_percentage=settings.DEFAULT_MAX_DISCOUNT_PERCENTAGE,
             min_margin_percentage=settings.DEFAULT_MIN_MARGIN_PERCENTAGE,
             max_single_transaction_paise=settings.MAX_SINGLE_TRANSACTION_PAISE,
+            auth_token=self.context.auth_token_raw,
         )
 
     def _record_step(
