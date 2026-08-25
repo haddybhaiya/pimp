@@ -107,6 +107,7 @@ class AgentProtocolClient:
             max_single_transaction_paise=settings.MAX_SINGLE_TRANSACTION_PAISE,
             request_id=request_id or uuid.uuid4(),
             idempotency_key=idempotency_key,
+            auth_token=self.context.auth_token_raw,
             schema_version=COMMERCE_PROTOCOL_VERSION,
         )
 
@@ -241,6 +242,10 @@ class AgentProtocolClient:
         )
         if res.status == "SUCCESS" and res.result:
             self.context.session_id = uuid.UUID(res.result["session_id"])
+            if "auth_token" in res.result:
+                self.context.auth_token_raw = res.result["auth_token"]
+            else:
+                self.context.auth_token_raw = token_to_send
             self.context.current_state = BuyerCommerceState.DISCOVERED
         return res
 

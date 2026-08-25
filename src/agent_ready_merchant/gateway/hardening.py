@@ -13,6 +13,7 @@ Adheres strictly to Phase 2.3 specifications and INV-AGY-03 (Zero Secret Leakage
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -23,6 +24,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
+from agent_ready_merchant.gateway import durable
 from agent_ready_merchant.gateway.constants import (
     COMMERCE_PROTOCOL_VERSION,
     DEFAULT_MAX_PAYLOAD_BYTES,
@@ -45,6 +47,7 @@ class GatewayErrorCode(StrEnum):
     AUTH_UNAUTHORIZED_CAPABILITY = "AUTH_UNAUTHORIZED_CAPABILITY"
     AUTH_SESSION_EXPIRED = "AUTH_SESSION_EXPIRED"
     AUTH_SESSION_NOT_FOUND = "AUTH_SESSION_NOT_FOUND"
+    AUTH_INVALID_CREDENTIAL = "AUTH_INVALID_CREDENTIAL"
     AUTH_INVALID_MERCHANT = "AUTH_INVALID_MERCHANT"
     AUTH_FORBIDDEN_RESOURCE = "AUTH_FORBIDDEN_RESOURCE"
 
@@ -83,6 +86,18 @@ class GatewayErrorCode(StrEnum):
 # =============================================================================
 # 2. Thread-Safe Idempotency Coordinator
 # =============================================================================
+def compute_payload_hash(payload: dict[str, Any] | None) -> str:
+    """Computes deterministic cryptographic hash of business payload parameters."""
+    if not payload:
+        return "empty"
+    clean_payload = {k: v for k, v in payload.items() if k not in {"idempotency_key", "request_id"}}
+    try:
+        serialized = json.dumps(clean_payload, sort_keys=True, default=str)
+    except Exception:
+        serialized = str(sorted(clean_payload.items()))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 @dataclass
 class IdempotencyRecord:
     """Cached idempotent response record with execution metadata."""
@@ -90,16 +105,20 @@ class IdempotencyRecord:
     envelope: GatewayResponseEnvelope[Any]
     merchant_id: uuid.UUID
     capability: str = "unknown"
+    payload_hash: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class IdempotencyManager:
-    """In-memory coordinator ensuring mutating operations execute exactly once.
+    """Coordinator ensuring mutating operations execute exactly once.
 
-    Prevents race conditions, double reservations, and duplicate charges.
-    Note: This is a process-local implementation bounded by LRU/TTL eviction.
-    In a distributed multi-worker cluster, this coordinator should be backed by
-    a shared Redis/PostgreSQL distributed locking table.
+    Defaults to a bounded process-local LRU/TTL cache. When
+    ``GATEWAY_DURABLE_HARDENING`` is enabled, claims and cached responses are
+    backed by shared PostgreSQL tables (``gateway.durable``) with PRIMARY KEY
+    uniqueness, so the same financial mutation cannot execute twice across
+    workers or restarts. If the durable store fails, the manager logs a
+    CRITICAL event and degrades to process-local mode (documented operational
+    risk; the FSM/policy layers remain authoritative guards).
     """
 
     def __init__(self, ttl_seconds: int = 86400, max_entries: int = 10_000) -> None:
@@ -108,6 +127,18 @@ class IdempotencyManager:
         self._cache: dict[str, IdempotencyRecord] = {}
         self._in_flight: set[str] = set()
         self._lock = asyncio.Lock()
+        self._durable_disabled = False
+
+    def _durable_active(self) -> bool:
+        return not self._durable_disabled and durable.durable_enabled()
+
+    def _disable_durable(self, exc: Exception) -> None:
+        logger.critical(
+            "Durable idempotency backend failed (%s); degrading to process-local "
+            "idempotency. Cross-worker exactly-once is NOT guaranteed until fixed.",
+            exc,
+        )
+        self._durable_disabled = True
 
     def _build_key(
         self,
@@ -126,12 +157,48 @@ class IdempotencyManager:
         session_id: uuid.UUID | None,
         idempotency_key: str | None,
         capability: str | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> GatewayResponseEnvelope[Any] | None:
         """Checks if a cached result exists for the given idempotency key."""
         if not idempotency_key:
             return None
 
         key = self._build_key(merchant_id, session_id, idempotency_key, capability)
+
+        if self._durable_active():
+            try:
+                res = await durable.fetch_completed(key)
+                if res is not None:
+                    cached_json, stored_payload_hash = res
+                    # Verify payload hash matches to prevent returning stale
+                    # cached responses for modified payloads
+                    if payload is not None and stored_payload_hash is not None:
+                        current_hash = compute_payload_hash(payload)
+                        if current_hash != stored_payload_hash:
+                            logger.warning(
+                                "Durable idempotency conflict for key '%s': payload mismatch.",
+                                idempotency_key,
+                            )
+                            return GatewayResponseEnvelope[Any](
+                                status="REJECTED",
+                                capability=capability or "unknown",
+                                data=None,
+                                error=GatewayError(
+                                    code=GatewayErrorCode.IDEMPOTENCY_CONFLICT.value,
+                                    message=(
+                                        f"Idempotency key '{idempotency_key}' was previously used "
+                                        "with a different request payload."
+                                    ),
+                                    retryable=False,
+                                ),
+                                idempotency_key=idempotency_key,
+                            )
+                    logger.info("Durable idempotency hit for key '%s'", idempotency_key)
+                    return GatewayResponseEnvelope[Any].model_validate_json(cached_json)
+                return None
+            except Exception as exc:  # pragma: no cover - infrastructure failure path
+                self._disable_durable(exc)
+
         async with self._lock:
             record = self._cache.get(key)
             if not record:
@@ -142,6 +209,29 @@ class IdempotencyManager:
             if age > self._ttl_seconds:
                 del self._cache[key]
                 return None
+
+            # Verify payload hash matches to prevent returning stale
+            # cached responses for modified payloads
+            if payload is not None and record.payload_hash is not None:
+                current_hash = compute_payload_hash(payload)
+                if current_hash != record.payload_hash:
+                    logger.warning(
+                        "Idempotency conflict for key '%s': payload mismatch.", idempotency_key
+                    )
+                    return GatewayResponseEnvelope[Any](
+                        status="REJECTED",
+                        capability=capability or "unknown",
+                        data=None,
+                        error=GatewayError(
+                            code=GatewayErrorCode.IDEMPOTENCY_CONFLICT.value,
+                            message=(
+                                f"Idempotency key '{idempotency_key}' was previously used "
+                                "with a different request payload."
+                            ),
+                            retryable=False,
+                        ),
+                        idempotency_key=idempotency_key,
+                    )
 
             logger.info("Idempotency hit for key '%s'", idempotency_key)
             return record.envelope
@@ -158,6 +248,13 @@ class IdempotencyManager:
             return True
 
         key = self._build_key(merchant_id, session_id, idempotency_key, capability)
+
+        if self._durable_active():
+            try:
+                return await durable.claim(key, self._ttl_seconds)
+            except Exception as exc:  # pragma: no cover - infrastructure failure path
+                self._disable_durable(exc)
+
         async with self._lock:
             if key in self._in_flight:
                 return False
@@ -176,6 +273,14 @@ class IdempotencyManager:
             return
 
         key = self._build_key(merchant_id, session_id, idempotency_key, capability)
+
+        if self._durable_active():
+            try:
+                await durable.release(key)
+                return
+            except Exception as exc:  # pragma: no cover - infrastructure failure path
+                self._disable_durable(exc)
+
         async with self._lock:
             self._in_flight.discard(key)
 
@@ -186,12 +291,28 @@ class IdempotencyManager:
         idempotency_key: str | None,
         envelope: GatewayResponseEnvelope[Any],
         capability: str | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> None:
         """Caches the final response envelope for an idempotency key with bounded eviction."""
         if not idempotency_key:
             return
 
         key = self._build_key(merchant_id, session_id, idempotency_key, capability)
+        payload_hash = compute_payload_hash(payload)
+
+        if self._durable_active():
+            try:
+                await durable.complete(
+                    key,
+                    envelope.model_dump_json(),
+                    self._ttl_seconds,
+                    capability or "unknown",
+                    payload_hash=payload_hash,
+                )
+                return
+            except Exception as exc:  # pragma: no cover - infrastructure failure path
+                self._disable_durable(exc)
+
         async with self._lock:
             now = datetime.now(UTC)
             # Evict if capacity reached
@@ -208,13 +329,14 @@ class IdempotencyManager:
                     sorted_keys = sorted(
                         self._cache.keys(), key=lambda k: self._cache[k].created_at
                     )
-                    for k in sorted_keys[: len(self._cache) // 10]:
-                        del self._cache[k]
+                    for k in sorted_keys[: len(sorted_keys) // 5 + 1]:
+                        self._cache.pop(k, None)
 
             self._cache[key] = IdempotencyRecord(
                 envelope=envelope,
                 merchant_id=merchant_id,
                 capability=capability or "unknown",
+                payload_hash=payload_hash,
                 created_at=now,
             )
             self._in_flight.discard(key)
@@ -234,16 +356,31 @@ global_idempotency_manager = IdempotencyManager()
 # 3. Sliding-Window Rate Limiter
 # =============================================================================
 class GatewayRateLimiter:
-    """In-memory sliding-window rate limiter per session or client identifier.
+    """Sliding-window rate limiter per session or client identifier.
 
-    Note: This is a process-local limiter. In a distributed multi-worker cluster,
-    this should be backed by Redis sliding-window zset counters.
+    Defaults to a bounded process-local window. When
+    ``GATEWAY_DURABLE_HARDENING`` is enabled, request events are persisted to a
+    shared table so the configured limit is enforced across all workers and
+    survives restarts. On durable-store failure the limiter logs CRITICAL and
+    degrades to the bounded process-local window.
     """
 
     def __init__(self, max_clients: int = 10_000) -> None:
         self._max_clients = max_clients
         self._requests: dict[str, list[float]] = defaultdict(list)
         self._lock = asyncio.Lock()
+        self._durable_disabled = False
+
+    def _durable_active(self) -> bool:
+        return not self._durable_disabled and durable.durable_enabled()
+
+    def _disable_durable(self, exc: Exception) -> None:
+        logger.critical(
+            "Durable rate-limit backend failed (%s); degrading to process-local "
+            "window. Limits are per-worker until fixed.",
+            exc,
+        )
+        self._durable_disabled = True
 
     async def check_rate_limit(
         self,
@@ -252,6 +389,20 @@ class GatewayRateLimiter:
         window_seconds: int = 60,
     ) -> tuple[bool, int]:
         """Checks rate limit. Returns (is_allowed, retry_after_seconds)."""
+        if self._durable_active():
+            try:
+                return await durable.rate_check_and_hit(client_key, limit, window_seconds)
+            except Exception as exc:  # pragma: no cover - infrastructure failure path
+                self._disable_durable(exc)
+
+        return await self._check_rate_limit_local(client_key, limit, window_seconds)
+
+    async def _check_rate_limit_local(
+        self,
+        client_key: str,
+        limit: int = 60,
+        window_seconds: int = 60,
+    ) -> tuple[bool, int]:
         now = time.time()
         cutoff = now - window_seconds
 
