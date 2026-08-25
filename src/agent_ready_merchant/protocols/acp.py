@@ -14,8 +14,8 @@ import logging
 import uuid
 from typing import Any
 
+from agent_ready_merchant.gateway.constants import COMMERCE_PROTOCOL_VERSION
 from agent_ready_merchant.gateway.schemas import (
-    COMMERCE_PROTOCOL_VERSION,
     GatewayError,
     GatewayResponseEnvelope,
 )
@@ -91,6 +91,13 @@ class AgentCommerceProtocolAdapter(BaseProtocolAdapter):
         protocol_req: ProtocolRequestMessage,
     ) -> tuple[str, dict[str, Any]]:
         """Translates ACP message into canonical capability name and parameter payload."""
+        # 0. Protocol Validation
+        if protocol_req.protocol != self.protocol_name:
+            raise ValueError(
+                f"Protocol mismatch: expected '{self.protocol_name}', "
+                f"got '{protocol_req.protocol}'."
+            )
+
         # 1. Version Validation
         if protocol_req.version not in self.supported_versions:
             raise ValueError(

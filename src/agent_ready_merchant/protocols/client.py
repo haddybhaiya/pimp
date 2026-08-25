@@ -27,8 +27,8 @@ from agent_ready_merchant.buyer.schemas import (
 )
 from agent_ready_merchant.config import get_settings
 from agent_ready_merchant.gateway.canonical import CanonicalCommerceGateway
+from agent_ready_merchant.gateway.constants import COMMERCE_PROTOCOL_VERSION
 from agent_ready_merchant.gateway.schemas import (
-    COMMERCE_PROTOCOL_VERSION,
     QuoteItemRequest,
     ShippingAddressGateway,
 )
@@ -63,20 +63,26 @@ class AgentProtocolClient:
         adapter: BaseProtocolAdapter | None = None,
         gateway: CanonicalCommerceGateway | None = None,
         capabilities: set[str] | None = None,
+        autonomy_level: int | None = None,
     ) -> None:
         self.merchant_id = merchant_id
         self.buyer_agent_identifier = buyer_agent_identifier
         self.adapter = adapter or AgentCommerceProtocolAdapter()
         self.gateway = gateway or CanonicalCommerceGateway()
-        self.capabilities = capabilities or {
-            "buyer:discover",
-            "buyer:read",
-            "buyer:quote",
-            "buyer:negotiate",
-            "buyer:checkout",
-            "buyer:payment_status",
-            "buyer:orders",
-        }
+        self.autonomy_level = autonomy_level
+        self.capabilities = (
+            capabilities
+            if capabilities is not None
+            else {
+                "buyer:discover",
+                "buyer:read",
+                "buyer:quote",
+                "buyer:negotiate",
+                "buyer:checkout",
+                "buyer:payment_status",
+                "buyer:orders",
+            }
+        )
         self.context = BuyerFlowContext(
             merchant_id=merchant_id,
             buyer_agent_identifier=buyer_agent_identifier,
@@ -93,7 +99,9 @@ class AgentProtocolClient:
             merchant_id=self.merchant_id,
             session_id=stable_session_id,
             capabilities=self.capabilities,
-            autonomy_level=settings.DEFAULT_MERCHANT_AUTONOMY_LEVEL,
+            autonomy_level=self.autonomy_level
+            if self.autonomy_level is not None
+            else settings.DEFAULT_MERCHANT_AUTONOMY_LEVEL,
             max_discount_percentage=settings.DEFAULT_MAX_DISCOUNT_PERCENTAGE,
             min_margin_percentage=settings.DEFAULT_MIN_MARGIN_PERCENTAGE,
             max_single_transaction_paise=settings.MAX_SINGLE_TRANSACTION_PAISE,
@@ -370,13 +378,15 @@ class AgentProtocolClient:
         idempotency_key: str | None = None,
     ) -> ProtocolResponseMessage:
         """Converts accepted quote to an authoritative order."""
+        idem_key = idempotency_key or f"order_{quote_id}_{uuid.uuid4().hex[:8]}"
         params = {
             "quote_id": str(quote_id),
             "buyer_email": buyer_email,
             "shipping_address": shipping_address.model_dump(mode="json"),
+            "idempotency_key": idem_key,
         }
         res = await self.send_protocol_message(
-            session, "create_order", params, idempotency_key=idempotency_key
+            session, "create_order", params, idempotency_key=idem_key
         )
         if res.status == "SUCCESS" and res.result:
             self.context.active_order_id = uuid.UUID(res.result["order_id"])
@@ -393,7 +403,8 @@ class AgentProtocolClient:
         idempotency_key: str | None = None,
     ) -> ProtocolResponseMessage:
         """Requests checkout parameters and initiates payment pending state."""
-        params: dict[str, Any] = {}
+        idem_key = idempotency_key or f"chk_{order_id or quote_id}_{uuid.uuid4().hex[:8]}"
+        params: dict[str, Any] = {"idempotency_key": idem_key}
         if order_id:
             params["order_id"] = str(order_id)
         if quote_id:
@@ -404,7 +415,7 @@ class AgentProtocolClient:
             params["shipping_address"] = shipping_address.model_dump(mode="json")
 
         res = await self.send_protocol_message(
-            session, "request_checkout", params, idempotency_key=idempotency_key
+            session, "request_checkout", params, idempotency_key=idem_key
         )
         if res.status == "SUCCESS":
             self.context.current_state = BuyerCommerceState.PAYMENT_PENDING
@@ -458,6 +469,12 @@ class AgentProtocolClient:
     ) -> dict[str, Any]:
         """Simulates Razorpay payment authorization via signed webhook."""
         settings = get_settings()
+        if not settings.is_testing and not getattr(
+            settings, "ALLOW_TEST_PAYMENT_SIMULATION", False
+        ):
+            raise PermissionError(
+                "Simulated test payment authorization is only permitted in testing mode."
+            )
         status_res = await self.get_payment_status(session, order_id)
         if not status_res.result:
             raise ValueError(f"Cannot authorize payment: order {order_id} not found")
@@ -651,12 +668,23 @@ class AgentProtocolClient:
             )
 
         # 8. Calculate Shipping
-        await self.calculate_shipping(
+        ship_res = await self.calculate_shipping(
             session,
             postal_code=shipping_address.postal_code,
             country=shipping_address.country,
             quote_id=quote_id,
         )
+        if ship_res.status != "SUCCESS":
+            curr_state = (
+                self.context.current_state.value if self.context.current_state else "UNKNOWN"
+            )
+            return BuyerFlowResult(
+                is_success=False,
+                final_state=curr_state,
+                error_code=ship_res.error.code if ship_res.error else "SHIPPING_ERROR",
+                error_message=ship_res.error.message if ship_res.error else None,
+                step_count=8,
+            )
 
         # 9. Create Order
         ord_res = await self.create_order(
@@ -697,12 +725,23 @@ class AgentProtocolClient:
 
         # 12. Poll Payment Status
         pay_stat = await self.get_payment_status(session, order_id=order_id)
-        if pay_stat.status != "SUCCESS":
+        if (
+            pay_stat.status != "SUCCESS"
+            or not pay_stat.result
+            or not (
+                pay_stat.result.get("is_paid")
+                or pay_stat.result.get("status") in {"PAID", "COMPLETED", "FULFILLMENT_PENDING"}
+            )
+        ):
             return BuyerFlowResult(
                 is_success=False,
                 final_state=BuyerFailureState.PAYMENT_FAILED.value,
-                error_code=pay_stat.error.code if pay_stat.error else None,
-                error_message=pay_stat.error.message if pay_stat.error else None,
+                error_code=pay_stat.error.code if pay_stat.error else "PAYMENT_NOT_SETTLED",
+                error_message=(
+                    pay_stat.error.message
+                    if pay_stat.error
+                    else "Payment is not marked settled/paid."
+                ),
                 step_count=12,
             )
 

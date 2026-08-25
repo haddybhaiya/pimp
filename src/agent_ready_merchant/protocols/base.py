@@ -16,8 +16,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agent_ready_merchant.gateway.constants import COMMERCE_PROTOCOL_VERSION
 from agent_ready_merchant.gateway.schemas import (
-    COMMERCE_PROTOCOL_VERSION,
     GatewayError,
     GatewayResponseEnvelope,
     StateOrientedContext,
