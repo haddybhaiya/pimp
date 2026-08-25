@@ -12,6 +12,7 @@ Verifies:
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -178,20 +179,22 @@ async def seed_gateway_data(db_session: AsyncSession) -> dict[str, Any]:
     db_session.add(inv_b)
 
     # Session for Merchant A
+    token_a = "token_apex_12345"
     session_a = BuyerAgentSession(
         merchant_id=merchant.id,
         buyer_agent_identifier="agent_apex_buyer_01",
-        auth_token_hash="hash_placeholder_12345",
+        auth_token_hash=hashlib.sha256(token_a.encode("utf-8")).hexdigest(),
         status="ACTIVE",
         expires_at=datetime.now(UTC) + timedelta(hours=24),
     )
     db_session.add(session_a)
 
     # Session for Merchant B
+    token_b = "token_beta_67890"
     session_b = BuyerAgentSession(
         merchant_id=merchant_b.id,
         buyer_agent_identifier="agent_beta_buyer_02",
-        auth_token_hash="hash_placeholder_67890",
+        auth_token_hash=hashlib.sha256(token_b.encode("utf-8")).hexdigest(),
         status="ACTIVE",
         expires_at=datetime.now(UTC) + timedelta(hours=24),
     )
@@ -209,6 +212,8 @@ async def seed_gateway_data(db_session: AsyncSession) -> dict[str, Any]:
         "var_b": var_b,
         "session_a": session_a,
         "session_b": session_b,
+        "token_a": token_a,
+        "token_b": token_b,
     }
 
 
@@ -500,6 +505,12 @@ async def test_full_canonical_gateway_flow(
                 created_at=int(datetime.now(UTC).timestamp()),
             ),
         ),
+        # Step 9 reconciliation must never reach the real Razorpay API in unit tests.
+        patch.object(
+            RazorpayClient,
+            "fetch_order_payments",
+            return_value=[],
+        ),
     ):
         order_res = await gateway.create_order(db_session, order_req, context)
         assert order_res.status == "SUCCESS"
@@ -664,6 +675,7 @@ async def test_security_unknown_capability_dispatch(
         merchant_id=merchant.id,
         session_id=session_a.id,
         capabilities={"buyer:discover"},
+        auth_token=seed_gateway_data["token_a"],
     )
 
     res = await gateway.execute_capability(
@@ -731,6 +743,7 @@ async def test_fastapi_gateway_http_endpoints(
     headers = {
         "X-Merchant-ID": str(merchant.id),
         "X-Session-ID": str(session_a.id),
+        "X-Auth-Token": seed_gateway_data["token_a"],
     }
 
     # 1. GET /api/v1/gateway/merchant-representation

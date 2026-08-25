@@ -24,6 +24,7 @@ Verifies:
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -144,24 +145,27 @@ async def seed_buyer_flow_data(db_session: AsyncSession) -> dict[str, Any]:
 
     # 5. Buyer Sessions
     now = datetime.now(UTC)
+    token_alice = "token_alice_12345"
+    token_bob = "token_bob_12345"
+    token_charlie = "token_charlie_12345"
     session_a1 = BuyerAgentSession(
         merchant_id=merchant_a.id,
         buyer_agent_identifier="ai_buyer_alice",
-        auth_token_hash="hash_alice_12345",
+        auth_token_hash=hashlib.sha256(token_alice.encode("utf-8")).hexdigest(),
         status="ACTIVE",
         expires_at=now + timedelta(hours=2),
     )
     session_a2 = BuyerAgentSession(
         merchant_id=merchant_a.id,
         buyer_agent_identifier="ai_buyer_bob",
-        auth_token_hash="hash_bob_12345",
+        auth_token_hash=hashlib.sha256(token_bob.encode("utf-8")).hexdigest(),
         status="ACTIVE",
         expires_at=now + timedelta(hours=2),
     )
     session_b1 = BuyerAgentSession(
         merchant_id=merchant_b.id,
         buyer_agent_identifier="ai_buyer_charlie",
-        auth_token_hash="hash_charlie_12345",
+        auth_token_hash=hashlib.sha256(token_charlie.encode("utf-8")).hexdigest(),
         status="ACTIVE",
         expires_at=now + timedelta(hours=2),
     )
@@ -180,6 +184,9 @@ async def seed_buyer_flow_data(db_session: AsyncSession) -> dict[str, Any]:
         "session_a1": session_a1,
         "session_a2": session_a2,
         "session_b1": session_b1,
+        "token_alice": token_alice,
+        "token_bob": token_bob,
+        "token_charlie": token_charlie,
     }
 
 
@@ -647,6 +654,7 @@ async def test_security_malformed_buyer_intent_and_prompt_injection(
         merchant_id=merchant.id,
         session_id=session_a.id,
         capabilities={"buyer:discover", "buyer:read", "buyer:quote", "buyer:negotiate"},
+        auth_token=seed_buyer_flow_data["token_alice"],
     )
 
     # 1. Malformed payload with extra unallowed fields

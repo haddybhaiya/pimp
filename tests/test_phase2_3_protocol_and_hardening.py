@@ -20,6 +20,7 @@ Covers:
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -30,6 +31,7 @@ import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from agent_ready_merchant.config import get_settings
 from agent_ready_merchant.gateway.canonical import CanonicalCommerceGateway
@@ -56,6 +58,7 @@ from agent_ready_merchant.models.inventory import InventoryItem
 from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.models.order import Order
 from agent_ready_merchant.models.product import Product, ProductVariant
+from agent_ready_merchant.models.quote import PriceQuote
 from agent_ready_merchant.models.session import BuyerAgentSession
 from agent_ready_merchant.models.transaction import TransactionRecord
 from agent_ready_merchant.protocols.acp import AgentCommerceProtocolAdapter
@@ -127,10 +130,12 @@ async def seed_hardening_data(db_session: AsyncSession) -> dict[str, Any]:
     db_session.add(inv1)
 
     # Active Session for Merchant A
+    token_a = "token_acp_12345"
+    token_hash = hashlib.sha256(token_a.encode("utf-8")).hexdigest()
     session_a = BuyerAgentSession(
         merchant_id=merchant_a.id,
         buyer_agent_identifier="test_buyer_acp",
-        auth_token_hash="hash_acp_12345",
+        auth_token_hash=token_hash,
         status="ACTIVE",
         expires_at=datetime.now(UTC) + timedelta(hours=2),
     )
@@ -144,6 +149,7 @@ async def seed_hardening_data(db_session: AsyncSession) -> dict[str, Any]:
         "variant_a": var1,
         "inventory_a": inv1,
         "session_a": session_a,
+        "token_a": token_a,
     }
 
 
@@ -241,6 +247,7 @@ async def test_hardening_request_id_tracing(
         session_id=session_a.id,
         capabilities={"buyer:discover"},
         request_id=custom_request_id,
+        auth_token=seed_hardening_data["token_a"],
     )
 
     envelope = await gateway.execute_capability(
@@ -579,6 +586,7 @@ async def test_fastapi_acp_wire_endpoint(
     headers = {
         "X-Merchant-ID": str(merchant.id),
         "X-Session-ID": str(session_a.id),
+        "X-Auth-Token": seed_hardening_data["token_a"],
         "X-Commerce-Protocol-Version": COMMERCE_PROTOCOL_VERSION,
     }
 
@@ -612,3 +620,239 @@ async def test_fastapi_acp_wire_endpoint(
     assert inv_data["status"] == "SUCCESS"
     assert inv_data["result"]["in_stock"] is True
     assert inv_data["result"]["can_fulfill"] is True
+
+
+# =============================================================================
+# 7. Regression Tests for Architecture Hardening (Issues 1 - 4)
+# =============================================================================
+@pytest.mark.asyncio
+async def test_regression_issue1_session_token_cryptographic_verification(
+    db_session: AsyncSession, seed_hardening_data: dict[str, Any]
+) -> None:
+    """Issue 1: Verifies that presented session auth tokens are cryptographically validated."""
+    merchant = seed_hardening_data["merchant_a"]
+    gateway = CanonicalCommerceGateway()
+
+    # 1. Create a session with a known token hash
+    token_raw = "secret_agent_token_xyz"
+    token_hash = hashlib.sha256(token_raw.encode("utf-8")).hexdigest()
+    session = BuyerAgentSession(
+        merchant_id=merchant.id,
+        buyer_agent_identifier="auth_tester",
+        auth_token_hash=token_hash,
+        status="ACTIVE",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    db_session.add(session)
+    await db_session.commit()
+
+    # 2. Request with omitted token -> Rejection with AUTH_INVALID_CREDENTIAL (fail closed)
+    omitted_ctx = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=session.id,
+        capabilities={"buyer:discover", "buyer:read"},
+        auth_token=None,
+    )
+    res_omitted = await gateway.execute_capability(
+        db_session, "discover_products", {"limit": 5}, omitted_ctx
+    )
+    assert res_omitted.status == "REJECTED"
+    assert res_omitted.error is not None
+    assert res_omitted.error.code == "AUTH_INVALID_CREDENTIAL"
+    assert "required" in res_omitted.error.message.lower()
+
+    # 3. Request with invalid token -> Rejection with AUTH_INVALID_CREDENTIAL
+    bad_ctx = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=session.id,
+        capabilities={"buyer:discover", "buyer:read"},
+        auth_token="wrong_token_here",
+    )
+    res_bad = await gateway.execute_capability(
+        db_session, "discover_products", {"limit": 5}, bad_ctx
+    )
+    assert res_bad.status == "REJECTED"
+    assert res_bad.error is not None
+    assert res_bad.error.code == "AUTH_INVALID_CREDENTIAL"
+
+    # 4. Request with valid token -> Success
+    good_ctx = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=session.id,
+        capabilities={"buyer:discover", "buyer:read"},
+        auth_token=token_raw,
+    )
+    res_good = await gateway.execute_capability(
+        db_session, "discover_products", {"limit": 5}, good_ctx
+    )
+    assert res_good.status == "SUCCESS"
+
+
+@pytest.mark.asyncio
+async def test_regression_issue2_idempotency_payload_mismatch_rejection(
+    db_session: AsyncSession, seed_hardening_data: dict[str, Any]
+) -> None:
+    """Issue 2: Verifies that reusing an idempotency key with a changed payload is rejected."""
+    merchant = seed_hardening_data["merchant_a"]
+    session_a = seed_hardening_data["session_a"]
+    gateway = CanonicalCommerceGateway()
+    idem_key = f"idem_mismatch_test_{uuid.uuid4().hex[:8]}"
+
+    ctx = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=session_a.id,
+        capabilities={"buyer:quote", "buyer:read"},
+        idempotency_key=idem_key,
+        auth_token=seed_hardening_data["token_a"],
+    )
+
+    # 1. Initial request with quantity 1
+    payload1 = {
+        "session_id": str(session_a.id),
+        "items": [{"sku": "RUN-SHOE-PRO-UK9", "quantity": 1}],
+        "idempotency_key": idem_key,
+    }
+    res1 = await gateway.execute_capability(db_session, "get_quote", payload1, ctx)
+    assert res1.status == "SUCCESS"
+    assert res1.data is not None
+
+    # 2. Replayed request with SAME key and SAME payload -> Cached response returned
+    res1_replay = await gateway.execute_capability(db_session, "get_quote", payload1, ctx)
+    assert res1_replay.status == "SUCCESS"
+    assert res1_replay.data is not None
+
+    # 3. Replayed request with SAME key but CHANGED payload (quantity=2) -> IDEMPOTENCY_CONFLICT
+    payload2 = {
+        "session_id": str(session_a.id),
+        "items": [{"sku": "RUN-SHOE-PRO-UK9", "quantity": 2}],
+        "idempotency_key": idem_key,
+    }
+    res2_conflict = await gateway.execute_capability(db_session, "get_quote", payload2, ctx)
+    assert res2_conflict.status == "REJECTED"
+    assert res2_conflict.error is not None
+    assert res2_conflict.error.code == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_regression_issue3_negotiated_order_line_items_pricing(
+    db_session: AsyncSession, seed_hardening_data: dict[str, Any]
+) -> None:
+    """Issue 3: Verifies that an accepted negotiation updates QuoteItem line-item prices."""
+    merchant = seed_hardening_data["merchant_a"]
+    buyer = AgentProtocolClient(
+        merchant_id=merchant.id,
+        buyer_agent_identifier="line_item_pricing_buyer",
+    )
+    await buyer.initialize_session(db_session)
+
+    # 1. Get initial quote (₹12,000 = 1,200,000 paise)
+    q_res = await buyer.get_quote(
+        db_session,
+        items=[QuoteItemRequest(sku="RUN-SHOE-PRO-UK9", quantity=2)],
+    )
+    assert q_res.status == "SUCCESS"
+    assert q_res.result is not None
+    quote_id = uuid.UUID(q_res.result["quote_id"])
+
+    # 2. Negotiate 10% discount: 2,400,000 -> 2,160,000 paise (₹21,600)
+    neg_res = await buyer.negotiate_quote(
+        db_session,
+        quote_id=quote_id,
+        proposed_total_paise=2160000,
+        rationale="Volume discount for 2 pairs",
+    )
+    assert neg_res.status == "SUCCESS"
+
+    # 3. Verify QuoteItem prices in DB are updated
+    q_db = (
+        await db_session.execute(
+            select(PriceQuote)
+            .where(PriceQuote.id == quote_id)
+            .options(selectinload(PriceQuote.items))
+        )
+    ).scalar_one()
+    assert q_db.items[0].unit_price_paise == 1080000
+    assert q_db.items[0].total_price_paise == 2160000
+    assert sum(itm.total_price_paise for itm in q_db.items) == 2160000
+
+    # 4. Accept Quote and Create Order
+    await buyer.accept_quote(db_session, quote_id=quote_id)
+    shipping_address = ShippingAddressGateway(
+        full_name="Alex Runner",
+        address_line1="456 Indiranagar",
+        city="Bengaluru",
+        postal_code="560038",
+        country="IN",
+    )
+    with patch.object(
+        RazorpayClient,
+        "create_order",
+        return_value=RazorpayOrderResponse(
+            id=f"order_{uuid.uuid4().hex[:14]}",
+            amount=2160000,
+            currency="INR",
+            status="created",
+            created_at=int(datetime.now(UTC).timestamp()),
+        ),
+    ):
+        ord_res = await buyer.create_order(
+            db_session,
+            quote_id=quote_id,
+            buyer_email="buyer@example.com",
+            shipping_address=shipping_address,
+        )
+    assert ord_res.status == "SUCCESS"
+    assert ord_res.result is not None
+    order_id = uuid.UUID(ord_res.result["order_id"])
+
+    # 5. Verify Order and OrderItem pricing matches negotiated total
+    ord_db = (
+        await db_session.execute(
+            select(Order).where(Order.id == order_id).options(selectinload(Order.items))
+        )
+    ).scalar_one()
+    assert ord_db.amount_paise == 2160000
+    assert ord_db.items[0].unit_price_paise == 1080000
+    assert ord_db.items[0].total_price_paise == 2160000
+    assert sum(itm.total_price_paise for itm in ord_db.items) == ord_db.amount_paise
+
+
+@pytest.mark.asyncio
+async def test_regression_issue4_privileged_financial_timeout_not_retryable(
+    db_session: AsyncSession, seed_hardening_data: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue 4: Verifies that a timeout during create_order returns retryable=False."""
+    merchant = seed_hardening_data["merchant_a"]
+    session_a = seed_hardening_data["session_a"]
+    gateway = CanonicalCommerceGateway()
+
+    # Mock _dispatch_internal to raise TimeoutError
+    async def mock_timeout(*args: Any, **kwargs: Any) -> Any:
+        raise TimeoutError("Simulated execution timeout")
+
+    monkeypatch.setattr(gateway, "_dispatch_internal", mock_timeout)
+
+    ctx = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=session_a.id,
+        capabilities={"buyer:checkout", "buyer:orders"},
+        idempotency_key="financial_timeout_key_1",
+        auth_token=seed_hardening_data["token_a"],
+    )
+    req_payload = {
+        "quote_id": str(uuid.uuid4()),
+        "buyer_email": "timeout_test@example.com",
+        "shipping_address": {
+            "full_name": "Alex Runner",
+            "address_line1": "123 Main St",
+            "city": "Bengaluru",
+            "postal_code": "560001",
+            "country": "IN",
+        },
+        "idempotency_key": "financial_timeout_key_1",
+    }
+    res = await gateway.execute_capability(db_session, "create_order", req_payload, ctx)
+    assert res.status == "ERROR"
+    assert res.error is not None
+    assert res.error.code == "TIMEOUT_BOUNDARY_EXCEEDED"
+    assert res.error.retryable is False
