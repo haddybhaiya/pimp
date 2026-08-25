@@ -23,9 +23,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from agent_ready_merchant.gateway.schemas import (
+from agent_ready_merchant.gateway.constants import (
     COMMERCE_PROTOCOL_VERSION,
     DEFAULT_MAX_PAYLOAD_BYTES,
+)
+from agent_ready_merchant.gateway.schemas import (
     GatewayError,
     GatewayResponseEnvelope,
 )
@@ -69,6 +71,9 @@ class GatewayErrorCode(StrEnum):
     PAYLOAD_SIZE_EXCEEDED = "PAYLOAD_SIZE_EXCEEDED"
     TIMEOUT_BOUNDARY_EXCEEDED = "TIMEOUT_BOUNDARY_EXCEEDED"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+    IDEMPOTENCY_REQUIRED = "IDEMPOTENCY_REQUIRED"
+    AMBIGUOUS_SKU = "AMBIGUOUS_SKU"
+    MAX_ACTIVE_QUOTES_EXCEEDED = "MAX_ACTIVE_QUOTES_EXCEEDED"
     MALFORMED_REQUEST_SCHEMA = "MALFORMED_REQUEST_SCHEMA"
     UNSUPPORTED_PROTOCOL_VERSION = "UNSUPPORTED_PROTOCOL_VERSION"
     UNKNOWN_CAPABILITY = "UNKNOWN_CAPABILITY"
@@ -92,10 +97,14 @@ class IdempotencyManager:
     """In-memory coordinator ensuring mutating operations execute exactly once.
 
     Prevents race conditions, double reservations, and duplicate charges.
+    Note: This is a process-local implementation bounded by LRU/TTL eviction.
+    In a distributed multi-worker cluster, this coordinator should be backed by
+    a shared Redis/PostgreSQL distributed locking table.
     """
 
-    def __init__(self, ttl_seconds: int = 86400) -> None:
+    def __init__(self, ttl_seconds: int = 86400, max_entries: int = 10_000) -> None:
         self._ttl_seconds = ttl_seconds
+        self._max_entries = max_entries
         self._cache: dict[str, IdempotencyRecord] = {}
         self._in_flight: set[str] = set()
         self._lock = asyncio.Lock()
@@ -178,16 +187,35 @@ class IdempotencyManager:
         envelope: GatewayResponseEnvelope[Any],
         capability: str | None = None,
     ) -> None:
-        """Caches the final response envelope for an idempotency key."""
+        """Caches the final response envelope for an idempotency key with bounded eviction."""
         if not idempotency_key:
             return
 
         key = self._build_key(merchant_id, session_id, idempotency_key, capability)
         async with self._lock:
+            now = datetime.now(UTC)
+            # Evict if capacity reached
+            if len(self._cache) >= self._max_entries:
+                expired_keys = [
+                    k
+                    for k, r in self._cache.items()
+                    if (now - r.created_at).total_seconds() > self._ttl_seconds
+                ]
+                for k in expired_keys:
+                    del self._cache[k]
+                # If still over capacity, evict oldest entries
+                if len(self._cache) >= self._max_entries:
+                    sorted_keys = sorted(
+                        self._cache.keys(), key=lambda k: self._cache[k].created_at
+                    )
+                    for k in sorted_keys[: len(self._cache) // 10]:
+                        del self._cache[k]
+
             self._cache[key] = IdempotencyRecord(
                 envelope=envelope,
                 merchant_id=merchant_id,
                 capability=capability or "unknown",
+                created_at=now,
             )
             self._in_flight.discard(key)
             logger.debug("Cached idempotency record for '%s'", idempotency_key)
@@ -206,9 +234,14 @@ global_idempotency_manager = IdempotencyManager()
 # 3. Sliding-Window Rate Limiter
 # =============================================================================
 class GatewayRateLimiter:
-    """In-memory sliding-window rate limiter per session or client identifier."""
+    """In-memory sliding-window rate limiter per session or client identifier.
 
-    def __init__(self) -> None:
+    Note: This is a process-local limiter. In a distributed multi-worker cluster,
+    this should be backed by Redis sliding-window zset counters.
+    """
+
+    def __init__(self, max_clients: int = 10_000) -> None:
+        self._max_clients = max_clients
         self._requests: dict[str, list[float]] = defaultdict(list)
         self._lock = asyncio.Lock()
 
@@ -223,6 +256,19 @@ class GatewayRateLimiter:
         cutoff = now - window_seconds
 
         async with self._lock:
+            # Capacity guard: prune dead keys if map is full
+            if len(self._requests) >= self._max_clients and client_key not in self._requests:
+                dead_keys = [
+                    k for k, ts in self._requests.items() if not [t for t in ts if t > cutoff]
+                ]
+                for k in dead_keys:
+                    del self._requests[k]
+                if len(self._requests) >= self._max_clients:
+                    # Evict oldest 10%
+                    oldest_keys = list(self._requests.keys())[: len(self._requests) // 10]
+                    for k in oldest_keys:
+                        del self._requests[k]
+
             timestamps = self._requests[client_key]
             # Prune old timestamps
             active_timestamps = [t for t in timestamps if t > cutoff]

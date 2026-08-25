@@ -17,10 +17,20 @@ from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-T = TypeVar("T")
+from agent_ready_merchant.gateway.constants import (
+    COMMERCE_PROTOCOL_VERSION as COMMERCE_PROTOCOL_VERSION,
+)
+from agent_ready_merchant.gateway.constants import (
+    DEFAULT_MAX_PAYLOAD_BYTES as DEFAULT_MAX_PAYLOAD_BYTES,
+)
+from agent_ready_merchant.gateway.constants import (
+    MAX_64BIT_INT as MAX_64BIT_INT,
+)
+from agent_ready_merchant.gateway.constants import (
+    MIN_64BIT_INT as MIN_64BIT_INT,
+)
 
-COMMERCE_PROTOCOL_VERSION: str = "2026-03-01"
-DEFAULT_MAX_PAYLOAD_BYTES: int = 65_536  # 64 KB bounded limit
+T = TypeVar("T")
 
 
 class GatewayError(BaseModel):
@@ -104,10 +114,10 @@ class DiscoverProductsRequest(BaseModel):
     )
     category: str | None = Field(default=None, max_length=50, description="Product category filter")
     min_price_paise: int | None = Field(
-        default=None, ge=0, description="Minimum base price filter in paise"
+        default=None, ge=0, le=MAX_64BIT_INT, description="Minimum base price filter in paise"
     )
     max_price_paise: int | None = Field(
-        default=None, ge=0, description="Maximum base price filter in paise"
+        default=None, ge=0, le=MAX_64BIT_INT, description="Maximum base price filter in paise"
     )
     in_stock_only: bool = Field(default=False, description="Filter for in-stock products only")
     limit: int = Field(default=5, ge=1, le=20, description="Page size limit")
@@ -122,7 +132,9 @@ class ProductSummaryItem(BaseModel):
     sku: str = Field(..., description="Canonical product SKU")
     title: str = Field(..., description="Product title")
     category: str = Field(..., description="Product category")
-    base_price_paise: int = Field(..., gt=0, description="Base catalog price in integer paise")
+    base_price_paise: int = Field(
+        ..., gt=0, le=MAX_64BIT_INT, description="Base catalog price in integer paise"
+    )
     currency: str = Field(default="INR", description="Currency standard (INR)")
     is_negotiable: bool = Field(..., description="Whether price negotiation is permitted")
     in_stock: bool = Field(..., description="General availability status")
@@ -160,10 +172,10 @@ class VariantDetailItem(BaseModel):
     sku: str = Field(..., description="Variant specific SKU")
     title: str = Field(..., description="Variant title (e.g. Size / Color)")
     price_override_paise: int | None = Field(
-        default=None, gt=0, description="Optional variant price override in paise"
+        default=None, gt=0, le=MAX_64BIT_INT, description="Optional variant price override in paise"
     )
     effective_price_paise: int = Field(
-        ..., gt=0, description="Effective unit price in integer paise"
+        ..., gt=0, le=MAX_64BIT_INT, description="Effective unit price in integer paise"
     )
     currency: str = Field(default="INR", description="Currency standard (INR)")
     is_active: bool = Field(..., description="Whether this variant is active")
@@ -182,7 +194,9 @@ class GetProductResponse(BaseModel):
     title: str = Field(..., description="Product title")
     description: str = Field(default="", description="Product description")
     category: str = Field(..., description="Product category")
-    base_price_paise: int = Field(..., gt=0, description="Base catalog price in paise")
+    base_price_paise: int = Field(
+        ..., gt=0, le=MAX_64BIT_INT, description="Base catalog price in paise"
+    )
     currency: str = Field(default="INR", description="Currency standard (INR)")
     is_negotiable: bool = Field(..., description="Whether price negotiation is permitted")
     is_active: bool = Field(..., description="Whether product is active for purchase")
@@ -264,8 +278,12 @@ class QuoteLineItemDetail(BaseModel):
     sku: str = Field(..., description="Line item SKU")
     title: str = Field(..., description="Item title")
     quantity: int = Field(..., ge=1, description="Quantity")
-    unit_price_paise: int = Field(..., gt=0, description="Unit price in integer paise")
-    total_price_paise: int = Field(..., gt=0, description="Line item subtotal in integer paise")
+    unit_price_paise: int = Field(
+        ..., gt=0, le=MAX_64BIT_INT, description="Unit price in integer paise"
+    )
+    total_price_paise: int = Field(
+        ..., gt=0, le=MAX_64BIT_INT, description="Line item subtotal in integer paise"
+    )
 
 
 class GetQuoteResponse(BaseModel):
@@ -278,10 +296,16 @@ class GetQuoteResponse(BaseModel):
     status: str = Field(..., description="Authoritative quote status (PROPOSED, ACCEPTED, etc.)")
     currency: str = Field(default="INR", description="Currency standard (INR)")
     items: list[QuoteLineItemDetail] = Field(..., description="Line items")
-    subtotal_paise: int = Field(..., ge=0, description="Gross item subtotal in paise")
-    discount_paise: int = Field(..., ge=0, description="Applied discount in paise")
-    shipping_paise: int = Field(..., ge=0, description="Shipping fee in paise")
-    total_paise: int = Field(..., gt=0, description="Final binding total amount in paise")
+    subtotal_paise: int = Field(
+        ..., ge=0, le=MAX_64BIT_INT, description="Gross item subtotal in paise"
+    )
+    discount_paise: int = Field(
+        ..., ge=0, le=MAX_64BIT_INT, description="Applied discount in paise"
+    )
+    shipping_paise: int = Field(..., ge=0, le=MAX_64BIT_INT, description="Shipping fee in paise")
+    total_paise: int = Field(
+        ..., gt=0, le=MAX_64BIT_INT, description="Final binding total amount in paise"
+    )
     expires_at: datetime = Field(..., description="Quote expiration deadline (UTC)")
     is_expired: bool = Field(..., description="Whether quote is currently expired")
 
@@ -300,7 +324,9 @@ class CalculateShippingRequest(BaseModel):
     destination_country: str = Field(
         default="IN", max_length=2, description="Destination country code"
     )
-    subtotal_paise: int | None = Field(default=None, ge=0, description="Cart subtotal in paise")
+    subtotal_paise: int | None = Field(
+        default=None, ge=0, le=MAX_64BIT_INT, description="Cart subtotal in paise"
+    )
     quote_id: uuid.UUID | None = Field(
         default=None, description="Optional existing quote ID to calculate for"
     )
@@ -313,13 +339,15 @@ class CalculateShippingResponse(BaseModel):
 
     destination_country: str = Field(..., description="Destination country")
     destination_postal_code: str = Field(..., description="Destination postal code")
-    shipping_fee_paise: int = Field(..., ge=0, description="Computed shipping fee in paise")
+    shipping_fee_paise: int = Field(
+        ..., ge=0, le=MAX_64BIT_INT, description="Computed shipping fee in paise"
+    )
     currency: str = Field(default="INR", description="Currency standard (INR)")
     qualifies_for_free_shipping: bool = Field(
         ..., description="Whether subtotal meets free shipping threshold"
     )
     free_shipping_threshold_paise: int = Field(
-        ..., ge=0, description="Merchant free shipping threshold in paise"
+        ..., ge=0, le=MAX_64BIT_INT, description="Merchant free shipping threshold in paise"
     )
     estimated_delivery_days: int = Field(
         default=3, ge=1, description="Estimated delivery window in days"
@@ -372,7 +400,9 @@ class CreateOrderGatewayResponse(BaseModel):
     order_id: uuid.UUID = Field(..., description="Unique merchant order identifier")
     quote_id: uuid.UUID = Field(..., description="Originating quote identifier")
     status: str = Field(..., description="Authoritative order state (e.g. PENDING_PAYMENT)")
-    amount_paise: int = Field(..., gt=0, description="Total order amount in integer paise")
+    amount_paise: int = Field(
+        ..., gt=0, le=MAX_64BIT_INT, description="Total order amount in integer paise"
+    )
     currency: str = Field(default="INR", description="Currency standard (INR)")
     buyer_email: str = Field(..., description="Buyer notification email")
     rzp_order_id: str | None = Field(
@@ -418,7 +448,9 @@ class RequestCheckoutResponse(BaseModel):
 
     order_id: uuid.UUID = Field(..., description="Merchant order identifier")
     rzp_order_id: str = Field(..., description="External Razorpay order ID")
-    amount_paise: int = Field(..., gt=0, description="Charge amount in integer paise")
+    amount_paise: int = Field(
+        ..., gt=0, le=MAX_64BIT_INT, description="Charge amount in integer paise"
+    )
     currency: str = Field(default="INR", description="Currency standard (INR)")
     status: str = Field(..., description="Order payment status (e.g. PENDING_PAYMENT)")
     key_id: str = Field(..., description="Razorpay public test key ID for client SDK")
@@ -450,7 +482,7 @@ class PaymentAttemptItem(BaseModel):
     payment_id: uuid.UUID = Field(..., description="Internal payment attempt identifier")
     rzp_payment_id: str | None = Field(default=None, description="Razorpay payment ID")
     status: str = Field(..., description="Attempt status (INITIATED, CAPTURED, FAILED)")
-    amount_paise: int = Field(..., ge=0, description="Attempted amount in paise")
+    amount_paise: int = Field(..., ge=0, le=MAX_64BIT_INT, description="Attempted amount in paise")
     payment_method: str | None = Field(default=None, description="Payment method used")
     error_code: str | None = Field(default=None, description="Failure error code if failed")
     created_at: datetime = Field(..., description="Attempt timestamp")
@@ -466,7 +498,9 @@ class GetPaymentStatusResponse(BaseModel):
         ...,
         description="Authoritative order state (e.g. PAID, PENDING_PAYMENT)",
     )
-    amount_paise: int = Field(..., gt=0, description="Total order amount in paise")
+    amount_paise: int = Field(
+        ..., gt=0, le=MAX_64BIT_INT, description="Total order amount in paise"
+    )
     currency: str = Field(default="INR", description="Currency standard (INR)")
     is_paid: bool = Field(
         ...,
@@ -561,7 +595,7 @@ class NegotiateQuoteGatewayRequest(BaseModel):
 
     quote_id: uuid.UUID = Field(..., description="ID of the PriceQuote to negotiate")
     proposed_total_paise: int = Field(
-        ..., gt=0, description="Buyer proposed total price in integer paise"
+        ..., gt=0, le=MAX_64BIT_INT, description="Buyer proposed total price in integer paise"
     )
     rationale: str | None = Field(
         default=None, max_length=500, description="Negotiation justification/rationale"
@@ -581,10 +615,14 @@ class NegotiateQuoteGatewayResponse(BaseModel):
         ..., description="Quote status after negotiation (e.g. PROPOSED, PENDING_APPROVAL)"
     )
     currency: str = Field(default="INR", description="Currency code")
-    subtotal_paise: int = Field(..., ge=0, description="Subtotal before discounts")
-    discount_paise: int = Field(..., ge=0, description="Applied discount in paise")
-    shipping_paise: int = Field(..., ge=0, description="Shipping cost in paise")
-    total_paise: int = Field(..., gt=0, description="Effective total in paise")
+    subtotal_paise: int = Field(
+        ..., ge=0, le=MAX_64BIT_INT, description="Subtotal before discounts"
+    )
+    discount_paise: int = Field(
+        ..., ge=0, le=MAX_64BIT_INT, description="Applied discount in paise"
+    )
+    shipping_paise: int = Field(..., ge=0, le=MAX_64BIT_INT, description="Shipping cost in paise")
+    total_paise: int = Field(..., gt=0, le=MAX_64BIT_INT, description="Effective total in paise")
     verdict: str = Field(
         ..., description="Policy evaluation verdict (ALLOW, ESCALATE_APPROVAL, DENY)"
     )
@@ -611,7 +649,9 @@ class AcceptQuoteGatewayResponse(BaseModel):
 
     quote_id: uuid.UUID = Field(..., description="Accepted quote ID")
     status: str = Field(default="ACCEPTED", description="Authoritative quote status (ACCEPTED)")
-    total_paise: int = Field(..., gt=0, description="Final accepted total in paise")
+    total_paise: int = Field(
+        ..., gt=0, le=MAX_64BIT_INT, description="Final accepted total in paise"
+    )
     currency: str = Field(default="INR", description="Currency standard (INR)")
     accepted_at: datetime = Field(..., description="Acceptance timestamp")
     expires_at: datetime = Field(..., description="Quote expiration timestamp")
@@ -636,7 +676,9 @@ class GetOrderStatusResponse(BaseModel):
     order_id: uuid.UUID = Field(..., description="Unique merchant order identifier")
     quote_id: uuid.UUID = Field(..., description="Originating quote ID")
     status: str = Field(..., description="Order state (e.g. PAID, PENDING_PAYMENT, COMPLETED)")
-    amount_paise: int = Field(..., gt=0, description="Total order amount in paise")
+    amount_paise: int = Field(
+        ..., gt=0, le=MAX_64BIT_INT, description="Total order amount in paise"
+    )
     currency: str = Field(default="INR", description="Currency standard (INR)")
     buyer_email: str = Field(..., description="Buyer notification email")
     rzp_order_id: str | None = Field(default=None, description="Associated Razorpay order ID")

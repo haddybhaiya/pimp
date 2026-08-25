@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_ready_merchant.config import get_settings
 from agent_ready_merchant.models.merchant import Merchant
+from agent_ready_merchant.models.policy import PolicyRule
 from agent_ready_merchant.models.product import Product
 from agent_ready_merchant.tools.base import GatewayContext
 
@@ -277,25 +278,11 @@ async def build_merchant_representation(
     categories = list((await session.execute(cat_stmt)).scalars().all())
 
     # 3. Derive Policy Rules & Compute Cryptographic Policy Hash
-    policy_dict: dict[str, Any] = {
-        "max_discount_percentage": context.max_discount_percentage
-        if context
-        else settings.DEFAULT_MAX_DISCOUNT_PERCENTAGE,
-        "min_margin_percentage": context.min_margin_percentage
-        if context
-        else settings.DEFAULT_MIN_MARGIN_PERCENTAGE,
-        "max_single_transaction_paise": context.max_single_transaction_paise
-        if context
-        else settings.MAX_SINGLE_TRANSACTION_PAISE,
-        "autonomy_level": context.autonomy_level
-        if context
-        else settings.DEFAULT_MERCHANT_AUTONOMY_LEVEL,
-        "currency": merchant.currency,
-        "merchant_id": str(merchant.id),
-    }
-    policy_hash = hashlib.sha256(
-        json.dumps(policy_dict, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+    rule_stmt = select(PolicyRule).where(
+        PolicyRule.merchant_id == merchant_id,
+        PolicyRule.is_active.is_(True),
+    )
+    rules = list((await session.execute(rule_stmt)).scalars().all())
 
     autonomy = context.autonomy_level if context else settings.DEFAULT_MERCHANT_AUTONOMY_LEVEL
     max_disc = (
@@ -308,6 +295,38 @@ async def build_merchant_representation(
         context.max_single_transaction_paise if context else settings.MAX_SINGLE_TRANSACTION_PAISE
     )
 
+    for r in rules:
+        if r.rule_type == "MAX_DISCOUNT_PCT":
+            val = r.rule_value.get("percentage") or r.rule_value.get("value")
+            if val is not None:
+                max_disc = float(val)
+        elif r.rule_type == "MIN_MARGIN_PCT":
+            val = r.rule_value.get("percentage") or r.rule_value.get("value")
+            if val is not None:
+                min_margin = float(val)
+        elif r.rule_type == "MAX_CART_VALUE":
+            val = r.rule_value.get("max_paise") or r.rule_value.get("value")
+            if val is not None:
+                max_tx = int(val)
+        elif r.rule_type == "AUTONOMY_LEVEL":
+            val = r.rule_value.get("level") or r.rule_value.get("value")
+            if val is not None:
+                autonomy = int(val)
+
+    policy_dict: dict[str, Any] = {
+        "max_discount_percentage": max_disc,
+        "min_margin_percentage": min_margin,
+        "max_single_transaction_paise": max_tx,
+        "autonomy_level": autonomy,
+        "currency": merchant.currency,
+        "merchant_id": str(merchant.id),
+    }
+    policy_hash = hashlib.sha256(
+        json.dumps(policy_dict, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    is_verified = merchant.status == "ACTIVE"
+
     return MerchantAIRepresentation(
         identity=MerchantIdentityInfo(
             merchant_id=merchant.id,
@@ -315,7 +334,7 @@ async def build_merchant_representation(
             slug=merchant.slug,
             status=merchant.status,
             currency=merchant.currency,
-            is_verified=True,
+            is_verified=is_verified,
         ),
         products=CatalogProductsSummary(
             active_products_count=active_count or 0,

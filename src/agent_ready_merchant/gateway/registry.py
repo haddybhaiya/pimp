@@ -45,7 +45,7 @@ from agent_ready_merchant.tools.base import GatewayContext
 class CapabilityDefinition(BaseModel):
     """Authoritative declaration of an exposed commerce gateway capability."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str = Field(..., description="Canonical capability identifier")
     description: str = Field(..., description="Capability functional description")
@@ -161,7 +161,7 @@ class CapabilityRegistry:
             monetary_impact=True,
             required_capability="buyer:quote",
             approval_requirement="NONE_FOR_BASE_PRICE_ESCALATE_FOR_OFF_POLICY_DISCOUNT",
-            idempotency_requirement=True,
+            idempotency_requirement=False,
             failure_states=[
                 "SESSION_NOT_FOUND",
                 "SKU_NOT_FOUND",
@@ -184,7 +184,7 @@ class CapabilityRegistry:
             monetary_impact=True,
             required_capability="buyer:negotiate",
             approval_requirement="ESCALATE_IF_EXCEEDS_DISCOUNT_OR_BELOW_MARGIN",
-            idempotency_requirement=True,
+            idempotency_requirement=False,
             failure_states=[
                 "QUOTE_NOT_FOUND",
                 "QUOTE_EXPIRED",
@@ -206,7 +206,7 @@ class CapabilityRegistry:
             monetary_impact=True,
             required_capability="buyer:quote",
             approval_requirement="NONE",
-            idempotency_requirement=True,
+            idempotency_requirement=False,
             failure_states=[
                 "QUOTE_NOT_FOUND",
                 "QUOTE_EXPIRED",
