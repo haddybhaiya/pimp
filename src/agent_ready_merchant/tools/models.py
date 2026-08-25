@@ -115,6 +115,7 @@ class RequestCheckoutParams(BaseModel):
     quote_id: uuid.UUID | None = Field(default=None)
     buyer_email: EmailStr | None = Field(default=None)
     shipping_address: ShippingAddressParam | None = Field(default=None)
+    idempotency_key: str | None = Field(default=None, max_length=128)
 
 
 class AcceptQuoteParams(BaseModel):

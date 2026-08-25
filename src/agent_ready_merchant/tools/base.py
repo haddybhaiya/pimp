@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_ready_merchant.gateway.schemas import COMMERCE_PROTOCOL_VERSION
+from agent_ready_merchant.gateway.constants import COMMERCE_PROTOCOL_VERSION
 
 
 @dataclass

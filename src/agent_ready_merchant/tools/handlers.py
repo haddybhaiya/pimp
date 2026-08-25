@@ -554,7 +554,18 @@ class CheckInventoryTool(BaseTool):
             )
             prod = (await session.execute(prod_stmt)).scalar_one_or_none()
             if prod and prod.variants:
-                variant = prod.variants[0]
+                if len(prod.variants) == 1:
+                    variant = prod.variants[0]
+                else:
+                    return {
+                        "error": {
+                            "code": "AMBIGUOUS_SKU",
+                            "message": (
+                                f"Product SKU '{p.sku}' has multiple variants. "
+                                "Please specify a specific variant SKU."
+                            ),
+                        }
+                    }
 
         if not variant:
             return {
@@ -586,10 +597,12 @@ class CheckInventoryTool(BaseTool):
 
 
 class CalculateShippingTool(BaseTool):
-    """Tool to compute authoritative logistics shipping fees."""
+    """Tool to calculate shipping rates."""
 
     name = "calculate_shipping"
-    description = "Compute authoritative logistics shipping fees and free shipping eligibility."
+    description = (
+        "Calculate shipping fees and free shipping eligibility based on cart subtotal and location."
+    )
     side_effect_class = "READ_ONLY"
     required_capability = "buyer:discover"
     param_schema = CalculateShippingParams
@@ -605,10 +618,8 @@ class CalculateShippingTool(BaseTool):
         if p.destination_country != "IN":
             return {
                 "error": {
-                    "code": "UNSUPPORTED_SHIPPING_COUNTRY",
-                    "message": (
-                        f"Shipping to country '{p.destination_country}' is not supported (IN only)."
-                    ),
+                    "code": "UNSUPPORTED_COUNTRY",
+                    "message": f"Shipping to '{p.destination_country}' is not supported.",
                 }
             }
 
@@ -631,20 +642,18 @@ class CalculateShippingTool(BaseTool):
         elif p.subtotal_paise is not None:
             subtotal = p.subtotal_paise
 
-        # Standard merchant shipping rule: Free shipping for orders >= ₹1,000 (100,000 paise)
-        free_shipping_threshold = 100_000
-        standard_shipping_fee = 10_000
-
-        qualifies_free = subtotal >= free_shipping_threshold
-        shipping_fee = 0 if qualifies_free else standard_shipping_fee
+        standard_fee = 10_000  # ₹100
+        free_threshold = 100_000  # ₹1,000
+        qualifies_free = subtotal >= free_threshold
+        fee = 0 if qualifies_free else standard_fee
 
         return {
             "destination_country": p.destination_country,
             "destination_postal_code": p.destination_postal_code,
-            "shipping_fee_paise": shipping_fee,
+            "shipping_fee_paise": fee,
             "currency": "INR",
             "qualifies_for_free_shipping": qualifies_free,
-            "free_shipping_threshold_paise": free_shipping_threshold,
+            "free_shipping_threshold_paise": free_threshold,
             "estimated_delivery_days": 3,
             "service_carrier": "Standard Logistics",
         }
@@ -719,6 +728,30 @@ class RequestCheckoutTool(BaseTool):
                 "error": {
                     "code": "INVALID_CHECKOUT_PARAMETERS",
                     "message": "Either order_id or quote_id must be provided.",
+                }
+            }
+
+        if order.status in {"PAID", "COMPLETED"}:
+            return {
+                "error": {
+                    "code": "ORDER_ALREADY_PAID",
+                    "message": f"Order '{order.id}' is already paid.",
+                }
+            }
+        if order.status == "CANCELLED":
+            return {
+                "error": {
+                    "code": "ORDER_CANCELLED",
+                    "message": f"Order '{order.id}' has been cancelled.",
+                }
+            }
+        if not order.rzp_order_id:
+            return {
+                "error": {
+                    "code": "NO_RZP_ORDER_ID",
+                    "message": (
+                        f"Order '{order.id}' does not have a valid external Razorpay order ID."
+                    ),
                 }
             }
 
