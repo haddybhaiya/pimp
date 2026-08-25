@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_ready_merchant.config import get_settings
 from agent_ready_merchant.gateway.canonical import CanonicalCommerceGateway
+from agent_ready_merchant.gateway.constants import COMMERCE_PROTOCOL_VERSION
 from agent_ready_merchant.gateway.hardening import (
     GatewayErrorCode,
     GatewayRateLimiter,
@@ -43,7 +44,6 @@ from agent_ready_merchant.gateway.hardening import (
     validate_payload_size,
 )
 from agent_ready_merchant.gateway.schemas import (
-    COMMERCE_PROTOCOL_VERSION,
     GatewayResponseEnvelope,
     QuoteItemRequest,
     ShippingAddressGateway,

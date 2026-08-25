@@ -42,13 +42,13 @@ from agent_ready_merchant.gateway.schemas import (
     RequestCheckoutRequest,
     ShippingAddressGateway,
 )
+from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
+from agent_ready_merchant.integrations.razorpay.models import RazorpayOrderResponse
 from agent_ready_merchant.models.inventory import InventoryItem
 from agent_ready_merchant.models.merchant import Merchant
-from agent_ready_merchant.models.order import Order
 from agent_ready_merchant.models.product import Product, ProductVariant
 from agent_ready_merchant.models.quote import PriceQuote
 from agent_ready_merchant.models.session import BuyerAgentSession
-from agent_ready_merchant.services.payment_service import PaymentService
 from agent_ready_merchant.state_machines.price_quote import PriceQuoteStateMachine
 from agent_ready_merchant.tools.base import GatewayContext
 
@@ -476,27 +476,31 @@ async def test_full_canonical_gateway_flow(
         ),
     )
 
-    with patch.object(
-        PaymentService,
-        "create_order_from_accepted_quote",
-    ) as mock_create_order:
-        mock_order = Order(
-            merchant_id=merchant.id,
-            quote_id=quote_id,
-            buyer_email="runner@example.com",
-            status="PENDING_PAYMENT",
-            amount_paise=1200000,
-            currency="INR",
-            rzp_order_id="order_mock_canonical_12345",
-            shipping_address=order_req.shipping_address.model_dump(),
-        )
-        mock_order.id = uuid.uuid4()
-        mock_order.created_at = datetime.now(UTC)
-        mock_create_order.return_value = mock_order
-
-        db_session.add(mock_order)
-        await db_session.flush()
-
+    with (
+        patch.object(
+            RazorpayClient,
+            "create_order",
+            return_value=RazorpayOrderResponse(
+                id="order_mock_canonical_12345",
+                amount=1200000,
+                currency="INR",
+                status="created",
+                created_at=int(datetime.now(UTC).timestamp()),
+            ),
+        ),
+        patch.object(
+            RazorpayClient,
+            "fetch_order",
+            return_value=RazorpayOrderResponse(
+                id="order_mock_canonical_12345",
+                amount=1200000,
+                currency="INR",
+                status="created",
+                amount_paid=0,
+                created_at=int(datetime.now(UTC).timestamp()),
+            ),
+        ),
+    ):
         order_res = await gateway.create_order(db_session, order_req, context)
         assert order_res.status == "SUCCESS"
         assert order_res.data is not None

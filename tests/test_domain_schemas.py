@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
+from agent_ready_merchant.config import get_settings
 from agent_ready_merchant.schemas.merchant import MerchantCreate
 from agent_ready_merchant.schemas.order import OrderCreate, OrderItemCreate
 from agent_ready_merchant.schemas.product import ProductCreate
@@ -14,12 +15,13 @@ from agent_ready_merchant.schemas.quote import PriceQuoteCreate, QuoteItemCreate
 
 def test_merchant_create_valid() -> None:
     """Verifies valid merchant creation schema."""
+    settings = get_settings()
     merchant = MerchantCreate(
         name="Test Merchant",
         slug="test-merchant",
         status="ACTIVE",
         currency="INR",
-        rzp_key_id="rzp_test_TCoeDLqErxWQuL",
+        rzp_key_id=settings.RAZORPAY_KEY_ID,
     )
     assert merchant.name == "Test Merchant"
     assert merchant.slug == "test-merchant"
@@ -27,11 +29,12 @@ def test_merchant_create_valid() -> None:
 
 def test_merchant_create_invalid_slug() -> None:
     """Verifies that invalid slug characters raise validation error."""
+    settings = get_settings()
     with pytest.raises(ValidationError):
         MerchantCreate(
             name="Test",
             slug="Invalid Slug With Spaces!",
-            rzp_key_id="rzp_test_123",
+            rzp_key_id=settings.RAZORPAY_KEY_ID,
         )
 
 

@@ -396,6 +396,40 @@ async def test_ai_buyer_bounded_negotiation_escalation_and_deny(
     assert neg_fixed.error is not None
     assert "NEGOTIABLE" in neg_fixed.error.code or "POLICY_REJECTED" in neg_fixed.error.code
 
+    # 4. Autonomy escalation: Supervised HITL merchant (autonomy_level=2)
+    # requires human approval for discounts
+    buyer_esc = AIBuyerClient(
+        merchant_id=merchant.id,
+        buyer_agent_identifier="ai_buyer_escalator",
+        autonomy_level=2,
+    )
+    await buyer_esc.initialize_session(db_session)
+
+    q_esc = await buyer_esc.get_quote(
+        db_session, items=[QuoteItemRequest(sku="RUN-SHOE-PRO-UK9", quantity=1)]
+    )
+    assert q_esc.status == "SUCCESS"
+    assert q_esc.data is not None
+    esc_quote_id = q_esc.data.quote_id
+
+    neg_esc = await buyer_esc.negotiate_quote(
+        db_session,
+        quote_id=esc_quote_id,
+        proposed_total_paise=1056000,
+        rationale="Requesting manager approval discount",
+    )
+    assert neg_esc.status == "SUCCESS"
+    assert neg_esc.data is not None
+    assert neg_esc.data.verdict == "ESCALATE_APPROVAL"
+    assert neg_esc.data.status == "PENDING_APPROVAL"
+
+    # Verify quote state and total DID NOT MUTATE without merchant approval
+    quote_esc_db = (
+        await db_session.execute(select(PriceQuote).where(PriceQuote.id == esc_quote_id))
+    ).scalar_one()
+    assert quote_esc_db.status == "PROPOSED"
+    assert quote_esc_db.total_paise == 1200000
+
 
 # =============================================================================
 # 4. Security Tests Matrix
