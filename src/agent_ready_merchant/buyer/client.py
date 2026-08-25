@@ -73,18 +73,24 @@ class AIBuyerClient:
         buyer_agent_identifier: str = "ai_buyer_agent_v1",
         gateway: CanonicalCommerceGateway | None = None,
         capabilities: set[str] | None = None,
+        autonomy_level: int | None = None,
     ) -> None:
         self.merchant_id = merchant_id
         self.buyer_agent_identifier = buyer_agent_identifier
         self.gateway = gateway or CanonicalCommerceGateway()
-        self.capabilities = capabilities or {
-            "buyer:discover",
-            "buyer:read",
-            "buyer:quote",
-            "buyer:negotiate",
-            "buyer:checkout",
-            "buyer:payment_status",
-        }
+        self.autonomy_level = autonomy_level
+        self.capabilities = (
+            capabilities
+            if capabilities is not None
+            else {
+                "buyer:discover",
+                "buyer:read",
+                "buyer:quote",
+                "buyer:negotiate",
+                "buyer:checkout",
+                "buyer:payment_status",
+            }
+        )
         self.context = BuyerFlowContext(
             merchant_id=merchant_id,
             buyer_agent_identifier=buyer_agent_identifier,
@@ -97,7 +103,9 @@ class AIBuyerClient:
             merchant_id=self.merchant_id,
             session_id=session_id,
             capabilities=self.capabilities,
-            autonomy_level=settings.DEFAULT_MERCHANT_AUTONOMY_LEVEL,
+            autonomy_level=self.autonomy_level
+            if self.autonomy_level is not None
+            else settings.DEFAULT_MERCHANT_AUTONOMY_LEVEL,
             max_discount_percentage=settings.DEFAULT_MAX_DISCOUNT_PERCENTAGE,
             min_margin_percentage=settings.DEFAULT_MIN_MARGIN_PERCENTAGE,
             max_single_transaction_paise=settings.MAX_SINGLE_TRANSACTION_PAISE,
@@ -416,14 +424,19 @@ class AIBuyerClient:
         quote_id: uuid.UUID,
         buyer_email: str,
         shipping_address: ShippingAddressGateway,
+        idempotency_key: str | None = None,
     ) -> GatewayResponseEnvelope[CreateOrderGatewayResponse]:
         """Converts an accepted quote into a locked Order."""
+        idem_key = idempotency_key or f"ord_{quote_id}_{uuid.uuid4().hex[:8]}"
         req = CreateOrderGatewayRequest(
             quote_id=quote_id,
             buyer_email=buyer_email,
             shipping_address=shipping_address,
+            idempotency_key=idem_key,
         )
-        res = await self.gateway.create_order(session, req, self._get_gateway_context())
+        ctx = self._get_gateway_context()
+        ctx.idempotency_key = idem_key
+        res = await self.gateway.create_order(session, req, ctx)
         if res.status == "SUCCESS" and res.data:
             self.context.active_order_id = res.data.order_id
             self.context.rzp_order_id = res.data.rzp_order_id
@@ -455,15 +468,21 @@ class AIBuyerClient:
         quote_id: uuid.UUID | None = None,
         buyer_email: str | None = None,
         shipping_address: ShippingAddressGateway | None = None,
+        idempotency_key: str | None = None,
     ) -> GatewayResponseEnvelope[RequestCheckoutResponse]:
         """Requests checkout session parameters and payment metadata."""
+        target_order_id = order_id or self.context.active_order_id
+        idem_key = idempotency_key or f"chk_{target_order_id or quote_id}_{uuid.uuid4().hex[:8]}"
         req = RequestCheckoutRequest(
-            order_id=order_id or self.context.active_order_id,
+            order_id=target_order_id,
             quote_id=quote_id,
             buyer_email=buyer_email,
             shipping_address=shipping_address,
+            idempotency_key=idem_key,
         )
-        res = await self.gateway.request_checkout(session, req, self._get_gateway_context())
+        ctx = self._get_gateway_context()
+        ctx.idempotency_key = idem_key
+        res = await self.gateway.request_checkout(session, req, ctx)
         if res.status == "SUCCESS" and res.data:
             self.context.active_order_id = res.data.order_id
             self.context.rzp_order_id = res.data.rzp_order_id
@@ -492,6 +511,12 @@ class AIBuyerClient:
         it must deliver an authentic HMAC signed webhook to PaymentService.
         """
         settings = get_settings()
+        if not settings.is_testing and not getattr(
+            settings, "ALLOW_TEST_PAYMENT_SIMULATION", False
+        ):
+            raise PermissionError(
+                "Simulated test payment authorization is only permitted in testing mode."
+            )
         status_res = await self.get_payment_status(session, order_id)
         if not status_res.data:
             raise ValueError(f"Cannot authorize payment: order {order_id} not found")
@@ -649,7 +674,13 @@ class AIBuyerClient:
             return self._build_result(False, "INVENTORY_CHANGED", inv_res.error)
 
         # 5. Calculate Shipping
-        await self.calculate_shipping(session, destination_postal_code=shipping_address.postal_code)
+        ship_res = await self.calculate_shipping(
+            session,
+            destination_postal_code=shipping_address.postal_code,
+            destination_country=shipping_address.country,
+        )
+        if ship_res.status != "SUCCESS":
+            return self._build_result(False, "SHIPPING_UNAVAILABLE", ship_res.error)
 
         # 6. Request Quote
         quote_items = [QuoteItemRequest(sku=target_variant_sku, quantity=quantity)]

@@ -16,12 +16,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from agent_ready_merchant.config import get_settings
 from agent_ready_merchant.db.concurrency import OptimisticLockError
+from agent_ready_merchant.gateway.constants import COMMERCE_PROTOCOL_VERSION
 from agent_ready_merchant.gateway.hardening import (
     GatewayErrorCode,
     global_idempotency_manager,
@@ -359,7 +360,17 @@ class CanonicalCommerceGateway:
             )
             prod = (await session.execute(prod_stmt)).scalar_one_or_none()
             if prod and prod.variants:
-                variant = prod.variants[0]
+                if len(prod.variants) == 1:
+                    variant = prod.variants[0]
+                else:
+                    return self._rejected_envelope(
+                        "check_inventory",
+                        GatewayErrorCode.AMBIGUOUS_SKU.value,
+                        (
+                            f"Product SKU '{request.sku}' has multiple variants. "
+                            "Please specify a specific variant SKU."
+                        ),
+                    )
 
         if not variant:
             return self._rejected_envelope(
@@ -519,6 +530,23 @@ class CanonicalCommerceGateway:
                 "At least 1 item is required to generate a new price quote.",
             )
 
+        # Check active quotes limit per buyer session
+        settings = get_settings()
+        max_active_quotes = getattr(settings, "MAX_ACTIVE_QUOTES_PER_BUYER", 5)
+        active_quotes_stmt = select(func.count(PriceQuote.id)).where(
+            PriceQuote.merchant_id == context.merchant_id,
+            PriceQuote.session_id == context.session_id,
+            PriceQuote.status.in_(["PROPOSED", "NEGOTIATING", "ACCEPTED"]),
+            PriceQuote.expires_at > datetime.now(UTC),
+        )
+        active_quotes_count = (await session.execute(active_quotes_stmt)).scalar() or 0
+        if active_quotes_count >= max_active_quotes:
+            return self._rejected_envelope(
+                "get_quote",
+                GatewayErrorCode.MAX_ACTIVE_QUOTES_EXCEEDED.value,
+                f"Maximum active quotes limit ({max_active_quotes}) reached for session.",
+            )
+
         # Generate new quote
         now = datetime.now(UTC)
         subtotal = 0
@@ -558,11 +586,11 @@ class CanonicalCommerceGateway:
                         variant = active_vars[0]
                         variant.product = prod
 
-            if not variant or not variant.product.is_active:
+            if not variant or not variant.product.is_active or not variant.is_active:
                 return self._rejected_envelope(
                     "get_quote",
                     "SKU_NOT_FOUND",
-                    f"Product or variant for SKU '{req_item.sku}' not found.",
+                    f"Product or variant for SKU '{req_item.sku}' not found or inactive.",
                 )
 
             inv = variant.inventory_item
@@ -824,8 +852,10 @@ class CanonicalCommerceGateway:
                 session_id=context.session_id,
             )
         except ValueError as exc:
+            await session.rollback()
             return self._rejected_envelope("create_order", "ORDER_CREATION_FAILED", str(exc))
         except RazorpayError as exc:
+            await session.rollback()
             return self._error_envelope(
                 "create_order",
                 GatewayErrorCode.COMMERCE_PAYMENT_GATEWAY_ERROR.value,
@@ -833,6 +863,7 @@ class CanonicalCommerceGateway:
                 retryable=True,
             )
         except OptimisticLockError as exc:
+            await session.rollback()
             return self._rejected_envelope("create_order", "CONCURRENCY_CONFLICT", str(exc))
 
         # Query audit event created
@@ -892,16 +923,21 @@ class CanonicalCommerceGateway:
         order: Order | None = None
 
         if request.order_id:
-            ord_stmt = select(Order).where(
-                Order.id == request.order_id,
-                Order.merchant_id == context.merchant_id,
+            ord_stmt = (
+                select(Order)
+                .join(PriceQuote, Order.quote_id == PriceQuote.id)
+                .where(
+                    Order.id == request.order_id,
+                    Order.merchant_id == context.merchant_id,
+                    PriceQuote.session_id == context.session_id,
+                )
             )
             order = (await session.execute(ord_stmt)).scalar_one_or_none()
             if not order:
                 return self._rejected_envelope(
                     "request_checkout",
                     "ORDER_NOT_FOUND",
-                    f"Order with ID '{request.order_id}' not found for authenticated merchant.",
+                    f"Order with ID '{request.order_id}' not found for authenticated session.",
                 )
         elif request.quote_id:
             if not request.buyer_email or not request.shipping_address:
@@ -926,10 +962,12 @@ class CanonicalCommerceGateway:
                     session_id=context.session_id,
                 )
             except ValueError as exc:
+                await session.rollback()
                 return self._rejected_envelope(
                     "request_checkout", "CHECKOUT_CREATION_FAILED", str(exc)
                 )
             except RazorpayError as exc:
+                await session.rollback()
                 return self._error_envelope(
                     "request_checkout",
                     GatewayErrorCode.COMMERCE_PAYMENT_GATEWAY_ERROR.value,
@@ -937,6 +975,7 @@ class CanonicalCommerceGateway:
                     retryable=True,
                 )
             except OptimisticLockError as exc:
+                await session.rollback()
                 return self._rejected_envelope("request_checkout", "CONCURRENCY_CONFLICT", str(exc))
         else:
             return self._rejected_envelope(
@@ -1005,16 +1044,21 @@ class CanonicalCommerceGateway:
                 "get_payment_status", "CAPABILITY_DENIED", auth_err or "Unauthorized"
             )
 
-        ord_stmt = select(Order).where(
-            Order.id == request.order_id,
-            Order.merchant_id == context.merchant_id,
+        ord_stmt = (
+            select(Order)
+            .join(PriceQuote, Order.quote_id == PriceQuote.id)
+            .where(
+                Order.id == request.order_id,
+                Order.merchant_id == context.merchant_id,
+                PriceQuote.session_id == context.session_id,
+            )
         )
         order = (await session.execute(ord_stmt)).scalar_one_or_none()
         if not order:
             return self._rejected_envelope(
                 "get_payment_status",
                 "ORDER_NOT_FOUND",
-                f"Order with ID '{request.order_id}' not found for authenticated merchant.",
+                f"Order with ID '{request.order_id}' not found for authenticated session.",
             )
 
         # Reconcile if order pending and has external order ID
@@ -1155,6 +1199,12 @@ class CanonicalCommerceGateway:
         context: GatewayContext,
     ) -> GatewayResponseEnvelope[TerminateSessionResponse]:
         """Terminates an active BuyerAgentSession."""
+        auth_ok, auth_err = CapabilityRegistry.check_authorization("terminate_session", context)
+        if not auth_ok:
+            return self._rejected_envelope(
+                "terminate_session", "CAPABILITY_DENIED", auth_err or "Unauthorized"
+            )
+
         if request.session_id != context.session_id:
             return self._rejected_envelope(
                 "terminate_session",
@@ -1552,16 +1602,21 @@ class CanonicalCommerceGateway:
                 "get_order_status", "CAPABILITY_DENIED", auth_err or "Unauthorized"
             )
 
-        stmt = select(Order).where(
-            Order.id == request.order_id,
-            Order.merchant_id == context.merchant_id,
+        stmt = (
+            select(Order)
+            .join(PriceQuote, Order.quote_id == PriceQuote.id)
+            .where(
+                Order.id == request.order_id,
+                Order.merchant_id == context.merchant_id,
+                PriceQuote.session_id == context.session_id,
+            )
         )
         order = (await session.execute(stmt)).scalar_one_or_none()
         if not order:
             return self._rejected_envelope(
                 "get_order_status",
                 "ORDER_NOT_FOUND",
-                f"Order '{request.order_id}' not found for active merchant.",
+                f"Order '{request.order_id}' not found for active session.",
             )
 
         resp_data = GetOrderStatusResponse(
@@ -1629,6 +1684,65 @@ class CanonicalCommerceGateway:
                 f"Capability '{capability_name}' is not registered in the canonical registry.",
                 request_id=request_id,
             )
+
+        # 1b. Schema Version Check
+        if context.schema_version and context.schema_version != COMMERCE_PROTOCOL_VERSION:
+            return self._error_envelope(
+                capability_name,
+                GatewayErrorCode.UNSUPPORTED_PROTOCOL_VERSION.value,
+                (
+                    f"Unsupported protocol version '{context.schema_version}'. "
+                    f"Expected '{COMMERCE_PROTOCOL_VERSION}'."
+                ),
+                retryable=False,
+                request_id=request_id,
+            )
+
+        # 1c. Mandatory Idempotency Requirement Check
+        if cap_def.idempotency_requirement and not idempotency_key:
+            return self._rejected_envelope(
+                capability_name,
+                GatewayErrorCode.IDEMPOTENCY_REQUIRED.value,
+                f"Capability '{capability_name}' requires a non-empty idempotency key.",
+                request_id=request_id,
+            )
+
+        # 1d. Authoritative Session Validation & Capability Derivation
+        if capability_name != "initialize_session" and context.session_id:
+            sess_stmt = select(BuyerAgentSession).where(
+                BuyerAgentSession.id == context.session_id,
+                BuyerAgentSession.merchant_id == context.merchant_id,
+            )
+            db_sess = (await session.execute(sess_stmt)).scalar_one_or_none()
+            if not db_sess:
+                return self._rejected_envelope(
+                    capability_name,
+                    GatewayErrorCode.AUTH_SESSION_NOT_FOUND.value,
+                    f"Session '{context.session_id}' not found for authenticated merchant.",
+                    request_id=request_id,
+                )
+            if db_sess.status != "ACTIVE":
+                return self._rejected_envelope(
+                    capability_name,
+                    GatewayErrorCode.AUTH_SESSION_EXPIRED.value,
+                    f"Session '{context.session_id}' is not active (status: {db_sess.status}).",
+                    request_id=request_id,
+                )
+            now = datetime.now(UTC)
+            sess_exp = (
+                db_sess.expires_at
+                if db_sess.expires_at.tzinfo is not None
+                else db_sess.expires_at.replace(tzinfo=UTC)
+            )
+            if now > sess_exp:
+                db_sess.status = "EXPIRED"
+                await session.flush()
+                return self._rejected_envelope(
+                    capability_name,
+                    GatewayErrorCode.AUTH_SESSION_EXPIRED.value,
+                    f"Session '{context.session_id}' has expired.",
+                    request_id=request_id,
+                )
 
         # 2. Bounded Payload Size Validation (Max 64 KB)
         is_payload_valid, payload_size = validate_payload_size(payload)

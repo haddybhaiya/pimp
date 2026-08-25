@@ -269,11 +269,8 @@ def create_app() -> FastAPI:
         DiscoverProductsRequest,
         DiscoverProductsResponse,
         GatewayResponseEnvelope,
-        GetOrderStatusRequest,
         GetOrderStatusResponse,
-        GetPaymentStatusRequest,
         GetPaymentStatusResponse,
-        GetProductRequest,
         GetProductResponse,
         GetQuoteRequest,
         GetQuoteResponse,
@@ -296,9 +293,7 @@ def create_app() -> FastAPI:
         request_id: uuid.UUID | None = None,
         idempotency_key: str | None = None,
     ) -> GatewayContext:
-        if capabilities_hdr:
-            caps = {c.strip() for c in capabilities_hdr.split(",") if c.strip()}
-        else:
+        if session_id:
             caps = {
                 "buyer:discover",
                 "buyer:read",
@@ -307,9 +302,16 @@ def create_app() -> FastAPI:
                 "buyer:checkout",
                 "buyer:payment_status",
             }
+        else:
+            caps = {"buyer:discover", "buyer:read"}
+
+        if capabilities_hdr:
+            requested = {c.strip() for c in capabilities_hdr.split(",") if c.strip()}
+            caps = caps.intersection(requested)
+
         return GatewayContext(
             merchant_id=merchant_id,
-            session_id=session_id or uuid.uuid4(),
+            session_id=session_id or uuid.UUID("00000000-0000-0000-0000-000000000000"),
             capabilities=caps,
             autonomy_level=settings.DEFAULT_MERCHANT_AUTONOMY_LEVEL,
             max_discount_percentage=settings.DEFAULT_MAX_DISCOUNT_PERCENTAGE,
@@ -383,9 +385,11 @@ def create_app() -> FastAPI:
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
-    ) -> GatewayResponseEnvelope[DiscoverProductsResponse]:
+    ) -> GatewayResponseEnvelope[Any]:
         ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
-        return await gateway_instance.discover_products(db, req, ctx)
+        return await gateway_instance.execute_capability(
+            db, "discover_products", req.model_dump(mode="json"), ctx
+        )
 
     @app.get(
         "/api/v1/gateway/products/{sku}",
@@ -400,9 +404,9 @@ def create_app() -> FastAPI:
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
-    ) -> GatewayResponseEnvelope[GetProductResponse]:
+    ) -> GatewayResponseEnvelope[Any]:
         ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
-        return await gateway_instance.get_product(db, GetProductRequest(sku=sku), ctx)
+        return await gateway_instance.execute_capability(db, "get_product", {"sku": sku}, ctx)
 
     @app.post(
         "/api/v1/gateway/inventory/check",
@@ -417,9 +421,11 @@ def create_app() -> FastAPI:
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
-    ) -> GatewayResponseEnvelope[CheckInventoryResponse]:
+    ) -> GatewayResponseEnvelope[Any]:
         ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
-        return await gateway_instance.check_inventory(db, req, ctx)
+        return await gateway_instance.execute_capability(
+            db, "check_inventory", req.model_dump(mode="json"), ctx
+        )
 
     @app.post(
         "/api/v1/gateway/quotes",
@@ -434,9 +440,11 @@ def create_app() -> FastAPI:
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
-    ) -> GatewayResponseEnvelope[GetQuoteResponse]:
+    ) -> GatewayResponseEnvelope[Any]:
         ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
-        return await gateway_instance.get_quote(db, req, ctx)
+        return await gateway_instance.execute_capability(
+            db, "get_quote", req.model_dump(mode="json"), ctx
+        )
 
     @app.post(
         "/api/v1/gateway/shipping/calculate",
@@ -451,9 +459,11 @@ def create_app() -> FastAPI:
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
-    ) -> GatewayResponseEnvelope[CalculateShippingResponse]:
+    ) -> GatewayResponseEnvelope[Any]:
         ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
-        return await gateway_instance.calculate_shipping(db, req, ctx)
+        return await gateway_instance.execute_capability(
+            db, "calculate_shipping", req.model_dump(mode="json"), ctx
+        )
 
     @app.post(
         "/api/v1/gateway/orders",
@@ -468,9 +478,11 @@ def create_app() -> FastAPI:
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
-    ) -> GatewayResponseEnvelope[CreateOrderGatewayResponse]:
+    ) -> GatewayResponseEnvelope[Any]:
         ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
-        return await gateway_instance.create_order(db, req, ctx)
+        return await gateway_instance.execute_capability(
+            db, "create_order", req.model_dump(mode="json"), ctx
+        )
 
     @app.post(
         "/api/v1/gateway/checkout",
@@ -485,9 +497,11 @@ def create_app() -> FastAPI:
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
-    ) -> GatewayResponseEnvelope[RequestCheckoutResponse]:
+    ) -> GatewayResponseEnvelope[Any]:
         ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
-        return await gateway_instance.request_checkout(db, req, ctx)
+        return await gateway_instance.execute_capability(
+            db, "request_checkout", req.model_dump(mode="json"), ctx
+        )
 
     @app.get(
         "/api/v1/gateway/payments/{order_id}/status",
@@ -502,10 +516,10 @@ def create_app() -> FastAPI:
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
-    ) -> GatewayResponseEnvelope[GetPaymentStatusResponse]:
+    ) -> GatewayResponseEnvelope[Any]:
         ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
-        return await gateway_instance.get_payment_status(
-            db, GetPaymentStatusRequest(order_id=order_id), ctx
+        return await gateway_instance.execute_capability(
+            db, "get_payment_status", {"order_id": str(order_id)}, ctx
         )
 
     @app.post(
@@ -534,9 +548,11 @@ def create_app() -> FastAPI:
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
-    ) -> GatewayResponseEnvelope[TerminateSessionResponse]:
+    ) -> GatewayResponseEnvelope[Any]:
         ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
-        return await gateway_instance.terminate_session(db, req, ctx)
+        return await gateway_instance.execute_capability(
+            db, "terminate_session", req.model_dump(mode="json"), ctx
+        )
 
     @app.post(
         "/api/v1/gateway/quotes/negotiate",
@@ -551,9 +567,11 @@ def create_app() -> FastAPI:
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
-    ) -> GatewayResponseEnvelope[NegotiateQuoteGatewayResponse]:
+    ) -> GatewayResponseEnvelope[Any]:
         ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
-        return await gateway_instance.negotiate_quote(db, req, ctx)
+        return await gateway_instance.execute_capability(
+            db, "negotiate_quote", req.model_dump(mode="json"), ctx
+        )
 
     @app.post(
         "/api/v1/gateway/quotes/accept",
@@ -568,9 +586,11 @@ def create_app() -> FastAPI:
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
-    ) -> GatewayResponseEnvelope[AcceptQuoteGatewayResponse]:
+    ) -> GatewayResponseEnvelope[Any]:
         ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
-        return await gateway_instance.accept_quote(db, req, ctx)
+        return await gateway_instance.execute_capability(
+            db, "accept_quote", req.model_dump(mode="json"), ctx
+        )
 
     @app.get(
         "/api/v1/gateway/orders/{order_id}/status",
@@ -585,10 +605,10 @@ def create_app() -> FastAPI:
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
-    ) -> GatewayResponseEnvelope[GetOrderStatusResponse]:
+    ) -> GatewayResponseEnvelope[Any]:
         ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
-        return await gateway_instance.get_order_status(
-            db, GetOrderStatusRequest(order_id=order_id), ctx
+        return await gateway_instance.execute_capability(
+            db, "get_order_status", {"order_id": str(order_id)}, ctx
         )
 
     # =========================================================================
