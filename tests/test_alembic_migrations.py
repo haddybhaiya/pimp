@@ -10,7 +10,7 @@ def test_alembic_script_directory_and_head() -> None:
     script = ScriptDirectory.from_config(config)
 
     head = script.get_current_head()
-    assert head == "002_gateway_hardening"
+    assert head == "003_session_capability_grants"
 
     revision = script.get_revision("001_initial_schema")
     assert revision is not None
@@ -19,3 +19,7 @@ def test_alembic_script_directory_and_head() -> None:
     hardening_revision = script.get_revision("002_gateway_hardening")
     assert hardening_revision is not None
     assert hardening_revision.down_revision == "001_initial_schema"
+
+    grants_revision = script.get_revision("003_session_capability_grants")
+    assert grants_revision is not None
+    assert grants_revision.down_revision == "002_gateway_hardening"

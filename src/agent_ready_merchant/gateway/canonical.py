@@ -93,6 +93,17 @@ from agent_ready_merchant.tools.gateway import ToolGateway
 
 logger = logging.getLogger("agent_ready_merchant.gateway.canonical")
 
+_ALLOWED_BUYER_CAPABILITIES: frozenset[str] = frozenset(
+    {
+        "buyer:discover",
+        "buyer:read",
+        "buyer:quote",
+        "buyer:negotiate",
+        "buyer:checkout",
+        "buyer:payment_status",
+    }
+)
+
 
 class CanonicalCommerceGateway:
     """Server-authoritative boundary between arbitrary AI buyers/adapters and commerce domain."""
@@ -1139,10 +1150,18 @@ class CanonicalCommerceGateway:
         raw_token = request.auth_token_raw or f"token_{uuid.uuid4().hex}"
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
+        requested_caps = {
+            c.strip()
+            for c in request.requested_capabilities
+            if c.strip() in _ALLOWED_BUYER_CAPABILITIES
+        }
+        granted_caps = sorted(requested_caps or _ALLOWED_BUYER_CAPABILITIES)
+
         buyer_session = BuyerAgentSession(
             merchant_id=merchant_id,
             buyer_agent_identifier=request.buyer_agent_identifier,
             auth_token_hash=token_hash,
+            granted_capabilities=",".join(granted_caps),
             status="ACTIVE",
             expires_at=expires_at,
         )
@@ -1167,7 +1186,7 @@ class CanonicalCommerceGateway:
             merchant_id=merchant_id,
             buyer_agent_identifier=request.buyer_agent_identifier,
             status="ACTIVE",
-            granted_capabilities=request.requested_capabilities,
+            granted_capabilities=granted_caps,
             auth_token_hash=token_hash,
             expires_at=expires_at,
             created_at=buyer_session.created_at or now,
@@ -1403,7 +1422,8 @@ class CanonicalCommerceGateway:
             )
 
         # Policy ALLOW: advance quote state
-        # Update quote line items to reflect negotiated prices proportionally
+        # Apply negotiated per-line prices keeping every line feasible under
+        # ck_*_items_total_arithmetic (total_price_paise = unit_price_paise * quantity).
         for itm, prop in zip(quote.items, item_proposals, strict=False):
             itm.unit_price_paise = prop.proposed_unit_price_paise
             itm.total_price_paise = prop.proposed_unit_price_paise * itm.quantity
@@ -1411,10 +1431,22 @@ class CanonicalCommerceGateway:
         item_sum = sum(itm.total_price_paise for itm in quote.items)
         remainder = proposed_goods_paise - item_sum
         if remainder != 0 and quote.items:
-            quote.items[0].total_price_paise += remainder
-            quote.items[0].unit_price_paise = (
-                quote.items[0].total_price_paise // quote.items[0].quantity
-            )
+            # Prefer absorbing rounding residue into a quantity-1 line where any
+            # total is arithmetically valid.
+            unit_line = next((i for i in quote.items if i.quantity == 1), None)
+            if (
+                unit_line is not None
+                and unit_line.total_price_paise + remainder > 0
+            ):
+                unit_line.total_price_paise += remainder
+                unit_line.unit_price_paise = unit_line.total_price_paise
+
+        # True up quote-level totals against the feasible line sums so
+        # ck_price_quotes_total_arithmetic holds without violating per-line
+        # arithmetic (subtotal_paise itself is FSM-immutable).
+        final_subtotal = sum(itm.total_price_paise for itm in quote.items)
+        final_discount = max(0, quote.subtotal_paise - final_subtotal)
+        final_total = quote.subtotal_paise - final_discount + quote.shipping_paise
 
         if quote.status == "PROPOSED":
             await PriceQuoteStateMachine.transition(
@@ -1433,8 +1465,8 @@ class CanonicalCommerceGateway:
             actor_type="BUYER_AGENT",
             reason="Counter-offer accepted by policy",
             additional_updates={
-                "discount_paise": calculated_discount,
-                "total_paise": request.proposed_total_paise,
+                "discount_paise": final_discount,
+                "total_paise": final_total,
                 "discount_reason": request.rationale or "Negotiated discount approved",
             },
         )
@@ -1448,7 +1480,8 @@ class CanonicalCommerceGateway:
             payload={
                 "quote_id": str(quote.id),
                 "proposed_total_paise": request.proposed_total_paise,
-                "discount_paise": calculated_discount,
+                "applied_discount_paise": final_discount,
+                "applied_total_paise": final_total,
                 "verdict": "ALLOW",
             },
             session_id=context.session_id,
@@ -1459,9 +1492,9 @@ class CanonicalCommerceGateway:
             status="PROPOSED",
             currency="INR",
             subtotal_paise=quote.subtotal_paise,
-            discount_paise=calculated_discount,
+            discount_paise=final_discount,
             shipping_paise=quote.shipping_paise,
-            total_paise=request.proposed_total_paise,
+            total_paise=final_total,
             verdict="ALLOW",
             rule_code=eval_res.rule_code,
             reason="Counter-offer within authorized autonomy bounds",
@@ -1774,6 +1807,16 @@ class CanonicalCommerceGateway:
                         "Invalid session authentication token.",
                         request_id=request_id,
                     )
+
+            # Server-authoritative capability derivation: narrow request-derived
+            # grants to the persisted session grant. Sessions without a stored
+            # grant (legacy rows) retain the previous default-grant behavior.
+            stored_caps_raw = db_sess.granted_capabilities
+            if stored_caps_raw:
+                stored_caps = {
+                    c.strip() for c in stored_caps_raw.split(",") if c.strip()
+                }
+                context.capabilities = context.capabilities & stored_caps
 
         # 2. Bounded Payload Size Validation (Max 64 KB)
         is_payload_valid, payload_size = validate_payload_size(payload)

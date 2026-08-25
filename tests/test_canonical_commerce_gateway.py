@@ -827,3 +827,93 @@ async def test_fastapi_gateway_http_endpoints(
     exec_json = exec_resp.json()
     assert exec_json["status"] == "SUCCESS"
     assert exec_json["data"]["can_fulfill"] is True
+
+
+# =============================================================================
+# 6. Server-Authoritative Session Capability Grants
+# =============================================================================
+@pytest.mark.asyncio
+async def test_dispatcher_enforces_persisted_capability_grant(
+    db_session: AsyncSession, seed_gateway_data: dict[str, Any]
+) -> None:
+    """A session's persisted grant must narrow request-derived capabilities.
+
+    Even when the wire context claims financial capabilities, the dispatcher
+    must intersect them with the grant stored on BuyerAgentSession so callers
+    cannot execute capabilities their session never received.
+    """
+    merchant = seed_gateway_data["merchant_a"]
+    session_row = BuyerAgentSession(
+        merchant_id=merchant.id,
+        buyer_agent_identifier="limited-grant-agent",
+        auth_token_hash=hashlib.sha256(b"grant-test-token").hexdigest(),
+        granted_capabilities="buyer:read,buyer:quote",
+        status="ACTIVE",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    db_session.add(session_row)
+    await db_session.flush()
+
+    gateway = CanonicalCommerceGateway()
+    context = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=session_row.id,
+        capabilities={
+            "buyer:discover",
+            "buyer:read",
+            "buyer:quote",
+            "buyer:negotiate",
+            "buyer:checkout",
+            "buyer:payment_status",
+        },
+        auth_token="grant-test-token",
+    )
+
+    res = await gateway.execute_capability(
+        db_session,
+        "request_checkout",
+        {"order_id": str(uuid.uuid4()), "idempotency_key": "grant-test-key-1"},
+        context,
+    )
+    assert res.status == "REJECTED"
+    assert res.error is not None
+    assert res.error.code == "CAPABILITY_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_allows_caps_within_persisted_grant(
+    db_session: AsyncSession, seed_gateway_data: dict[str, Any]
+) -> None:
+    """Capabilities inside the stored grant keep working (no over-narrowing)."""
+    merchant = seed_gateway_data["merchant_a"]
+    session_row = BuyerAgentSession(
+        merchant_id=merchant.id,
+        buyer_agent_identifier="full-grant-agent",
+        auth_token_hash=hashlib.sha256(b"full-token").hexdigest(),
+        granted_capabilities=(
+            "buyer:discover,buyer:read,buyer:quote,"
+            "buyer:negotiate,buyer:checkout,buyer:payment_status"
+        ),
+        status="ACTIVE",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    db_session.add(session_row)
+    await db_session.flush()
+
+    gateway = CanonicalCommerceGateway()
+    context = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=session_row.id,
+        capabilities={"buyer:discover", "buyer:read"},
+        auth_token="full-token",
+    )
+
+    res = await gateway.execute_capability(
+        db_session,
+        "check_inventory",
+        {"sku": "RUN-SHOE-PRO-UK9", "requested_quantity": 1},
+        context,
+    )
+    assert res.status != "REJECTED" or (
+        res.error is not None and res.error.code != "CAPABILITY_DENIED"
+    )
