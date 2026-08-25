@@ -292,6 +292,7 @@ def create_app() -> FastAPI:
         settings: Settings,
         request_id: uuid.UUID | None = None,
         idempotency_key: str | None = None,
+        auth_token: str | None = None,
     ) -> GatewayContext:
         if session_id:
             caps = {
@@ -319,6 +320,7 @@ def create_app() -> FastAPI:
             max_single_transaction_paise=settings.MAX_SINGLE_TRANSACTION_PAISE,
             request_id=request_id or uuid.uuid4(),
             idempotency_key=idempotency_key,
+            auth_token=auth_token,
         )
 
     gateway_instance = CanonicalCommerceGateway()
@@ -333,10 +335,17 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> MerchantAIRepresentation:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id,
+            x_session_id,
+            x_capabilities,
+            current_settings,
+            auth_token=x_auth_token,
+        )
         try:
             return await gateway_instance.get_merchant_representation(db, x_merchant_id, ctx)
         except ValueError as exc:
@@ -366,10 +375,17 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id,
+            x_session_id,
+            x_capabilities,
+            current_settings,
+            auth_token=x_auth_token,
+        )
         return await gateway_instance.execute_capability(db, req.capability, req.payload, ctx)
 
     @app.post(
@@ -383,10 +399,13 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id, x_session_id, x_capabilities, current_settings, auth_token=x_auth_token
+        )
         return await gateway_instance.execute_capability(
             db, "discover_products", req.model_dump(mode="json"), ctx
         )
@@ -402,10 +421,13 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id, x_session_id, x_capabilities, current_settings, auth_token=x_auth_token
+        )
         return await gateway_instance.execute_capability(db, "get_product", {"sku": sku}, ctx)
 
     @app.post(
@@ -419,10 +441,13 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id, x_session_id, x_capabilities, current_settings, auth_token=x_auth_token
+        )
         return await gateway_instance.execute_capability(
             db, "check_inventory", req.model_dump(mode="json"), ctx
         )
@@ -438,10 +463,13 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id, x_session_id, x_capabilities, current_settings, auth_token=x_auth_token
+        )
         return await gateway_instance.execute_capability(
             db, "get_quote", req.model_dump(mode="json"), ctx
         )
@@ -457,10 +485,13 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id, x_session_id, x_capabilities, current_settings, auth_token=x_auth_token
+        )
         return await gateway_instance.execute_capability(
             db, "calculate_shipping", req.model_dump(mode="json"), ctx
         )
@@ -476,10 +507,13 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id, x_session_id, x_capabilities, current_settings, auth_token=x_auth_token
+        )
         return await gateway_instance.execute_capability(
             db, "create_order", req.model_dump(mode="json"), ctx
         )
@@ -495,10 +529,13 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id, x_session_id, x_capabilities, current_settings, auth_token=x_auth_token
+        )
         return await gateway_instance.execute_capability(
             db, "request_checkout", req.model_dump(mode="json"), ctx
         )
@@ -514,10 +551,13 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id, x_session_id, x_capabilities, current_settings, auth_token=x_auth_token
+        )
         return await gateway_instance.execute_capability(
             db, "get_payment_status", {"order_id": str(order_id)}, ctx
         )
@@ -546,10 +586,13 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id, x_session_id, x_capabilities, current_settings, auth_token=x_auth_token
+        )
         return await gateway_instance.execute_capability(
             db, "terminate_session", req.model_dump(mode="json"), ctx
         )
@@ -565,10 +608,13 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id, x_session_id, x_capabilities, current_settings, auth_token=x_auth_token
+        )
         return await gateway_instance.execute_capability(
             db, "negotiate_quote", req.model_dump(mode="json"), ctx
         )
@@ -584,10 +630,13 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id, x_session_id, x_capabilities, current_settings, auth_token=x_auth_token
+        )
         return await gateway_instance.execute_capability(
             db, "accept_quote", req.model_dump(mode="json"), ctx
         )
@@ -603,10 +652,13 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> GatewayResponseEnvelope[Any]:
-        ctx = _get_context(x_merchant_id, x_session_id, x_capabilities, current_settings)
+        ctx = _get_context(
+            x_merchant_id, x_session_id, x_capabilities, current_settings, auth_token=x_auth_token
+        )
         return await gateway_instance.execute_capability(
             db, "get_order_status", {"order_id": str(order_id)}, ctx
         )
@@ -633,6 +685,7 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         x_request_id: uuid.UUID | None = Header(default=None, alias="X-Request-ID"),
         x_idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
         db: AsyncSession = Depends(get_db_session),
@@ -648,6 +701,7 @@ def create_app() -> FastAPI:
             settings=current_settings,
             request_id=req_id,
             idempotency_key=idemp_key,
+            auth_token=x_auth_token,
         )
 
         try:
