@@ -12,7 +12,11 @@ from pydantic import SecretStr
 from agent_ready_merchant.integrations.razorpay.exceptions import (
     RazorpayAPIError,
     RazorpayAuthenticationError,
+    RazorpayBadRequestError,
     RazorpayNetworkError,
+    RazorpayNotFoundError,
+    RazorpayRateLimitError,
+    RazorpayServerError,
     RazorpayTimeoutError,
 )
 from agent_ready_merchant.integrations.razorpay.models import (
@@ -95,6 +99,30 @@ class RazorpayClient:
                     error_code,
                     description,
                 )
+                if response.status_code == 400:
+                    raise RazorpayBadRequestError(
+                        status_code=response.status_code,
+                        error_code=error_code,
+                        description=description,
+                    )
+                if response.status_code == 404:
+                    raise RazorpayNotFoundError(
+                        status_code=response.status_code,
+                        error_code=error_code,
+                        description=description,
+                    )
+                if response.status_code == 429:
+                    raise RazorpayRateLimitError(
+                        status_code=response.status_code,
+                        error_code=error_code,
+                        description=description,
+                    )
+                if response.status_code >= 500:
+                    raise RazorpayServerError(
+                        status_code=response.status_code,
+                        error_code=error_code,
+                        description=description,
+                    )
                 raise RazorpayAPIError(
                     status_code=response.status_code,
                     error_code=error_code,
