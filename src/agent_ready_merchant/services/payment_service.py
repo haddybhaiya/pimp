@@ -19,7 +19,13 @@ from agent_ready_merchant.db.session import get_session_factory
 from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
 from agent_ready_merchant.integrations.razorpay.exceptions import (
     AmountMismatchFraudError,
+    CurrencyMismatchFraudError,
+    OrderMismatchError,
+    RazorpayAPIError,
     RazorpayError,
+    RazorpayNetworkError,
+    RazorpayTimeoutError,
+    TransactionBindingError,
 )
 from agent_ready_merchant.integrations.razorpay.webhook import (
     assert_valid_webhook_signature,
@@ -30,6 +36,10 @@ from agent_ready_merchant.models.order import Order, OrderItem
 from agent_ready_merchant.models.payment import PaymentAttempt
 from agent_ready_merchant.models.quote import PriceQuote
 from agent_ready_merchant.models.transaction import TransactionRecord
+from agent_ready_merchant.state_machines.base import (
+    InvalidStateTransitionError,
+    TerminalStateError,
+)
 from agent_ready_merchant.state_machines.order import OrderStateMachine
 from agent_ready_merchant.state_machines.payment_attempt import PaymentAttemptStateMachine
 
@@ -41,6 +51,36 @@ _EXTERNAL_OUTCOME_EVENT = "EXTERNAL_ORDER_OUTCOME"
 
 class PaymentService:
     """Server-authoritative coordinator for Orders, Payments, and Razorpay interactions."""
+
+    @classmethod
+    def validate_transaction_binding(
+        cls,
+        payment_attempt: PaymentAttempt,
+        order: Order,
+        merchant_id: uuid.UUID,
+        amount_paise: int,
+    ) -> None:
+        """Enforces strict multi-entity binding invariants before committing ledger entries."""
+        if payment_attempt.order_id != order.id:
+            raise TransactionBindingError(
+                f"Transaction binding violation: payment attempt order "
+                f"'{payment_attempt.order_id}' does not match target order '{order.id}'"
+            )
+        if merchant_id != order.merchant_id:
+            raise TransactionBindingError(
+                f"Transaction binding violation: merchant '{merchant_id}' "
+                f"does not match order merchant '{order.merchant_id}'"
+            )
+        if payment_attempt.status != "CAPTURED":
+            raise TransactionBindingError(
+                f"Transaction binding violation: payment attempt is in status "
+                f"'{payment_attempt.status}', must be 'CAPTURED' to commit credit"
+            )
+        if amount_paise != order.amount_paise or amount_paise != payment_attempt.amount_paise:
+            raise TransactionBindingError(
+                f"Transaction binding violation: amount {amount_paise} does not match "
+                f"order amount {order.amount_paise} or attempt {payment_attempt.amount_paise}"
+            )
 
     @classmethod
     async def create_order_from_accepted_quote(
@@ -235,7 +275,33 @@ class PaymentService:
         order_data = payload.get("order", {}).get("entity", {})
 
         rzp_payment_id = payment_data.get("id")
-        rzp_order_id = payment_data.get("order_id") or order_data.get("id")
+        pay_order_id = payment_data.get("order_id")
+        envelope_order_id = order_data.get("id")
+
+        # 2b. Cross-payload order mismatch check
+        if pay_order_id and envelope_order_id and pay_order_id != envelope_order_id:
+            m_stmt = select(Order).where(Order.rzp_order_id.in_([envelope_order_id, pay_order_id]))
+            matched_ord = (await session.execute(m_stmt)).scalars().first()
+            if matched_ord:
+                await AuditEvent.create_event(
+                    session=session,
+                    merchant_id=matched_ord.merchant_id,
+                    session_id=None,
+                    actor_type="SYSTEM",
+                    event_type="PAYMENT_ORDER_MISMATCH_DETECTED",
+                    payload={
+                        "order_id": str(matched_ord.id),
+                        "expected_rzp_order_id": envelope_order_id,
+                        "received_rzp_order_id": pay_order_id,
+                        "rzp_payment_id": rzp_payment_id,
+                    },
+                )
+            raise OrderMismatchError(
+                expected_order_id=envelope_order_id,
+                received_order_id=pay_order_id,
+            )
+
+        rzp_order_id = envelope_order_id or pay_order_id
         amount_paise = payment_data.get("amount") or order_data.get("amount")
 
         if not rzp_order_id:
@@ -250,6 +316,28 @@ class PaymentService:
                 "Webhook event '%s' ignored: order '%s' not found", event_name, rzp_order_id
             )
             return {"status": "IGNORED", "reason": "order_not_found"}
+
+        # Strict payment-to-order binding check
+        if pay_order_id and pay_order_id != order.rzp_order_id:
+            await AuditEvent.create_event(
+                session=session,
+                merchant_id=order.merchant_id,
+                session_id=None,
+                actor_type="SYSTEM",
+                event_type="PAYMENT_ORDER_MISMATCH_DETECTED",
+                payload={
+                    "order_id": str(order.id),
+                    "expected_rzp_order_id": order.rzp_order_id,
+                    "received_rzp_order_id": pay_order_id,
+                    "rzp_payment_id": rzp_payment_id,
+                },
+            )
+            raise OrderMismatchError(
+                expected_order_id=order.rzp_order_id,
+                received_order_id=pay_order_id,
+            )
+
+        currency = payment_data.get("currency") or order_data.get("currency")
 
         # 4. Handle event types
         if event_name in {"order.paid", "payment.captured"}:
@@ -268,6 +356,7 @@ class PaymentService:
                 amount_paise=int(amount_paise),
                 payment_data=payment_data,
                 event_name=event_name,
+                currency=str(currency) if currency else None,
             )
         elif event_name == "payment.failed":
             return await cls._handle_payment_failure(
@@ -292,9 +381,31 @@ class PaymentService:
         amount_paise: int | None,
         payment_data: dict[str, Any],
         event_name: str,
+        currency: str | None = None,
     ) -> dict[str, Any]:
         """Settles payment and executes transitions to PAID and TransactionRecord creation."""
-        # Check Amount Invariant (Anti-Fraud)
+        # 1. Check Currency Invariant (Anti-Fraud)
+        curr = currency or payment_data.get("currency")
+        if curr is not None and str(curr).upper() != order.currency.upper():
+            await AuditEvent.create_event(
+                session=session,
+                merchant_id=order.merchant_id,
+                session_id=None,
+                actor_type="SYSTEM",
+                event_type="PAYMENT_CURRENCY_FRAUD_DETECTED",
+                payload={
+                    "order_id": str(order.id),
+                    "expected_currency": order.currency,
+                    "received_currency": str(curr),
+                    "rzp_payment_id": rzp_payment_id,
+                },
+            )
+            raise CurrencyMismatchFraudError(
+                expected_currency=order.currency,
+                received_currency=str(curr),
+            )
+
+        # 2. Check Amount Invariant (Anti-Fraud)
         if amount_paise is not None and amount_paise != order.amount_paise:
             # Amount mismatch: Log critical security fraud attempt
             await AuditEvent.create_event(
@@ -315,7 +426,27 @@ class PaymentService:
                 received_amount_paise=amount_paise,
             )
 
-        # Idempotency Check: check if payment attempt already exists and is CAPTURED
+        # 3. Check Order Binding Invariant
+        if rzp_order_id != order.rzp_order_id:
+            await AuditEvent.create_event(
+                session=session,
+                merchant_id=order.merchant_id,
+                session_id=None,
+                actor_type="SYSTEM",
+                event_type="PAYMENT_ORDER_MISMATCH_DETECTED",
+                payload={
+                    "order_id": str(order.id),
+                    "expected_rzp_order_id": order.rzp_order_id,
+                    "received_rzp_order_id": rzp_order_id,
+                    "rzp_payment_id": rzp_payment_id,
+                },
+            )
+            raise OrderMismatchError(
+                expected_order_id=order.rzp_order_id,
+                received_order_id=rzp_order_id,
+            )
+
+        # 4. Idempotency Check: check if payment attempt already exists and is CAPTURED
         pay_stmt = select(PaymentAttempt).where(
             PaymentAttempt.order_id == order.id,
             PaymentAttempt.rzp_payment_id == rzp_payment_id,
@@ -328,6 +459,23 @@ class PaymentService:
                 "status": "DUPLICATE_IGNORED",
                 "order_id": str(order.id),
                 "payment_id": rzp_payment_id,
+            }
+
+        # 5. State Regression / Terminal Resurrection Check
+        if (
+            existing_attempt
+            and existing_attempt.status in PaymentAttemptStateMachine.TERMINAL_STATES
+        ):
+            logger.warning(
+                "Rejecting attempt to capture terminal payment %s (status: %s)",
+                rzp_payment_id,
+                existing_attempt.status,
+            )
+            return {
+                "status": "STATE_REGRESSION_REJECTED",
+                "order_id": str(order.id),
+                "payment_id": rzp_payment_id,
+                "current_status": existing_attempt.status,
             }
 
         order_id_str = str(order.id)
@@ -377,6 +525,14 @@ class PaymentService:
                     expected_version=order.version,
                     reason=f"Payment verified via {event_name}",
                 )
+
+            # Strict Transaction Binding Verification
+            cls.validate_transaction_binding(
+                payment_attempt=payment_attempt,
+                order=order,
+                merchant_id=merchant_id,
+                amount_paise=order.amount_paise,
+            )
 
             # Create Append-Only Ledger Entry (TransactionRecord)
             tx_stmt = select(TransactionRecord).where(
@@ -430,11 +586,37 @@ class PaymentService:
         error_desc = payment_data.get("error_description")
         order_id_str = str(order.id)
 
+        # Payment State Regression Protection:
+        # A failed webhook must never regress an already PAID order or CAPTURED payment
+        if order.status in {"PAID", "COMPLETED", "REFUNDED"}:
+            logger.warning(
+                "Ignoring payment.failed webhook for already settled order %s (status: %s)",
+                order_id_str,
+                order.status,
+            )
+            return {
+                "status": "STATE_REGRESSION_IGNORED",
+                "order_id": order_id_str,
+                "payment_id": rzp_payment_id,
+            }
+
         pay_stmt = select(PaymentAttempt).where(
             PaymentAttempt.order_id == order.id,
             PaymentAttempt.rzp_payment_id == rzp_payment_id,
         )
         existing_attempt = (await session.execute(pay_stmt)).scalar_one_or_none()
+
+        if existing_attempt and existing_attempt.status in {"CAPTURED", "REFUNDED"}:
+            logger.warning(
+                "Ignoring payment.failed webhook for already %s payment %s",
+                existing_attempt.status,
+                rzp_payment_id,
+            )
+            return {
+                "status": "STATE_REGRESSION_IGNORED",
+                "order_id": order_id_str,
+                "payment_id": rzp_payment_id,
+            }
 
         try:
             if not existing_attempt:
@@ -468,9 +650,14 @@ class PaymentService:
                     expected_version=order.version,
                     reason="Payment failed webhook received",
                 )
-        except (IntegrityError, OptimisticLockError) as exc:
+        except (
+            IntegrityError,
+            OptimisticLockError,
+            InvalidStateTransitionError,
+            TerminalStateError,
+        ) as exc:
             await session.rollback()
-            logger.info("Concurrent payment failure webhook collision handled: %s", exc)
+            logger.info("Concurrent or invalid payment failure webhook handled: %s", exc)
             return {
                 "status": "DUPLICATE_IGNORED",
                 "order_id": order_id_str,
@@ -643,10 +830,60 @@ class PaymentService:
             return {"status": "ALREADY_TERMINAL", "order_status": order.status}
 
         # Query Razorpay for payments tied to this order
-        payments = await rzp_client.fetch_order_payments(order.rzp_order_id)
+        try:
+            payments = await rzp_client.fetch_order_payments(order.rzp_order_id)
+        except RazorpayTimeoutError as exc:
+            logger.warning("Timeout reconciling order %s with Razorpay: %s", order_id, exc)
+            return {
+                "status": "RECONCILIATION_FAILED",
+                "order_status": order.status,
+                "error": "Razorpay request timed out",
+                "retryable": True,
+            }
+        except RazorpayNetworkError as exc:
+            logger.warning("Network error reconciling order %s with Razorpay: %s", order_id, exc)
+            return {
+                "status": "RECONCILIATION_FAILED",
+                "order_status": order.status,
+                "error": str(exc),
+                "retryable": True,
+            }
+        except RazorpayAPIError as exc:
+            logger.warning("Razorpay API error reconciling order %s: %s", order_id, exc)
+            return {
+                "status": "RECONCILIATION_FAILED",
+                "order_status": order.status,
+                "error": str(exc),
+                "status_code": exc.status_code,
+                "retryable": exc.is_retryable,
+            }
+
         captured_payment = next((p for p in payments if p.status == "captured"), None)
 
         if captured_payment:
+            # Server-authoritative currency check
+            if (
+                captured_payment.currency
+                and captured_payment.currency.upper() != order.currency.upper()
+            ):
+                await AuditEvent.create_event(
+                    session=session,
+                    merchant_id=order.merchant_id,
+                    session_id=None,
+                    actor_type="SYSTEM",
+                    event_type="PAYMENT_CURRENCY_FRAUD_DETECTED",
+                    payload={
+                        "order_id": str(order.id),
+                        "expected_currency": order.currency,
+                        "received_currency": captured_payment.currency,
+                        "rzp_payment_id": captured_payment.id,
+                    },
+                )
+                raise CurrencyMismatchFraudError(
+                    expected_currency=order.currency,
+                    received_currency=captured_payment.currency,
+                )
+
             # Reconcile missing webhook: settle payment
             payment_data = captured_payment.model_dump()
             return await cls._handle_payment_success(
@@ -657,6 +894,7 @@ class PaymentService:
                 amount_paise=captured_payment.amount,
                 payment_data=payment_data,
                 event_name="reconciliation.fetch",
+                currency=captured_payment.currency,
             )
 
         return {"status": "RECONCILED_UNPAID", "order_status": order.status}
