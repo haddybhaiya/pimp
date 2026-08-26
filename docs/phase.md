@@ -1,8 +1,8 @@
 # Phase Status & Roadmap: Agent-Ready Merchant
 
-> **Current Phase:** Phase 1.5 (End-to-End Golden Path & Deliberate Failure Verification)  
+> **Current Phase:** Phase 2.3 (Protocol Boundary + Production-Grade Demo Hardening)  
 > **Status:** 100% COMPLETED & SIGNED OFF  
-> **Next Milestone:** Phase 2 (Merchant Supervision & Control Plane UI)
+> **Next Milestone:** Phase 3.0 (Autonomous Merchant Optimization & Governance Dashboard)
 
 ---
 
@@ -17,25 +17,25 @@
 | **Phase 1.3** | Server-Authoritative Razorpay Client & Webhook Receiver | **COMPLETED** | HMAC SHA-256 verification, orders API, payment capture, reconciliation |
 | **Phase 1.4** | Untrusted Intelligence Layer (Groq Adapter & Tool Gateway) | **COMPLETED** | Pydantic tool contracts, prompt delimiters, rate limits, action gateway |
 | **Phase 1.5** | End-to-End Golden Path & Deliberate Failure Verification | **COMPLETED** | Integration tests demonstrating E2E transactability & recovery |
-| **Phase 2** | Merchant Supervision & Control Plane (UI) | PLANNED | React + TypeScript Dashboard, Live Session Observability |
-| **Phase 3** | Autonomous Merchant Optimization Agent | PLANNED | Revenue experiments, catalog auto-tuning, conversion analytics |
+| **Phase 2.1** | Canonical Commerce Gateway & Merchant AI Representation | **COMPLETED** | 8 canonical capabilities, CapabilityRegistry, MerchantAIRepresentation, strict envelopes |
+| **Phase 2.2** | External AI Buyer Commerce Flow | **COMPLETED** | Autonomous AIBuyerClient, explicit states, bounded negotiation, security matrix, deliberate failure recovery |
+| **Phase 2.3** | Protocol Boundary + Production-Grade Demo Hardening | **COMPLETED** | ACP Protocol Adapter, AgentProtocolClient, contract versioning, idempotency manager, rate limiting, bounded payloads, safe error sanitization |
+| **Phase 3** | Autonomous Merchant Optimization Agent & Control Plane | PLANNED | Revenue experiments, catalog auto-tuning, conversion analytics, merchant supervision |
 
 ---
 
-## Phase 1.5 Deliverables Completed
+## Phase 2.3 Deliverables Completed
 
-- [x] Full end-to-end golden path verification test (`tests/test_e2e_golden_path.py`):
-  * Buyer request $\to$ LLM reasoning $\to$ structured intent $\to$ tool gateway $\to$ policy check $\to$ quote $\to$ negotiation $\to$ acceptance $\to$ order creation $\to$ Razorpay test payment $\to$ HMAC webhook $\to$ PAID order $\to$ TransactionRecord $\to$ Audit trail.
-- [x] Deliberate Failure Matrix test suite covering 16 critical failure modes (`tests/test_deliberate_failures_matrix.py`):
-  * Malformed outputs, prompt injections, unknown tools, unauthorized capabilities, invalid arguments, below-floor prices, excessive discounts, invalid state transitions, stale version locks, duplicate checkouts, tampered webhooks, amount mismatches, payment failures, Razorpay timeouts/500s, dropped webhook reconciliation, secret leakage scanning.
-- [x] Concurrency and idempotency test suite (`tests/test_concurrency_and_idempotency.py`):
-  * Multi-delivery webhook bursts guaranteeing single transaction record creation.
-- [x] 100 passing automated tests across all domain, state machine, policy, payment, and gateway layers.
+- [x] Protocol-neutral external API boundary (`src/agent_ready_merchant/protocols/base.py`):
+  * Replaceable `BaseProtocolAdapter` interface with bidirectional schema mapping.
+- [x] Agent Commerce Protocol (ACP) Adapter (`src/agent_ready_merchant/protocols/acp.py`):
+  * Full translation for all canonical capabilities with strict version negotiation (`2026-03-01`).
+- [x] Protocol Agent Client (`src/agent_ready_merchant/protocols/client.py`):
+  * Autonomous client operating strictly via protocol wire messages with safe retry policies.
+- [x] Production-grade hardening infrastructure (`src/agent_ready_merchant/gateway/hardening.py`):
+  * Hierarchical error codes (`GatewayErrorCode`), thread-safe `IdempotencyManager`, sliding-window `GatewayRateLimiter`, 64 KB payload bounds, timeout boundary guards, structured observability, and zero secret/DB leakage error sanitization.
+- [x] Protocol wire endpoint on FastAPI (`POST /api/v1/protocol/acp` in `src/agent_ready_merchant/main.py`).
+- [x] Comprehensive test suite (`tests/test_phase2_3_protocol_and_hardening.py`):
+  * 150 passed automated tests across entire repository (Phase 1, Phase 2.1, Phase 2.2, Phase 2.3).
+  * Quality gates passed: `ruff check .`, `ruff format --check .`, `mypy src tests`, `pytest`.
 
----
-
-## Phase 2 Readiness Gates
-
-Before Phase 2 implementation begins:
-1. Verify all 100 Phase 1 tests pass.
-2. Review Merchant Supervision UI and Control Plane requirements in `docs/architecture.md`.

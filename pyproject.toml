@@ -70,6 +70,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S105", "S106"]
+# Static SQL with module-owned table-name constants only; all values are bound params.
+"src/agent_ready_merchant/gateway/durable.py" = ["S608"]
 
 [tool.mypy]
 python_version = "3.11"

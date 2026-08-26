@@ -86,6 +86,54 @@ class CheckPaymentStatusParams(BaseModel):
     order_id: uuid.UUID = Field(...)
 
 
+class CheckInventoryParams(BaseModel):
+    """Parameters for check_inventory tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sku: str = Field(..., min_length=1, max_length=100)
+    requested_quantity: int = Field(default=1, ge=1, le=100)
+
+
+class CalculateShippingParams(BaseModel):
+    """Parameters for calculate_shipping tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    destination_postal_code: str = Field(..., min_length=1, max_length=20)
+    destination_country: str = Field(default="IN", max_length=2)
+    subtotal_paise: int | None = Field(default=None, ge=0)
+    quote_id: uuid.UUID | None = Field(default=None)
+
+
+class RequestCheckoutParams(BaseModel):
+    """Parameters for request_checkout tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID | None = Field(default=None)
+    quote_id: uuid.UUID | None = Field(default=None)
+    buyer_email: EmailStr | None = Field(default=None)
+    shipping_address: ShippingAddressParam | None = Field(default=None)
+    idempotency_key: str | None = Field(default=None, max_length=128)
+
+
+class AcceptQuoteParams(BaseModel):
+    """Parameters for accept_quote tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quote_id: uuid.UUID = Field(...)
+
+
+class GetOrderStatusParams(BaseModel):
+    """Parameters for get_order_status tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: uuid.UUID = Field(...)
+
+
 class ToolExecutionResult(BaseModel):
     """Standardized envelope returned by tool execution."""
 

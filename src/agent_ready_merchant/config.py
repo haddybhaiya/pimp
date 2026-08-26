@@ -101,6 +101,13 @@ class Settings(BaseSettings):
     # 6. Rate Limiting & Security Guards
     # --------------------------------------------------------------------------
     SESSION_RATE_LIMIT_PER_MINUTE: int = 20
+    GATEWAY_RATE_LIMIT_PER_MINUTE: int = 60
+    GATEWAY_REQUEST_TIMEOUT_SECONDS: float = 10.0
+    # Multi-worker safety (INV-IDEM): when True, idempotency claims and gateway
+    # rate-limit windows are backed by shared PostgreSQL tables instead of
+    # process-local memory, so financial mutations execute exactly once across
+    # workers/restarts. Tables are created via Alembic migration 002.
+    GATEWAY_DURABLE_HARDENING: bool = False
     MAX_ACTIVE_QUOTES_PER_BUYER: int = 3
     LOG_LEVEL: str = "INFO"
 

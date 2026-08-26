@@ -67,3 +67,42 @@
 - **Consequences:**
   - *Positive:* Fast, deterministic feedback loop; prevents syntax regressions, type mismatches, and secret leakage before merging.
   - *Negative:* Strict static typing overhead during rapid development.
+
+---
+
+## ADR-007: Canonical Commerce Gateway & Authoritative Merchant AI Representation
+
+- **Status:** ACCEPTED
+- **Context:** Arbitrary AI buyers and external protocol adapters require a standardized, deterministic boundary to interact with merchant commerce capabilities without bypassing security policies, financial floor price guards, state machines, inventory locks, or audit ledgers.
+- **Decision:** Implement `CanonicalCommerceGateway` exposing 8 canonical capabilities (`discover_products`, `get_product`, `check_inventory`, `get_quote`, `calculate_shipping`, `create_order`, `request_checkout`, `get_payment_status`) with strict Pydantic schemas (`extra="forbid"`), state-oriented response envelopes (`GatewayResponseEnvelope[T]`), and an immutable `CapabilityRegistry`. Construct `MerchantAIRepresentation` derived purely from authoritative server state with SHA-256 policy hashing, ensuring clients and LLMs cannot alter or spoof merchant capabilities.
+- **Consequences:**
+  - *Positive:* Completely eliminates bypass paths around authorization, policy, inventory, and payment; provides clear state machine guidance (`next_action`, `allowed_actions`) to AI buyers; ensures strict multi-tenant isolation.
+  - *Negative:* Requires strict schema adherence and rejects undeclared fields fail-closed.
+
+---
+
+## ADR-008: External AI Buyer Flow & Autonomous Lifecycle Execution
+
+- **Status:** ACCEPTED
+- **Context:** External autonomous AI buyers require a structured, end-to-end commerce client to complete the full commerce lifecycle (`DISCOVERED` -> `PRODUCT_SELECTED` -> `QUOTED` -> `NEGOTIATION_PENDING` -> `OFFER_ACCEPTED` -> `ORDER_CREATED` -> `PAYMENT_PENDING` -> `PAYMENT_SUCCEEDED` -> `COMPLETED`) while preserving the critical invariant: `AI buyer -> Gateway -> deterministic authority -> domain service -> Razorpay`.
+- **Decision:** Implement `AIBuyerClient` and structured buyer schemas in `src/agent_ready_merchant/buyer/` communicating strictly through `CanonicalCommerceGateway`. Direct database mutations, direct Razorpay API mutations, and unrestricted financial operations are completely prohibited. All quote negotiations execute through `DeterministicPolicyEngine`, quote state advances through version-checked `PriceQuoteStateMachine`, inventory is atomically reserved during order creation, and payment settlement verifies cryptographic HMAC signatures. Explicit response and failure states (`INVENTORY_CHANGED`, `POLICY_REJECTED`, `QUOTE_EXPIRED`, etc.) provide deterministic recovery paths for autonomous buyers.
+- **Consequences:**
+  - *Positive:* Full autonomous commerce lifecycle support with zero bypass around authorization, inventory reservations, policy evaluation, or audit ledgers. Proven resilient against prompt injection, quote tampering, cross-tenant leaks, and concurrency races.
+  - *Negative:* Autonomous buyers must strictly handle state transitions and retryable failure envelopes.
+
+---
+
+## ADR-009: Protocol Boundary, Adapter Interface & Production Hardening
+
+- **Status:** ACCEPTED
+- **Context:** External AI agent frameworks require a standardized protocol interface to consume merchant capabilities while insulating the core domain from protocol-specific churn and protecting against operational threats (replays, burst traffic, unbounded payloads, execution timeouts, secret leaks, and blind financial retries).
+- **Decision:**
+  1. Build replaceable `BaseProtocolAdapter` and concrete `AgentCommerceProtocolAdapter` (ACP) implementing `ProtocolRequestMessage` $\leftrightarrow$ `ProtocolResponseMessage` bidirectional translation without protocol bypass.
+  2. Implement `AgentProtocolClient` allowing autonomous agent systems to consume capabilities exclusively via protocol wire messages with safe retry policies (retrying safe reads and idempotent mutations while prohibiting blind retries on financial mutations).
+  3. Enforce contract versioning (`COMMERCE_PROTOCOL_VERSION = "2026-03-01"`), `request_id` end-to-end trace propagation, thread-safe `IdempotencyManager` deduplication, sliding-window `GatewayRateLimiter`, 64 KB `BoundedPayloadGuard`, execution timeout boundaries, structured observability, and safe error sanitization (`GatewayErrorCode.INTERNAL_GATEWAY_ERROR`) preventing database schema and secret leakage.
+- **Consequences:**
+  - *Positive:* Protocol-agnostic core domain; external protocol adapters are swappable without modifying canonical services; deterministic machine-readable errors; hardened against concurrent mutation races, replay attacks, and denial-of-service bursts.
+  - *Negative:* Additional translation hop between external wire messages and canonical gateway requests.
+
+
+

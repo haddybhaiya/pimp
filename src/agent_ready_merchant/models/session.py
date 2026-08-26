@@ -53,6 +53,10 @@ class BuyerAgentSession(Base):
         String(64),
         nullable=False,
     )
+    granted_capabilities: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(
         String(32),
         default="ACTIVE",
