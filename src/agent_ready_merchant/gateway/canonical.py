@@ -1188,6 +1188,10 @@ class CanonicalCommerceGateway:
             status="ACTIVE",
             granted_capabilities=granted_caps,
             auth_token_hash=token_hash,
+            # Return-once pattern: the raw token is only visible to the creator
+            # at initialization when the SERVER generated it. Client-supplied
+            # tokens are never echoed back.
+            auth_token=None if request.auth_token_raw else raw_token,
             expires_at=expires_at,
             created_at=buyer_session.created_at or now,
         )
@@ -1430,17 +1434,96 @@ class CanonicalCommerceGateway:
 
         item_sum = sum(itm.total_price_paise for itm in quote.items)
         remainder = proposed_goods_paise - item_sum
+        floors = [p.unit_floor_price_paise for p in item_proposals]
+
+        def _set_unit(itm: Any, new_unit: int) -> None:
+            itm.unit_price_paise = new_unit
+            itm.total_price_paise = new_unit * itm.quantity
+
         if remainder != 0 and quote.items:
-            # Prefer absorbing rounding residue into a quantity-1 line where any
-            # total is arithmetically valid.
+            # Pass 1: a quantity-1 line absorbs any residue arithmetically.
             unit_line = next((i for i in quote.items if i.quantity == 1), None)
             if unit_line is not None and unit_line.total_price_paise + remainder > 0:
                 unit_line.total_price_paise += remainder
                 unit_line.unit_price_paise = unit_line.total_price_paise
+                remainder = 0
+
+        if remainder != 0 and quote.items:
+            # Pass 2: distribute whole unit-steps across lines (largest quantity
+            # first). Each step shifts exactly `quantity` paise, keeping the
+            # per-line arithmetic valid. Never cross the policy-approved floor.
+            sign = 1 if remainder > 0 else -1
+            remaining = remainder
+            order_by_qty = sorted(
+                range(len(quote.items)), key=lambda i: -quote.items[i].quantity
+            )
+            for idx in order_by_qty:
+                if remaining == 0:
+                    break
+                itm = quote.items[idx]
+                step_count = abs(remaining) // itm.quantity
+                if step_count == 0:
+                    continue
+                new_unit = itm.unit_price_paise + sign * step_count
+                floor_guard = max(1, floors[idx] if idx < len(floors) else 1)
+                if sign < 0 and new_unit < floor_guard:
+                    step_count -= floor_guard - new_unit
+                    if step_count <= 0:
+                        continue
+                    new_unit = itm.unit_price_paise - step_count
+                _set_unit(itm, new_unit)
+                remaining -= sign * step_count * itm.quantity
+
+            # Pass 3: exact combination search over +/- whole unit steps across
+            # lines, so any remainder representable by the line quantities is
+            # fully assigned instead of being dropped (bounded small search).
+            if remaining != 0:
+                limit = 30
+                spread = max(abs(remainder) + limit * 10, limit * 10)
+                plans: dict[int, list[list[tuple[int, int]]]] = {0: [[]]}
+                for idx in range(len(quote.items)):
+                    q = quote.items[idx].quantity
+                    nxt: dict[int, list[list[tuple[int, int]]]] = {}
+                    for val, plist in plans.items():
+                        for s in range(-limit, limit + 1):
+                            nv = val + s * q
+                            if abs(nv) > spread:
+                                continue
+                            bucket = nxt.setdefault(nv, [])
+                            for plan in plist:
+                                if len(bucket) >= 4:
+                                    break
+                                bucket.append(plan + [(idx, s)] if s else plan)
+                    plans = nxt
+
+                def _plan_is_feasible(plan: list[tuple[int, int]]) -> bool:
+                    for p_idx, p_s in plan:
+                        p_itm = quote.items[p_idx]
+                        nu = p_itm.unit_price_paise + p_s
+                        p_floor = max(1, floors[p_idx] if p_idx < len(floors) else 1)
+                        if nu < p_floor:
+                            return False
+                    return True
+
+                solution = None
+                for plan in plans.get(remaining, []):
+                    if _plan_is_feasible(plan):
+                        solution = plan
+                        break
+                if solution:
+                    for sol_idx, sol_s in solution:
+                        _set_unit(
+                            quote.items[sol_idx],
+                            quote.items[sol_idx].unit_price_paise + sol_s,
+                        )
+                    remaining = 0
 
         # True up quote-level totals against the feasible line sums so
         # ck_price_quotes_total_arithmetic holds without violating per-line
-        # arithmetic (subtotal_paise itself is FSM-immutable).
+        # arithmetic (subtotal_paise itself is FSM-immutable). After exact
+        # distribution above, final_subtotal == proposed_goods_paise and this
+        # is a no-op; deviation only persists when line quantities share a
+        # common divisor that cannot represent the proposal (≤ gcd−1 paise).
         final_subtotal = sum(itm.total_price_paise for itm in quote.items)
         final_discount = max(0, quote.subtotal_paise - final_subtotal)
         final_total = quote.subtotal_paise - final_discount + quote.shipping_paise

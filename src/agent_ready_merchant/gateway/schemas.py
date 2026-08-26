@@ -559,6 +559,14 @@ class InitializeSessionResponse(BaseModel):
     status: str = Field(default="ACTIVE", description="Session state (ACTIVE, EXPIRED, TERMINATED)")
     granted_capabilities: list[str] = Field(..., description="Authorized capabilities for session")
     auth_token_hash: str = Field(..., description="Cryptographic SHA-256 hash of auth token")
+    auth_token: str | None = Field(
+        default=None,
+        description=(
+            "Raw bearer token, returned ONCE at initialization when the server "
+            "generated it. Never echoed again; clients supplying their own token "
+            "receive None."
+        ),
+    )
     expires_at: datetime = Field(..., description="Session expiration timestamp")
     created_at: datetime = Field(..., description="Session initialization timestamp")
 
