@@ -180,3 +180,18 @@ The registry declares failure states `ORDER_ALREADY_PAID` / `ORDER_CANCELLED` fo
 > - Bounded memory eviction (LRU / TTL) on idempotency coordinators and rate limiters.
 > - Complete unification of dedicated REST endpoints through the hardened capability dispatcher.
 > - Zero test failures, zero lint errors, 100% strict type safety compliance.
+---
+## some non resolved issues from phase 2 branch 
+**status** : skipped proceeded to phase 3
+content : "This is a comment left during a code review.
+Path: src/agent_ready_merchant/gateway/canonical.py
+Line: 1827-1839
+
+Comment:
+**Timeout retries duplicate external orders**
+
+When `create_order` times out after Razorpay creates its order but before the local transaction finishes, this timeout path rolls back only local state and returns an error; retrying the operation invokes Razorpay again, leaving the first external order orphaned and creating a duplicate payment order.
+
+---
+
+For each issue above, determine whether it is valid and should be fixed. If so, fix it directly." 

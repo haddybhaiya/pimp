@@ -72,7 +72,10 @@ from agent_ready_merchant.gateway.schemas import (
     VariantDetailItem,
 )
 from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
-from agent_ready_merchant.integrations.razorpay.exceptions import RazorpayError
+from agent_ready_merchant.integrations.razorpay.exceptions import (
+    RazorpayError,
+    RazorpayTimeoutError,
+)
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.order import Order
 from agent_ready_merchant.models.payment import PaymentAttempt
@@ -865,13 +868,21 @@ class CanonicalCommerceGateway:
         except ValueError as exc:
             await session.rollback()
             return self._rejected_envelope("create_order", "ORDER_CREATION_FAILED", str(exc))
+        except RazorpayTimeoutError as exc:
+            await session.rollback()
+            return self._error_envelope(
+                "create_order",
+                GatewayErrorCode.TIMEOUT_BOUNDARY_EXCEEDED.value,
+                f"Razorpay payment gateway timeout: {exc}",
+                retryable=False,
+            )
         except RazorpayError as exc:
             await session.rollback()
             return self._error_envelope(
                 "create_order",
                 GatewayErrorCode.COMMERCE_PAYMENT_GATEWAY_ERROR.value,
                 f"Razorpay payment gateway error: {exc}",
-                retryable=True,
+                retryable=exc.is_retryable,
             )
         except OptimisticLockError as exc:
             await session.rollback()
@@ -977,13 +988,21 @@ class CanonicalCommerceGateway:
                 return self._rejected_envelope(
                     "request_checkout", "CHECKOUT_CREATION_FAILED", str(exc)
                 )
+            except RazorpayTimeoutError as exc:
+                await session.rollback()
+                return self._error_envelope(
+                    "request_checkout",
+                    GatewayErrorCode.TIMEOUT_BOUNDARY_EXCEEDED.value,
+                    f"Razorpay payment gateway timeout: {exc}",
+                    retryable=False,
+                )
             except RazorpayError as exc:
                 await session.rollback()
                 return self._error_envelope(
                     "request_checkout",
                     GatewayErrorCode.COMMERCE_PAYMENT_GATEWAY_ERROR.value,
                     f"Razorpay payment gateway error: {exc}",
-                    retryable=True,
+                    retryable=exc.is_retryable,
                 )
             except OptimisticLockError as exc:
                 await session.rollback()
@@ -1454,9 +1473,7 @@ class CanonicalCommerceGateway:
             # per-line arithmetic valid. Never cross the policy-approved floor.
             sign = 1 if remainder > 0 else -1
             remaining = remainder
-            order_by_qty = sorted(
-                range(len(quote.items)), key=lambda i: -quote.items[i].quantity
-            )
+            order_by_qty = sorted(range(len(quote.items)), key=lambda i: -quote.items[i].quantity)
             for idx in order_by_qty:
                 if remaining == 0:
                     break
