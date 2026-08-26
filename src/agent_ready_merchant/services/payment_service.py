@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from agent_ready_merchant.db.concurrency import OptimisticLockError, update_with_version_check
+from agent_ready_merchant.db.session import get_session_factory
 from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
 from agent_ready_merchant.integrations.razorpay.exceptions import (
     AmountMismatchFraudError,
@@ -33,6 +34,9 @@ from agent_ready_merchant.state_machines.order import OrderStateMachine
 from agent_ready_merchant.state_machines.payment_attempt import PaymentAttemptStateMachine
 
 logger = logging.getLogger("agent_ready_merchant.services.payment")
+
+_EXTERNAL_ATTEMPT_EVENT = "EXTERNAL_ORDER_ATTEMPT"
+_EXTERNAL_OUTCOME_EVENT = "EXTERNAL_ORDER_OUTCOME"
 
 
 class PaymentService:
@@ -119,20 +123,34 @@ class PaymentService:
                 inv.reserved_quantity = new_res
                 inv.version += 1
 
-        # 3. Call Razorpay API to generate external order
+        # 3. Call Razorpay API to generate external order — with duplicate protection.
+        # A timeout after remote creation but before local commit orphans the remote
+        # order; retrying blindly creates a second Razorpay order. We therefore
+        # persist a durable breadcrumb (append-only audit event in an INDEPENDENT
+        # transaction) immediately after remote creation, and on retry reuse the
+        # still-open remote order instead of creating a new one.
         receipt_id = f"ord_{quote.id.hex[:32]}"
         notes = {
             "platform": "agent-ready-merchant",
             "merchant_id": str(quote.merchant_id),
             "quote_id": str(quote.id),
         }
-        rzp_order = await rzp_client.create_order(
-            amount_paise=quote.total_paise,
-            currency="INR",
-            receipt=receipt_id,
-            payment_capture=1,
-            notes=notes,
-        )
+        rzp_order = await cls._find_reusable_external_order(session, quote, rzp_client)
+        if rzp_order is not None:
+            logger.info(
+                "Reusing orphaned external Razorpay order '%s' for quote '%s'",
+                rzp_order.id,
+                quote.id,
+            )
+        else:
+            rzp_order = await rzp_client.create_order(
+                amount_paise=quote.total_paise,
+                currency="INR",
+                receipt=receipt_id,
+                payment_capture=1,
+                notes=notes,
+            )
+            await cls._record_external_attempt(quote=quote, rzp_order=rzp_order)
 
         # 4. Create Order entity
         order = Order(
@@ -147,6 +165,23 @@ class PaymentService:
         )
         session.add(order)
         await session.flush()
+
+        # Close out the breadcrumb ATOMICALLY with the local order (same
+        # transaction): if this transaction commits, the remote order is
+        # accounted for; if it rolls back, the CONSUMED event never existed
+        # and the breadcrumb stays PENDING so a retry reuses the remote order.
+        await AuditEvent.create_event(
+            session=session,
+            merchant_id=quote.merchant_id,
+            actor_type="SYSTEM",
+            event_type=_EXTERNAL_OUTCOME_EVENT,
+            payload={
+                "quote_id": str(quote.id),
+                "rzp_order_id": rzp_order.id,
+                "status": "CONSUMED",
+            },
+            session_id=session_id,
+        )
 
         # 5. Populate OrderItems
         for q_item in quote.items:
@@ -447,6 +482,140 @@ class PaymentService:
             "order_id": str(order.id),
             "payment_id": rzp_payment_id,
         }
+
+    # -------------------------------------------------------------------------
+    # External Order Duplicate Protection (durable breadcrumbs)
+    # -------------------------------------------------------------------------
+    @classmethod
+    async def _latest_external_event(
+        cls, session: AsyncSession, quote: PriceQuote
+    ) -> AuditEvent | None:
+        """Finds the newest breadcrumb event for this quote (any outcome)."""
+        stmt = (
+            select(AuditEvent)
+            .where(
+                AuditEvent.merchant_id == quote.merchant_id,
+                AuditEvent.event_type.in_([_EXTERNAL_ATTEMPT_EVENT, _EXTERNAL_OUTCOME_EVENT]),
+            )
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+            .limit(25)
+        )
+        events = (await session.execute(stmt)).scalars().all()
+        for event in events:
+            if str(event.payload.get("quote_id")) == str(quote.id):
+                return event
+        return None
+
+    @classmethod
+    async def _find_reusable_external_order(
+        cls,
+        session: AsyncSession,
+        quote: PriceQuote,
+        rzp_client: RazorpayClient,
+    ) -> Any:
+        """Returns the still-open remote order from a prior interrupted attempt.
+
+        A PENDING breadcrumb means Razorpay may already hold an order for this
+        quote that never made it into a committed local transaction. The remote
+        order is only reused when Razorpay confirms it is still 'created' and
+        the amount matches; otherwise the breadcrumb is failed and a fresh
+        order must be created.
+        """
+        latest = await cls._latest_external_event(session, quote)
+        if latest is None or latest.event_type != _EXTERNAL_ATTEMPT_EVENT:
+            return None
+        if latest.payload.get("status") != "PENDING":
+            return None
+
+        rzp_order_id = latest.payload.get("rzp_order_id")
+        if not rzp_order_id:
+            return None
+
+        try:
+            remote = await rzp_client.fetch_order(rzp_order_id)
+        except RazorpayError:
+            logger.warning(
+                "Breadcrumb references external order '%s' but fetch failed; "
+                "creating a fresh external order.",
+                rzp_order_id,
+            )
+            await cls._record_external_outcome(
+                quote=quote, rzp_order_id=rzp_order_id, outcome="FAILED"
+            )
+            return None
+
+        if remote.status != "created" or remote.amount != quote.total_paise:
+            logger.warning(
+                "External order '%s' is not reusable (status=%s amount=%s); "
+                "creating a fresh external order.",
+                rzp_order_id,
+                remote.status,
+                remote.amount,
+            )
+            await cls._record_external_outcome(
+                quote=quote, rzp_order_id=rzp_order_id, outcome="FAILED"
+            )
+            return None
+
+        return remote
+
+    @classmethod
+    async def _append_external_event(
+        cls,
+        merchant_id: uuid.UUID,
+        payload: dict[str, Any],
+    ) -> None:
+        """Appends a breadcrumb audit event in an INDEPENDENT transaction.
+
+        The request transaction may be rolled back at any moment (timeout,
+        Razorpay failure); the breadcrumb must survive that rollback to make
+        retries idempotent. Failures are logged and swallowed: a missing
+        breadcrumb degrades to previous (non-duplicate-protected) behavior.
+        """
+        try:
+            factory = get_session_factory()
+            async with factory() as breadcrumb_session:
+                await AuditEvent.create_event(
+                    session=breadcrumb_session,
+                    merchant_id=merchant_id,
+                    actor_type="SYSTEM",
+                    event_type=_EXTERNAL_ATTEMPT_EVENT
+                    if payload["event"] == "attempt"
+                    else _EXTERNAL_OUTCOME_EVENT,
+                    payload={k: v for k, v in payload.items() if k != "event"},
+                    session_id=None,
+                )
+                await breadcrumb_session.commit()
+        except Exception:
+            logger.exception("Failed to persist external-order breadcrumb")
+
+    @classmethod
+    async def _record_external_attempt(cls, quote: PriceQuote, rzp_order: Any) -> None:
+        await cls._append_external_event(
+            merchant_id=quote.merchant_id,
+            payload={
+                "event": "attempt",
+                "quote_id": str(quote.id),
+                "rzp_order_id": rzp_order.id,
+                "amount_paise": quote.total_paise,
+                "receipt": f"ord_{quote.id.hex[:32]}",
+                "status": "PENDING",
+            },
+        )
+
+    @classmethod
+    async def _record_external_outcome(
+        cls, quote: PriceQuote, rzp_order_id: str, outcome: str
+    ) -> None:
+        await cls._append_external_event(
+            merchant_id=quote.merchant_id,
+            payload={
+                "event": "outcome",
+                "quote_id": str(quote.id),
+                "rzp_order_id": rzp_order_id,
+                "status": outcome,
+            },
+        )
 
     @classmethod
     async def reconcile_order(

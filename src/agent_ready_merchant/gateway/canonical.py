@@ -1434,10 +1434,7 @@ class CanonicalCommerceGateway:
             # Prefer absorbing rounding residue into a quantity-1 line where any
             # total is arithmetically valid.
             unit_line = next((i for i in quote.items if i.quantity == 1), None)
-            if (
-                unit_line is not None
-                and unit_line.total_price_paise + remainder > 0
-            ):
+            if unit_line is not None and unit_line.total_price_paise + remainder > 0:
                 unit_line.total_price_paise += remainder
                 unit_line.unit_price_paise = unit_line.total_price_paise
 
@@ -1813,9 +1810,7 @@ class CanonicalCommerceGateway:
             # grant (legacy rows) retain the previous default-grant behavior.
             stored_caps_raw = db_sess.granted_capabilities
             if stored_caps_raw:
-                stored_caps = {
-                    c.strip() for c in stored_caps_raw.split(",") if c.strip()
-                }
+                stored_caps = {c.strip() for c in stored_caps_raw.split(",") if c.strip()}
                 context.capabilities = context.capabilities & stored_caps
 
         # 2. Bounded Payload Size Validation (Max 64 KB)
