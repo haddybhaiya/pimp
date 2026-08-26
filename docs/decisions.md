@@ -104,5 +104,22 @@
   - *Positive:* Protocol-agnostic core domain; external protocol adapters are swappable without modifying canonical services; deterministic machine-readable errors; hardened against concurrent mutation races, replay attacks, and denial-of-service bursts.
   - *Negative:* Additional translation hop between external wire messages and canonical gateway requests.
 
+---
+
+## ADR-010: Authoritative Razorpay Payment Boundary & Invariant Hardening
+
+- **Status:** ACCEPTED
+- **Context:** Financial settlement must be protected against malicious tampering, currency/amount mismatches, cross-order spoofing, out-of-order/delayed webhooks, network timeouts, and state regression attacks. Client-side callbacks can never be trusted to dictate financial state.
+- **Decision:**
+  1. Enforce strict server-authoritative amount AND currency verification (`CurrencyMismatchFraudError`, `AmountMismatchFraudError`) with immediate tamper-evident audit logging (`PAYMENT_CURRENCY_FRAUD_DETECTED`, `PAYMENT_AMOUNT_FRAUD_DETECTED`).
+  2. Enforce strict payment-to-order binding (`OrderMismatchError`) validating that webhook payload order references match authoritative DB orders prior to state transitions.
+  3. Enforce multi-entity transaction binding (`validate_transaction_binding` raising `TransactionBindingError`) guaranteeing that append-only `TransactionRecord` ledger entries bind strictly to `CAPTURED` attempts matching the exact order amount, order ID, and merchant ID.
+  4. Normalize Razorpay client errors into typed subclasses (`RazorpayBadRequestError`, `RazorpayNotFoundError`, `RazorpayRateLimitError`, `RazorpayServerError`, `RazorpayTimeoutError`, `RazorpayNetworkError`) with explicit `is_retryable` semantics.
+  5. Prevent state regression: enforce terminal states and ignore stale/delayed failure webhooks on already settled orders (`STATE_REGRESSION_IGNORED`).
+- **Consequences:**
+  - *Positive:* Mathematically guarantees zero false payment success, prevents ledger pollution, eliminates race conditions between webhook and reconciliation, and ensures strict adherence to INV-FIN-01 through INV-FIN-05 and INV-STA-01 through INV-STA-05.
+  - *Negative:* Requires strict error hierarchy and validation overhead on all payment-related endpoints.
+
+
 
 

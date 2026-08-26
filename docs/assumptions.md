@@ -43,3 +43,14 @@
 - **CONFIDENCE:** 100%
 - **FAILURE IF WRONG:** Inventory drops below zero or duplicate transaction records are committed.
 - **MITIGATION:** Enforce database check constraints and version-checked atomic mutations.
+
+---
+
+### 5. Multi-Entity Razorpay Payment Binding & Currency Isolation
+- **ASSUMPTION:** External payment webhook entities may originate from spoofed or cross-tenant sources, requiring cryptographic verification, currency validation, and strict payment attempt to order ledger binding.
+- **EVIDENCE:** Verified via `tests/test_phase3_1_razorpay_boundary.py` (all 12 boundary test scenarios passing deterministically).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Cross-order payment appropriation, currency spoofing (e.g. paying in USD for an INR order), or committing transaction records without captured payment attempts.
+- **MITIGATION:** `CurrencyMismatchFraudError`, `OrderMismatchError`, and `validate_transaction_binding` raising `TransactionBindingError` fail-closed with audit event logging before committing to ledger.
+

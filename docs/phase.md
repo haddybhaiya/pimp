@@ -1,8 +1,8 @@
 # Phase Status & Roadmap: Agent-Ready Merchant
 
-> **Current Phase:** Phase 2.3 (Protocol Boundary + Production-Grade Demo Hardening)  
+> **Current Phase:** Phase 3.1 (Razorpay Payment Boundary & Invariant Hardening)  
 > **Status:** 100% COMPLETED & SIGNED OFF  
-> **Next Milestone:** Phase 3.0 (Autonomous Merchant Optimization & Governance Dashboard)
+> **Next Milestone:** Phase 3.2 (Autonomous Merchant Optimization & Governance)
 
 ---
 
@@ -20,22 +20,20 @@
 | **Phase 2.1** | Canonical Commerce Gateway & Merchant AI Representation | **COMPLETED** | 8 canonical capabilities, CapabilityRegistry, MerchantAIRepresentation, strict envelopes |
 | **Phase 2.2** | External AI Buyer Commerce Flow | **COMPLETED** | Autonomous AIBuyerClient, explicit states, bounded negotiation, security matrix, deliberate failure recovery |
 | **Phase 2.3** | Protocol Boundary + Production-Grade Demo Hardening | **COMPLETED** | ACP Protocol Adapter, AgentProtocolClient, contract versioning, idempotency manager, rate limiting, bounded payloads, safe error sanitization |
-| **Phase 3** | Autonomous Merchant Optimization Agent & Control Plane | PLANNED | Revenue experiments, catalog auto-tuning, conversion analytics, merchant supervision |
+| **Phase 3.1** | Razorpay Payment Boundary & Invariant Hardening | **COMPLETED** | Server-authoritative amount/currency verification, payment-order binding, multi-entity transaction binding, error normalization, race safety |
+| **Phase 3.2** | Autonomous Merchant Optimization Agent & Control Plane | PLANNED | Revenue experiments, catalog auto-tuning, conversion analytics, merchant supervision |
 
 ---
 
-## Phase 2.3 Deliverables Completed
+## Phase 3.1 Deliverables Completed
 
-- [x] Protocol-neutral external API boundary (`src/agent_ready_merchant/protocols/base.py`):
-  * Replaceable `BaseProtocolAdapter` interface with bidirectional schema mapping.
-- [x] Agent Commerce Protocol (ACP) Adapter (`src/agent_ready_merchant/protocols/acp.py`):
-  * Full translation for all canonical capabilities with strict version negotiation (`2026-03-01`).
-- [x] Protocol Agent Client (`src/agent_ready_merchant/protocols/client.py`):
-  * Autonomous client operating strictly via protocol wire messages with safe retry policies.
-- [x] Production-grade hardening infrastructure (`src/agent_ready_merchant/gateway/hardening.py`):
-  * Hierarchical error codes (`GatewayErrorCode`), thread-safe `IdempotencyManager`, sliding-window `GatewayRateLimiter`, 64 KB payload bounds, timeout boundary guards, structured observability, and zero secret/DB leakage error sanitization.
-- [x] Protocol wire endpoint on FastAPI (`POST /api/v1/protocol/acp` in `src/agent_ready_merchant/main.py`).
-- [x] Comprehensive test suite (`tests/test_phase2_3_protocol_and_hardening.py`):
-  * 150 passed automated tests across entire repository (Phase 1, Phase 2.1, Phase 2.2, Phase 2.3).
-  * Quality gates passed: `ruff check .`, `ruff format --check .`, `mypy src tests`, `pytest`.
+- [x] Authoritative Razorpay order/payment lifecycle with strict server verification.
+- [x] Server-authoritative amount and currency validation with tamper-evident audit events (`PAYMENT_AMOUNT_FRAUD_DETECTED`, `PAYMENT_CURRENCY_FRAUD_DETECTED`).
+- [x] Strict payment/order/transaction binding (`OrderMismatchError`, `TransactionBindingError`) preventing cross-order or uncaptured settlement.
+- [x] PaymentAttempt and Order state regression prevention (`STATE_REGRESSION_IGNORED`, `STATE_REGRESSION_REJECTED`).
+- [x] Razorpay adapter error normalization (`RazorpayBadRequestError`, `RazorpayNotFoundError`, `RazorpayRateLimitError`, `RazorpayServerError`) with typed retryability flags.
+- [x] Safe reconciliation handling network/timeout failures without false payment success.
+- [x] Concurrent race handling between webhooks and out-of-band reconciliation with optimistic lock deduplication (`DUPLICATE_IGNORED`).
+- [x] Dedicated 12-case deterministic test suite (`tests/test_phase3_1_razorpay_boundary.py`).
+
 
