@@ -3,6 +3,7 @@
 > **Scope:** This contract governs every AI agent, pair programmer, and automated contributor operating inside the **Agent-Ready Merchant** codebase. It is non-negotiable.
 
 ---
+### Never HardCode ( specially tests)
 
 ## 1. Mandatory Pre-Flight Protocol (Read Before Acting)
 
