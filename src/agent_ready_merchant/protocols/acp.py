@@ -145,7 +145,7 @@ class AgentCommerceProtocolAdapter(BaseProtocolAdapter):
         result_dict: dict[str, Any] | None = None
         if envelope.data is not None:
             if hasattr(envelope.data, "model_dump"):
-                result_dict = envelope.data.model_dump(mode="json")
+                result_dict = envelope.data.model_dump(mode="json", exclude_none=True)
             elif isinstance(envelope.data, dict):
                 result_dict = envelope.data
             else:

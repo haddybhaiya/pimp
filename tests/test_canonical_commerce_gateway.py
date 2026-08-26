@@ -24,6 +24,7 @@ from httpx import AsyncClient
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from agent_ready_merchant.gateway.canonical import CanonicalCommerceGateway
 from agent_ready_merchant.gateway.registry import CapabilityRegistry
@@ -39,6 +40,8 @@ from agent_ready_merchant.gateway.schemas import (
     GetPaymentStatusRequest,
     GetProductRequest,
     GetQuoteRequest,
+    InitializeSessionRequest,
+    NegotiateQuoteGatewayRequest,
     QuoteItemRequest,
     RequestCheckoutRequest,
     ShippingAddressGateway,
@@ -917,3 +920,173 @@ async def test_dispatcher_allows_caps_within_persisted_grant(
     assert res.status != "REJECTED" or (
         res.error is not None and res.error.code != "CAPABILITY_DENIED"
     )
+
+
+# =============================================================================
+# 7. Server-Generated Token Return & Exact Negotiation Distribution
+# =============================================================================
+@pytest.mark.asyncio
+async def test_initialize_session_returns_server_generated_token_once(
+    db_session: AsyncSession, seed_gateway_data: dict[str, Any]
+) -> None:
+    """Without a client token, initialize must return the generated raw token ONCE.
+
+    The session is unusable otherwise (all later requests require the raw
+    token); the response is the only opportunity to hand it over.
+    """
+    merchant = seed_gateway_data["merchant_a"]
+    gateway = CanonicalCommerceGateway()
+
+    res = await gateway.initialize_session(
+        db_session,
+        InitializeSessionRequest(buyer_agent_identifier="token-once-agent"),
+        merchant.id,
+    )
+    assert res.status == "SUCCESS"
+    assert res.data is not None
+    assert res.data.auth_token, "server-generated raw token must be returned once"
+    assert res.data.auth_token_hash is not None
+
+    # The returned token must authenticate subsequent session requests.
+    ctx = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=res.data.session_id,
+        capabilities={"buyer:discover", "buyer:read", "buyer:quote"},
+        auth_token=res.data.auth_token,
+    )
+    prod_res = await gateway.get_product(
+        db_session, GetProductRequest(sku="RUN-SHOE-PRO"), ctx
+    )
+    assert prod_res.status != "REJECTED" or (
+        prod_res.error is not None and prod_res.error.code != "AUTH_INVALID_CREDENTIAL"
+    )
+
+
+async def _seed_multiline_negotiation_quote(
+    db_session: AsyncSession,
+) -> tuple[Any, Any]:
+    """Builds a PROPOSED quote with lines qty=2 and qty=5 (truncation-prone)."""
+    from agent_ready_merchant.models.merchant import Merchant
+    from agent_ready_merchant.models.product import Product, ProductVariant
+    from agent_ready_merchant.models.quote import PriceQuote, QuoteItem
+
+    merchant = Merchant(
+        name="MultiLine Merchant",
+        slug=f"multiline-{uuid.uuid4().hex[:6]}",
+        status="ACTIVE",
+        currency="INR",
+        rzp_key_id="rzp_test_placeholder",
+    )
+    db_session.add(merchant)
+    await db_session.flush()
+
+    buyer_session = BuyerAgentSession(
+        merchant_id=merchant.id,
+        buyer_agent_identifier="multiline-agent",
+        auth_token_hash=hashlib.sha256(b"tok").hexdigest(),
+        status="ACTIVE",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    db_session.add(buyer_session)
+    await db_session.flush()
+
+    specs = [
+        ("ML-A", 100_000, 2),  # unit paise, quantity
+        ("ML-B", 60_000, 5),
+    ]
+    variant_ids = []
+    for sku, price, _q in specs:
+        product = Product(
+            merchant_id=merchant.id,
+            title=f"Item {sku}",
+            sku=f"{sku}-{uuid.uuid4().hex[:6]}",
+            description="d",
+            category="Test",
+            base_price_paise=price,
+            floor_price_paise=price // 3,
+            is_negotiable=True,
+            is_active=True,
+        )
+        db_session.add(product)
+        await db_session.flush()
+        variant = ProductVariant(
+            product_id=product.id,
+            sku=f"{sku}-VAR-{uuid.uuid4().hex[:6]}",
+            title="Std",
+            price_override_paise=price,
+            is_active=True,
+        )
+        db_session.add(variant)
+        await db_session.flush()
+        variant_ids.append(variant.id)
+
+    subtotal = sum(u * q for _s, u, q in specs)
+    quote = PriceQuote(
+        session_id=buyer_session.id,
+        merchant_id=merchant.id,
+        status="PROPOSED",
+        subtotal_paise=subtotal,
+        discount_paise=0,
+        shipping_paise=0,
+        total_paise=subtotal,
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+        idempotency_key=f"ml-quote-{uuid.uuid4().hex[:8]}",
+        version=1,
+    )
+    db_session.add(quote)
+    await db_session.flush()
+    for (_sku, unit, qty), vid in zip(specs, variant_ids, strict=False):
+        db_session.add(
+            QuoteItem(
+                quote_id=quote.id,
+                variant_id=vid,
+                quantity=qty,
+                unit_price_paise=unit,
+                total_price_paise=unit * qty,
+            )
+        )
+    await db_session.flush()
+    return quote, merchant
+
+
+@pytest.mark.asyncio
+async def test_negotiation_remainder_exactly_distributed(
+    db_session: AsyncSession,
+) -> None:
+    """Remainder unrepresentable by a single line must still be fully assigned.
+
+    Proposal of 400001 against lines qty=2 and qty=5 leaves remainder=1 after
+    proportional floor allocation; the distribution search (+3 units on the
+    qty-2 line, -1 unit on the qty-5 line) must absorb it exactly so the buyer
+    is charged precisely the accepted amount.
+    """
+    quote, merchant = await _seed_multiline_negotiation_quote(db_session)
+    # 425001 = 14.9998% discount (within the 15% policy cap); proportional
+    # floor allocation across qty {2, 5} leaves remainder=1 paise.
+    target = 425_001
+
+    gateway = CanonicalCommerceGateway()
+    context = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=quote.session_id,
+        capabilities={"buyer:negotiate"},
+    )
+    res = await gateway.negotiate_quote(
+        db_session,
+        NegotiateQuoteGatewayRequest(quote_id=quote.id, proposed_total_paise=target),
+        context,
+    )
+    assert res.status == "SUCCESS"
+    assert res.data is not None
+    assert res.data.total_paise == target, "remainder must not be discarded"
+
+    fresh_quote = (
+        await db_session.execute(
+            select(PriceQuote)
+            .options(selectinload(PriceQuote.items))
+            .where(PriceQuote.id == quote.id)
+        )
+    ).scalar_one()
+    assert fresh_quote.total_paise == target
+    for itm in fresh_quote.items:
+        assert itm.total_price_paise == itm.unit_price_paise * itm.quantity

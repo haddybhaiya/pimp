@@ -242,10 +242,10 @@ class AgentProtocolClient:
         )
         if res.status == "SUCCESS" and res.result:
             self.context.session_id = uuid.UUID(res.result["session_id"])
-            if "auth_token" in res.result:
-                self.context.auth_token_raw = res.result["auth_token"]
-            else:
-                self.context.auth_token_raw = token_to_send
+            # Only adopt a server-generated token when actually present and
+            # non-empty; keep our own token otherwise.
+            server_token = res.result.get("auth_token")
+            self.context.auth_token_raw = server_token or token_to_send
             self.context.current_state = BuyerCommerceState.DISCOVERED
         return res
 
