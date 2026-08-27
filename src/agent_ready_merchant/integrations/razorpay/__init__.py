@@ -16,6 +16,8 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     RazorpayServerError,
     RazorpayTimeoutError,
     TransactionBindingError,
+    WebhookReplayError,
+    WebhookTimestampError,
 )
 from agent_ready_merchant.integrations.razorpay.models import (
     RazorpayOrderCreateRequest,
@@ -42,6 +44,8 @@ __all__ = [
     "RazorpayNetworkError",
     "RazorpayTimeoutError",
     "InvalidWebhookSignatureError",
+    "WebhookReplayError",
+    "WebhookTimestampError",
     "AmountMismatchFraudError",
     "CurrencyMismatchFraudError",
     "OrderMismatchError",

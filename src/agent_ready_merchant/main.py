@@ -24,6 +24,8 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     InvalidWebhookSignatureError,
     OrderMismatchError,
     TransactionBindingError,
+    WebhookReplayError,
+    WebhookTimestampError,
 )
 from agent_ready_merchant.services.payment_service import PaymentService
 
@@ -141,6 +143,12 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid webhook signature",
+            ) from exc
+        except (WebhookReplayError, WebhookTimestampError) as exc:
+            logger.warning("Rejected replay or stale webhook: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
             ) from exc
         except AmountMismatchFraudError as exc:
             logger.error("Fraud attempt caught during webhook processing: %s", exc)
