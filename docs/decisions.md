@@ -136,6 +136,21 @@
   - *Positive:* Physically guarantees idempotency across network retries, protects against double-charging, ensures audit log integrity under heavy concurrent load, and provides fail-closed replay protection.
   - *Negative:* Requires additional database roundtrips for deduplication and receipt verification.
 
+---
+
+## ADR-012: Deterministic End-to-End Payment Verification & Transport Decoupling
+
+- **Status:** ACCEPTED
+- **Context:** Verifying the full canonical commerce lifecycle and edge cases (concurrency races, timeout-after-save, dropped webhooks, fraud detection, cross-tenant isolation) cannot rely on external third-party network services or live test credentials during automated CI runs. At the same time, mocking domain logic obscures real system integration and state-machine race bugs.
+- **Decision:**
+  1. Implement a protocol-faithful, stateful fake Razorpay transport (`DeterministicFakeRazorpayTransport`) using `httpx.AsyncBaseTransport`. This transport deterministically simulates the external Razorpay REST API (`/v1/orders`, `/v1/payments`, order lookup by receipt, payment capture, and cryptographic HMAC-SHA256 webhook signatures) as well as wire-level faults (connection timeouts, 500 internal errors, and remote-success-followed-by-timeout).
+  2. Decouple `CanonicalCommerceGateway` to accept an injected `RazorpayClient`, ensuring the entire gateway end-to-end lifecycle runs against the exact domain models, policies, state machines, and database constraints without mocking away business logic.
+  3. Build a comprehensive 17-scenario end-to-end verification suite covering the complete golden path and 16 deliberate edge/failure conditions.
+- **Consequences:**
+  - *Positive:* Fast, 100% deterministic, hermetic verification in CI without external network dependencies or live API key leaks. Completely preserves and exercises all internal domain models, state machines, database constraints, and cryptographic signatures.
+  - *Negative:* The fake transport must be maintained in sync with any Razorpay API contract changes.
+
+
 
 
 

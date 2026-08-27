@@ -1,8 +1,8 @@
 # Phase Status & Roadmap: Agent-Ready Merchant
 
-> **Current Phase:** Phase 3.2 (Payment Reliability Hardening)  
+> **Current Phase:** Phase 3 (End-to-End Payment Boundary & Verification)  
 > **Status:** 100% COMPLETED & SIGNED OFF  
-> **Next Milestone:** Phase 3.3 (Autonomous Merchant Optimization & Governance)
+> **Next Milestone:** Phase 4 (Autonomous Merchant Optimization & External Ecosystem)
 
 ---
 
@@ -22,20 +22,34 @@
 | **Phase 2.3** | Protocol Boundary + Production-Grade Demo Hardening | **COMPLETED** | ACP Protocol Adapter, AgentProtocolClient, contract versioning, idempotency manager, rate limiting, bounded payloads, safe error sanitization |
 | **Phase 3.1** | Razorpay Payment Boundary & Invariant Hardening | **COMPLETED** | Server-authoritative amount/currency verification, payment-order binding, multi-entity transaction binding, error normalization, race safety |
 | **Phase 3.2** | Payment Reliability Hardening | **COMPLETED** | Durable webhook deduplication, replay protection, order creation retry safety, ledger uniqueness, audit chain integrity |
-| **Phase 3.3** | Autonomous Merchant Optimization Agent & Control Plane | PLANNED | Revenue experiments, catalog auto-tuning, conversion analytics, merchant supervision |
+| **Phase 3.3** | End-to-End Payment Verification & Deliberate Failure Suite | **COMPLETED** | Deterministic E2E verification suite, fake Razorpay transport, 17 deliberate failure scenarios, zero side-effect verification |
 
 ---
 
-## Phase 3.2 Deliverables Completed
+## Phase 3.3 Deliverables Completed
 
-- [x] Durable Webhook Deduplication backed by `ProcessedWebhook` database table with unique constraints (`uq_processed_webhooks_payload_hash`).
-- [x] Webhook Replay Protection enforcing strict timestamp freshness windows against stale/future clock-skewed payloads (`WebhookTimestampError`).
-- [x] Order Creation Retry Safety guaranteeing that successful remote Razorpay order mutations followed by local timeouts/crashes reuse the open remote order via receipt query (`fetch_order_by_receipt`) and durable breadcrumbs rather than creating blind duplicates.
-- [x] Concurrency Serialization and Race Protection: `with_for_update()` row locking on `Order` and `PaymentAttempt` serializing concurrent webhooks and out-of-band reconciliations.
-- [x] Transaction Ledger Uniqueness enforced by database unique constraint `uq_transaction_records_settlement_entry` on `(settlement_ref, entry_type)`.
-- [x] Cryptographically Tamper-Evident Audit Event Hash Chaining with concurrency serialization per merchant and verification utility (`AuditEvent.verify_chain`).
-- [x] Alembic Migration `004_payment_reliability` for PostgreSQL production deployments.
-- [x] Dedicated 9-case adversarial, concurrency, and reliability test suite (`tests/test_phase3_2_payment_reliability.py`).
+- [x] Protocol-Faithful Deterministic Fake Transport (`DeterministicFakeRazorpayTransport`) inheriting from `httpx.AsyncBaseTransport` for in-memory, zero-mocking end-to-end verification.
+- [x] Wire-level Fault Simulation: wire timeouts, 500 server errors, and remote-success-followed-by-timeout simulating network crashes.
+- [x] Full Canonical E2E Payment Lifecycle: Buyer session -> canonical gateway -> accepted quote -> atomic inventory reservation -> Razorpay order -> payment -> HMAC-signed webhook -> reconciliation -> PaymentAttempt -> TransactionRecord -> immutable AuditEvent hash chain -> terminal completed state.
+- [x] Deliberate Failure Matrix (16 explicit edge/failure scenarios):
+  1. Expired quote rejection
+  2. Changed quote version mismatch
+  3. Inventory concurrency race preventing overselling
+  4. Wrong payment amount detected as fraud
+  5. Wrong payment currency detected as fraud
+  6. Forged webhook HMAC signature rejection
+  7. Replayed webhook with stale timestamp rejection
+  8. Duplicate and concurrent webhook deduplication
+  9. Concurrent checkout safe serialization
+  10. Razorpay timeout after remote success receipt recovery
+  11. Local DB failure after remote success safe recovery
+  12. Out-of-band reconciliation after lost webhook
+  13. Invalid state transition fail-closed guard
+  14. Cross-merchant access prevention
+  15. Cross-session access prevention
+  16. Retry after partial failure clean recovery
+- [x] Full Quality Gate Compliance: 100% clean passes on `ruff format`, `ruff check`, `mypy (strict)`, and `pytest` (203 passing tests).
+
 
 
 
