@@ -111,8 +111,13 @@ _ALLOWED_BUYER_CAPABILITIES: frozenset[str] = frozenset(
 class CanonicalCommerceGateway:
     """Server-authoritative boundary between arbitrary AI buyers/adapters and commerce domain."""
 
-    def __init__(self, tool_gateway: ToolGateway | None = None) -> None:
+    def __init__(
+        self,
+        tool_gateway: ToolGateway | None = None,
+        rzp_client: RazorpayClient | None = None,
+    ) -> None:
         self.tool_gateway = tool_gateway or ToolGateway()
+        self.rzp_client = rzp_client
 
     async def get_merchant_representation(
         self,
@@ -850,7 +855,7 @@ class CanonicalCommerceGateway:
             )
 
         settings = get_settings()
-        rzp_client = RazorpayClient(
+        rzp_client = self.rzp_client or RazorpayClient(
             key_id=settings.RAZORPAY_KEY_ID,
             key_secret=settings.RAZORPAY_KEY_SECRET,
             base_url=settings.RAZORPAY_API_BASE_URL,
@@ -968,7 +973,7 @@ class CanonicalCommerceGateway:
                     "MISSING_CHECKOUT_DETAILS",
                     "buyer_email and shipping_address are required when checking out from a quote.",
                 )
-            rzp_client = RazorpayClient(
+            rzp_client = self.rzp_client or RazorpayClient(
                 key_id=settings.RAZORPAY_KEY_ID,
                 key_secret=settings.RAZORPAY_KEY_SECRET,
                 base_url=settings.RAZORPAY_API_BASE_URL,
@@ -1094,7 +1099,7 @@ class CanonicalCommerceGateway:
         # Reconcile if order pending and has external order ID
         if order.status != "PAID" and order.rzp_order_id:
             settings = get_settings()
-            rzp_client = RazorpayClient(
+            rzp_client = self.rzp_client or RazorpayClient(
                 key_id=settings.RAZORPAY_KEY_ID,
                 key_secret=settings.RAZORPAY_KEY_SECRET,
                 base_url=settings.RAZORPAY_API_BASE_URL,
