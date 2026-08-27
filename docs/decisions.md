@@ -120,6 +120,23 @@
   - *Positive:* Mathematically guarantees zero false payment success, prevents ledger pollution, eliminates race conditions between webhook and reconciliation, and ensures strict adherence to INV-FIN-01 through INV-FIN-05 and INV-STA-01 through INV-STA-05.
   - *Negative:* Requires strict error hierarchy and validation overhead on all payment-related endpoints.
 
+---
+
+## ADR-011: Payment Reliability Hardening & Durable Transaction Safeguards
+
+- **Status:** ACCEPTED
+- **Context:** Webhooks, reconciliation, and payment order creation face network instability, timeouts, concurrent duplicate deliveries, replay attacks, and potential database transaction rollbacks vs external gateway side effects. A remote mutation succeeded at Razorpay followed by a local network timeout or application crash must never lead to blind duplicate order creation on retry. Concurrently delivered webhooks must not create duplicate ledger entries or race state transitions.
+- **Decision:**
+  1. **Durable Webhook Ingestion & Deduplication Table:** Persist all received webhooks in a canonical `ProcessedWebhook` database table with a unique constraint on `payload_hash` (`sha256(raw_body)`). Replayed or concurrent duplicates are atomically caught by the database unique constraint and safely ignored (`DUPLICATE_IGNORED`).
+  2. **Timestamp Replay Bounds:** Webhook payloads must contain a timestamp within a valid 24-hour freshness window and not exceed 300 seconds in the future (preventing clock-skew / replay attacks). Violations immediately fail closed with `WebhookTimestampError`.
+  3. **External Order Recovery & Retry Safety:** In `PaymentService.create_order_from_accepted_quote`, record durable intent breadcrumbs before external invocation. On retry following a timeout or crash, query Razorpay by deterministic receipt (`ord_<quote_id>`) via `RazorpayClient.fetch_order_by_receipt` before creating any remote order, binding to the existing open order without creating a duplicate.
+  4. **Database-Enforced Ledger Uniqueness:** Enforce database unique constraint `uq_transaction_records_settlement_entry` on `(settlement_ref, entry_type)` in `TransactionRecord`. Duplicate credits for the same Razorpay payment are physically prohibited at the database level regardless of application concurrency.
+  5. **Audit Hash Chain Concurrency Serialization:** Enforce row-level tenant locking (`SELECT ... FOR UPDATE` on `Merchant`) during `AuditEvent.create_event` in PostgreSQL to prevent parallel chain forking. Provide cryptographic verification via `AuditEvent.verify_chain`.
+- **Consequences:**
+  - *Positive:* Physically guarantees idempotency across network retries, protects against double-charging, ensures audit log integrity under heavy concurrent load, and provides fail-closed replay protection.
+  - *Negative:* Requires additional database roundtrips for deduplication and receipt verification.
+
+
 
 
 

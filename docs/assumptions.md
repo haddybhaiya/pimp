@@ -54,3 +54,14 @@
 - **FAILURE IF WRONG:** Cross-order payment appropriation, currency spoofing (e.g. paying in USD for an INR order), or committing transaction records without captured payment attempts.
 - **MITIGATION:** `CurrencyMismatchFraudError`, `OrderMismatchError`, and `validate_transaction_binding` raising `TransactionBindingError` fail-closed with audit event logging before committing to ledger.
 
+---
+
+### 6. Durable Webhook Deduplication, Replay Windows & External Order Recovery
+- **ASSUMPTION:** Network jitter, provider retries, or local server crashes after remote API mutations can cause concurrent duplicate webhooks, stale replay attacks, or blind duplicate order creation on retry. Process-local locks are insufficient in distributed deployments.
+- **EVIDENCE:** Verified via `tests/test_phase3_2_payment_reliability.py` (all 9 reliability, concurrency, and adversarial scenarios passing).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Duplicate customer charges, replay of stale payment webhooks, split-brain audit hash chains, or double-entry credits in transaction ledger.
+- **MITIGATION:** Canonical `ProcessedWebhook` database table with unique constraint on `payload_hash`, timestamp freshness validation (24h replay window), `uq_transaction_records_settlement_entry` database constraint, receipt-based external order recovery (`RazorpayClient.fetch_order_by_receipt`), and tenant row-level locking for cryptographic audit chain verification.
+
+
