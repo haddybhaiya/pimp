@@ -15,6 +15,7 @@ from agent_ready_merchant.models.product import Product, ProductVariant
 from agent_ready_merchant.models.quote import PriceQuote, QuoteItem
 from agent_ready_merchant.models.session import BuyerAgentSession
 from agent_ready_merchant.models.transaction import TransactionRecord
+from agent_ready_merchant.models.webhook import ProcessedWebhook
 
 __all__ = [
     "Merchant",
@@ -32,4 +33,5 @@ __all__ = [
     "PolicyRule",
     "AuditEvent",
     "AgentRun",
+    "ProcessedWebhook",
 ]

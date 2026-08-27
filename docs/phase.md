@@ -1,8 +1,8 @@
 # Phase Status & Roadmap: Agent-Ready Merchant
 
-> **Current Phase:** Phase 3.1 (Razorpay Payment Boundary & Invariant Hardening)  
+> **Current Phase:** Phase 3.2 (Payment Reliability Hardening)  
 > **Status:** 100% COMPLETED & SIGNED OFF  
-> **Next Milestone:** Phase 3.2 (Autonomous Merchant Optimization & Governance)
+> **Next Milestone:** Phase 3.3 (Autonomous Merchant Optimization & Governance)
 
 ---
 
@@ -21,19 +21,21 @@
 | **Phase 2.2** | External AI Buyer Commerce Flow | **COMPLETED** | Autonomous AIBuyerClient, explicit states, bounded negotiation, security matrix, deliberate failure recovery |
 | **Phase 2.3** | Protocol Boundary + Production-Grade Demo Hardening | **COMPLETED** | ACP Protocol Adapter, AgentProtocolClient, contract versioning, idempotency manager, rate limiting, bounded payloads, safe error sanitization |
 | **Phase 3.1** | Razorpay Payment Boundary & Invariant Hardening | **COMPLETED** | Server-authoritative amount/currency verification, payment-order binding, multi-entity transaction binding, error normalization, race safety |
-| **Phase 3.2** | Autonomous Merchant Optimization Agent & Control Plane | PLANNED | Revenue experiments, catalog auto-tuning, conversion analytics, merchant supervision |
+| **Phase 3.2** | Payment Reliability Hardening | **COMPLETED** | Durable webhook deduplication, replay protection, order creation retry safety, ledger uniqueness, audit chain integrity |
+| **Phase 3.3** | Autonomous Merchant Optimization Agent & Control Plane | PLANNED | Revenue experiments, catalog auto-tuning, conversion analytics, merchant supervision |
 
 ---
 
-## Phase 3.1 Deliverables Completed
+## Phase 3.2 Deliverables Completed
 
-- [x] Authoritative Razorpay order/payment lifecycle with strict server verification.
-- [x] Server-authoritative amount and currency validation with tamper-evident audit events (`PAYMENT_AMOUNT_FRAUD_DETECTED`, `PAYMENT_CURRENCY_FRAUD_DETECTED`).
-- [x] Strict payment/order/transaction binding (`OrderMismatchError`, `TransactionBindingError`) preventing cross-order or uncaptured settlement.
-- [x] PaymentAttempt and Order state regression prevention (`STATE_REGRESSION_IGNORED`, `STATE_REGRESSION_REJECTED`).
-- [x] Razorpay adapter error normalization (`RazorpayBadRequestError`, `RazorpayNotFoundError`, `RazorpayRateLimitError`, `RazorpayServerError`) with typed retryability flags.
-- [x] Safe reconciliation handling network/timeout failures without false payment success.
-- [x] Concurrent race handling between webhooks and out-of-band reconciliation with optimistic lock deduplication (`DUPLICATE_IGNORED`).
-- [x] Dedicated 12-case deterministic test suite (`tests/test_phase3_1_razorpay_boundary.py`).
+- [x] Durable Webhook Deduplication backed by `ProcessedWebhook` database table with unique constraints (`uq_processed_webhooks_payload_hash`).
+- [x] Webhook Replay Protection enforcing strict timestamp freshness windows against stale/future clock-skewed payloads (`WebhookTimestampError`).
+- [x] Order Creation Retry Safety guaranteeing that successful remote Razorpay order mutations followed by local timeouts/crashes reuse the open remote order via receipt query (`fetch_order_by_receipt`) and durable breadcrumbs rather than creating blind duplicates.
+- [x] Concurrency Serialization and Race Protection: `with_for_update()` row locking on `Order` and `PaymentAttempt` serializing concurrent webhooks and out-of-band reconciliations.
+- [x] Transaction Ledger Uniqueness enforced by database unique constraint `uq_transaction_records_settlement_entry` on `(settlement_ref, entry_type)`.
+- [x] Cryptographically Tamper-Evident Audit Event Hash Chaining with concurrency serialization per merchant and verification utility (`AuditEvent.verify_chain`).
+- [x] Alembic Migration `004_payment_reliability` for PostgreSQL production deployments.
+- [x] Dedicated 9-case adversarial, concurrency, and reliability test suite (`tests/test_phase3_2_payment_reliability.py`).
+
 
 

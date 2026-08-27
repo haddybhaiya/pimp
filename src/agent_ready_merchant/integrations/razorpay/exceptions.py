@@ -90,6 +90,18 @@ class InvalidWebhookSignatureError(RazorpayError):
     pass
 
 
+class WebhookReplayError(RazorpayError):
+    """Raised when a replayed webhook is detected outside acceptable replay windows."""
+
+    pass
+
+
+class WebhookTimestampError(RazorpayError):
+    """Raised when a webhook timestamp is expired or outside valid bounds."""
+
+    pass
+
+
 class AmountMismatchFraudError(RazorpayError):
     """Raised when verified payment amount differs from order amount."""
 
