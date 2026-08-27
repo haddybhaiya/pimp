@@ -34,6 +34,11 @@ class TransactionRecord(Base, OptimisticLockMixin):
             "entry_type",
             name="uq_transaction_records_attempt_entry",
         ),
+        UniqueConstraint(
+            "settlement_ref",
+            "entry_type",
+            name="uq_transaction_records_settlement_entry",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

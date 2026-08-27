@@ -89,6 +89,23 @@ class AuditEvent(Base):
     )
 
     @classmethod
+    def compute_digest(
+        cls,
+        prev_hash: str,
+        merchant_id: uuid.UUID,
+        session_id: uuid.UUID | None,
+        actor_type: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> str:
+        """Deterministically computes SHA-256 event digest."""
+        payload_json = json.dumps(payload, sort_keys=True, default=str)
+        raw = (
+            f"{prev_hash}:{merchant_id}:{session_id or ''}:{actor_type}:{event_type}:{payload_json}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @classmethod
     async def create_event(
         cls,
         session: AsyncSession,
@@ -99,6 +116,15 @@ class AuditEvent(Base):
         session_id: uuid.UUID | None = None,
     ) -> "AuditEvent":
         """Appends a new audit event with deterministic cryptographic hash chaining."""
+        # In PostgreSQL, serialize audit event appends per merchant to guarantee
+        # linear chain integrity
+        bind = session.get_bind()
+        if bind is not None and getattr(bind.dialect, "name", "") == "postgresql":
+            from agent_ready_merchant.models.merchant import Merchant
+
+            m_stmt = select(Merchant.id).where(Merchant.id == merchant_id).with_for_update()
+            await session.execute(m_stmt)
+
         stmt = (
             select(cls.event_hash)
             .where(cls.merchant_id == merchant_id)
@@ -107,11 +133,14 @@ class AuditEvent(Base):
         )
         prev_hash = (await session.execute(stmt)).scalar_one_or_none() or cls.GENESIS_HASH
 
-        payload_json = json.dumps(payload, sort_keys=True, default=str)
-        raw = (
-            f"{prev_hash}:{merchant_id}:{session_id or ''}:{actor_type}:{event_type}:{payload_json}"
+        digest = cls.compute_digest(
+            prev_hash=prev_hash,
+            merchant_id=merchant_id,
+            session_id=session_id,
+            actor_type=actor_type,
+            event_type=event_type,
+            payload=payload,
         )
-        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
         event = cls(
             merchant_id=merchant_id,
@@ -125,3 +154,41 @@ class AuditEvent(Base):
         session.add(event)
         await session.flush()
         return event
+
+    @classmethod
+    async def verify_chain(
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+    ) -> tuple[bool, str | None]:
+        """Validates cryptographic hash chain integrity for a merchant's audit log."""
+        stmt = (
+            select(cls)
+            .where(cls.merchant_id == merchant_id)
+            .order_by(cls.created_at.asc(), cls.id.asc())
+        )
+        events = (await session.execute(stmt)).scalars().all()
+        expected_prev = cls.GENESIS_HASH
+        for idx, event in enumerate(events):
+            if event.prev_event_hash != expected_prev:
+                return (
+                    False,
+                    f"Broken chain at index {idx}: expected {expected_prev}, "
+                    f"got {event.prev_event_hash}",
+                )
+            expected_digest = cls.compute_digest(
+                prev_hash=event.prev_event_hash or cls.GENESIS_HASH,
+                merchant_id=event.merchant_id,
+                session_id=event.session_id,
+                actor_type=event.actor_type,
+                event_type=event.event_type,
+                payload=event.payload,
+            )
+            if event.event_hash != expected_digest:
+                return (
+                    False,
+                    f"Digest mismatch at index {idx}: expected {expected_digest}, "
+                    f"got {event.event_hash}",
+                )
+            expected_prev = event.event_hash
+        return True, None
