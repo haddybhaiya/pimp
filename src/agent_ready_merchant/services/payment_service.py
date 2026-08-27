@@ -3,6 +3,7 @@
 Adheres strictly to docs/razorpay-integration-notes.md, INV-FIN-04, and INV-FIN-05.
 """
 
+import hashlib
 import json
 import logging
 import uuid
@@ -26,6 +27,7 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     RazorpayNetworkError,
     RazorpayTimeoutError,
     TransactionBindingError,
+    WebhookTimestampError,
 )
 from agent_ready_merchant.integrations.razorpay.webhook import (
     assert_valid_webhook_signature,
@@ -36,6 +38,7 @@ from agent_ready_merchant.models.order import Order, OrderItem
 from agent_ready_merchant.models.payment import PaymentAttempt
 from agent_ready_merchant.models.quote import PriceQuote
 from agent_ready_merchant.models.transaction import TransactionRecord
+from agent_ready_merchant.models.webhook import ProcessedWebhook
 from agent_ready_merchant.state_machines.base import (
     InvalidStateTransitionError,
     TerminalStateError,
@@ -134,7 +137,7 @@ class PaymentService:
             )
 
         # 2. Check if order already exists for this quote (Idempotency)
-        order_stmt = select(Order).where(Order.quote_id == quote_id)
+        order_stmt = select(Order).where(Order.quote_id == quote_id).with_for_update()
         existing_order = (await session.execute(order_stmt)).scalar_one_or_none()
         if existing_order:
             return existing_order
@@ -183,6 +186,7 @@ class PaymentService:
                 quote.id,
             )
         else:
+            await cls._record_external_attempt_started(quote=quote, receipt_id=receipt_id)
             rzp_order = await rzp_client.create_order(
                 amount_paise=quote.total_paise,
                 currency="INR",
@@ -278,7 +282,58 @@ class PaymentService:
         pay_order_id = payment_data.get("order_id")
         envelope_order_id = order_data.get("id")
 
-        # 2b. Cross-payload order mismatch check
+        # 2a. Replay Protection: Validate webhook timestamp if present in payload
+        created_at_ts = event_dict.get("created_at")
+        if created_at_ts is not None:
+            now_ts = int(datetime.now(UTC).timestamp())
+            # Allow up to 24 hours in the past (Razorpay retry max window) and 300s clock skew
+            if created_at_ts < now_ts - 86400 or created_at_ts > now_ts + 300:
+                logger.warning(
+                    "Webhook event '%s' rejected: timestamp %s outside valid window (current %s)",
+                    event_name,
+                    created_at_ts,
+                    now_ts,
+                )
+                raise WebhookTimestampError(
+                    f"Webhook event timestamp {created_at_ts} is outside the allowed replay window"
+                )
+
+        # 2b. Atomic Webhook Deduplication (Durable DB uniqueness)
+        payload_hash = hashlib.sha256(raw_body).hexdigest()
+        sig_header_clean = (signature_header or "").strip()
+        signature_hash = hashlib.sha256(sig_header_clean.encode("utf-8")).hexdigest()
+
+        pw_stmt = select(ProcessedWebhook).where(ProcessedWebhook.payload_hash == payload_hash)
+        existing_pw = (await session.execute(pw_stmt)).scalar_one_or_none()
+        if existing_pw:
+            logger.info("Atomic webhook deduplication: payload %s already processed", payload_hash)
+            return {
+                "status": "DUPLICATE_IGNORED",
+                "order_id": str(existing_pw.rzp_order_id or ""),
+                "payment_id": existing_pw.rzp_payment_id,
+            }
+
+        pw_record = ProcessedWebhook(
+            event_id=event_dict.get("id"),
+            event_name=str(event_name or "unknown"),
+            payload_hash=payload_hash,
+            signature_hash=signature_hash,
+            rzp_order_id=envelope_order_id or pay_order_id,
+            rzp_payment_id=rzp_payment_id,
+            status="PROCESSING",
+        )
+        session.add(pw_record)
+        try:
+            await session.flush()
+        except IntegrityError:
+            await session.rollback()
+            logger.info("Concurrent webhook delivery collision caught by unique constraint")
+            return {
+                "status": "DUPLICATE_IGNORED",
+                "reason": "concurrent_duplicate_delivery",
+            }
+
+        # 2c. Cross-payload order mismatch check
         if pay_order_id and envelope_order_id and pay_order_id != envelope_order_id:
             m_stmt = select(Order).where(Order.rzp_order_id.in_([envelope_order_id, pay_order_id]))
             matched_ord = (await session.execute(m_stmt)).scalars().first()
@@ -306,15 +361,21 @@ class PaymentService:
 
         if not rzp_order_id:
             logger.warning("Webhook event '%s' ignored: missing rzp_order_id", event_name)
+            pw_record.status = "IGNORED"
+            pw_record.response_payload = {"status": "IGNORED", "reason": "missing_rzp_order_id"}
+            await session.flush()
             return {"status": "IGNORED", "reason": "missing_rzp_order_id"}
 
-        # 3. Lookup Order by rzp_order_id
-        order_stmt = select(Order).where(Order.rzp_order_id == rzp_order_id)
+        # 3. Lookup Order by rzp_order_id with row-level lock for serialization
+        order_stmt = select(Order).where(Order.rzp_order_id == rzp_order_id).with_for_update()
         order = (await session.execute(order_stmt)).scalar_one_or_none()
         if not order:
             logger.warning(
                 "Webhook event '%s' ignored: order '%s' not found", event_name, rzp_order_id
             )
+            pw_record.status = "IGNORED"
+            pw_record.response_payload = {"status": "IGNORED", "reason": "order_not_found"}
+            await session.flush()
             return {"status": "IGNORED", "reason": "order_not_found"}
 
         # Strict payment-to-order binding check
@@ -343,12 +404,21 @@ class PaymentService:
         if event_name in {"order.paid", "payment.captured"}:
             if not rzp_payment_id:
                 logger.warning("Webhook %s missing payment ID", event_name)
+                pw_record.status = "IGNORED"
+                pw_record.response_payload = {"status": "IGNORED", "reason": "missing_payment_id"}
+                await session.flush()
                 return {"status": "IGNORED", "reason": "missing_payment_id"}
             if not amount_paise or int(amount_paise) <= 0:
                 logger.warning("Webhook %s invalid amount: %s", event_name, amount_paise)
+                pw_record.status = "IGNORED"
+                pw_record.response_payload = {
+                    "status": "IGNORED",
+                    "reason": "invalid_payment_amount",
+                }
+                await session.flush()
                 return {"status": "IGNORED", "reason": "invalid_payment_amount"}
 
-            return await cls._handle_payment_success(
+            result = await cls._handle_payment_success(
                 session=session,
                 order=order,
                 rzp_payment_id=rzp_payment_id,
@@ -359,7 +429,7 @@ class PaymentService:
                 currency=str(currency) if currency else None,
             )
         elif event_name == "payment.failed":
-            return await cls._handle_payment_failure(
+            result = await cls._handle_payment_failure(
                 session=session,
                 order=order,
                 rzp_payment_id=rzp_payment_id,
@@ -369,7 +439,18 @@ class PaymentService:
             )
         else:
             logger.info("Webhook event '%s' received without state action", event_name)
-            return {"status": "ACKNOWLEDGED", "event": event_name}
+            result = {"status": "ACKNOWLEDGED", "event": event_name}
+
+        # Update processed webhook record
+        pw_record.status = (
+            "PROCESSED"
+            if result.get("status") in {"PROCESSED", "FAILURE_RECORDED", "ACKNOWLEDGED"}
+            else "DUPLICATE_IGNORED"
+        )
+        pw_record.response_payload = result
+        pw_record.processed_at = datetime.now(UTC)
+        await session.flush()
+        return result
 
     @classmethod
     async def _handle_payment_success(
@@ -447,9 +528,13 @@ class PaymentService:
             )
 
         # 4. Idempotency Check: check if payment attempt already exists and is CAPTURED
-        pay_stmt = select(PaymentAttempt).where(
-            PaymentAttempt.order_id == order.id,
-            PaymentAttempt.rzp_payment_id == rzp_payment_id,
+        pay_stmt = (
+            select(PaymentAttempt)
+            .where(
+                PaymentAttempt.order_id == order.id,
+                PaymentAttempt.rzp_payment_id == rzp_payment_id,
+            )
+            .with_for_update()
         )
         existing_attempt = (await session.execute(pay_stmt)).scalar_one_or_none()
 
@@ -600,9 +685,13 @@ class PaymentService:
                 "payment_id": rzp_payment_id,
             }
 
-        pay_stmt = select(PaymentAttempt).where(
-            PaymentAttempt.order_id == order.id,
-            PaymentAttempt.rzp_payment_id == rzp_payment_id,
+        pay_stmt = (
+            select(PaymentAttempt)
+            .where(
+                PaymentAttempt.order_id == order.id,
+                PaymentAttempt.rzp_payment_id == rzp_payment_id,
+            )
+            .with_for_update()
         )
         existing_attempt = (await session.execute(pay_stmt)).scalar_one_or_none()
 
@@ -706,45 +795,56 @@ class PaymentService:
         quote that never made it into a committed local transaction. The remote
         order is only reused when Razorpay confirms it is still 'created' and
         the amount matches; otherwise the breadcrumb is failed and a fresh
-        order must be created.
+        order must be created. If no breadcrumb exists, it falls back to querying
+        Razorpay by deterministic receipt ID.
         """
         latest = await cls._latest_external_event(session, quote)
-        if latest is None or latest.event_type != _EXTERNAL_ATTEMPT_EVENT:
-            return None
-        if latest.payload.get("status") != "PENDING":
-            return None
+        if latest is not None and latest.event_type == _EXTERNAL_ATTEMPT_EVENT:
+            if latest.payload.get("status") == "PENDING":
+                rzp_order_id = latest.payload.get("rzp_order_id")
+                if rzp_order_id:
+                    try:
+                        remote = await rzp_client.fetch_order(rzp_order_id)
+                        if remote.status == "created" and remote.amount == quote.total_paise:
+                            return remote
+                        logger.warning(
+                            "External order '%s' is not reusable (status=%s amount=%s)",
+                            rzp_order_id,
+                            remote.status,
+                            remote.amount,
+                        )
+                        await cls._record_external_outcome(
+                            quote=quote, rzp_order_id=rzp_order_id, outcome="FAILED"
+                        )
+                    except RazorpayError:
+                        logger.warning(
+                            "Breadcrumb references external order '%s' but fetch failed",
+                            rzp_order_id,
+                        )
+                        await cls._record_external_outcome(
+                            quote=quote, rzp_order_id=rzp_order_id, outcome="FAILED"
+                        )
 
-        rzp_order_id = latest.payload.get("rzp_order_id")
-        if not rzp_order_id:
-            return None
-
+        # Fallback: Check if Razorpay already holds an order for this deterministic receipt
+        receipt_id = f"ord_{quote.id.hex[:32]}"
         try:
-            remote = await rzp_client.fetch_order(rzp_order_id)
-        except RazorpayError:
-            logger.warning(
-                "Breadcrumb references external order '%s' but fetch failed; "
-                "creating a fresh external order.",
-                rzp_order_id,
-            )
-            await cls._record_external_outcome(
-                quote=quote, rzp_order_id=rzp_order_id, outcome="FAILED"
-            )
-            return None
+            remote_by_receipt = await rzp_client.fetch_order_by_receipt(receipt_id)
+            if (
+                remote_by_receipt is not None
+                and remote_by_receipt.status == "created"
+                and remote_by_receipt.amount == quote.total_paise
+            ):
+                logger.info(
+                    "Reusing external Razorpay order '%s' discovered via receipt '%s'",
+                    remote_by_receipt.id,
+                    receipt_id,
+                )
+                await cls._record_external_attempt(quote=quote, rzp_order=remote_by_receipt)
+                return remote_by_receipt
+        except Exception as exc:
+            logger.debug("Receipt fallback query ignored: %s", exc)
 
-        if remote.status != "created" or remote.amount != quote.total_paise:
-            logger.warning(
-                "External order '%s' is not reusable (status=%s amount=%s); "
-                "creating a fresh external order.",
-                rzp_order_id,
-                remote.status,
-                remote.amount,
-            )
-            await cls._record_external_outcome(
-                quote=quote, rzp_order_id=rzp_order_id, outcome="FAILED"
-            )
-            return None
-
-        return remote
+        return None
 
     @classmethod
     async def _append_external_event(
@@ -775,6 +875,19 @@ class PaymentService:
                 await breadcrumb_session.commit()
         except Exception:
             logger.exception("Failed to persist external-order breadcrumb")
+
+    @classmethod
+    async def _record_external_attempt_started(cls, quote: PriceQuote, receipt_id: str) -> None:
+        await cls._append_external_event(
+            merchant_id=quote.merchant_id,
+            payload={
+                "event": "attempt",
+                "quote_id": str(quote.id),
+                "receipt": receipt_id,
+                "amount_paise": quote.total_paise,
+                "status": "PENDING",
+            },
+        )
 
     @classmethod
     async def _record_external_attempt(cls, quote: PriceQuote, rzp_order: Any) -> None:
@@ -813,7 +926,7 @@ class PaymentService:
         merchant_id: uuid.UUID | None = None,
     ) -> dict[str, Any]:
         """Out-of-band reconciliation querying Razorpay for authoritative order payment status."""
-        stmt = select(Order).where(Order.id == order_id)
+        stmt = select(Order).where(Order.id == order_id).with_for_update()
         order = (await session.execute(stmt)).scalar_one_or_none()
         if not order:
             raise ValueError(f"Order with ID {order_id} not found")
