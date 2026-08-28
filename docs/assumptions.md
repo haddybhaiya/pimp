@@ -74,5 +74,12 @@
 - **FAILURE IF WRONG:** False confidence due to transport diverging from live Razorpay API behavior.
 - **MITIGATION:** Fake transport implements real HMAC SHA-256 signatures, exact payload structures, and receipt querying matching the real Razorpay API contract.
 
+---
 
-
+### 8. Server-Authoritative Identity, Capability Derivation & Anti-Resource Existence Probing
+- **ASSUMPTION:** Client callers and external AI agents cannot be trusted to self-declare capabilities (`X-Capabilities`) or access resources without server-authoritative authentication and multi-tenant session binding. Probing entity existence across tenants must return generic not-found errors rather than descriptive authorization denial messages.
+- **EVIDENCE:** Verified via `tests/test_phase4_1_security_and_authorization.py` (all 12 adversarial test cases passing deterministically).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Privilege escalation via forged capability headers, cross-tenant quote/order snooping via UUID guessing, or timing attacks on token verification.
+- **MITIGATION:** Constant-time `hmac.compare_digest` token verification against SHA-256 hashes, server-authoritative capability intersection against `BuyerAgentSession.granted_capabilities`, mandatory session gates for privileged/stateful operations, and uniform `QUOTE_NOT_FOUND` / `ORDER_NOT_FOUND` error masking.

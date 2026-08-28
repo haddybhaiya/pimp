@@ -351,3 +351,90 @@ For each issue above, determine whether it is valid and should be fixed. If so, 
 > 2. On retry, `_find_reusable_external_order` checks the breadcrumb and/or queries Razorpay by deterministic receipt ID
 > 3. If a matching `created`-status order with correct amount exists, it is reused instead of creating a new one
 > This is tested in `test_phase3_3_end_to_end_verification.py` (scenario 10: Razorpay timeout after remote success).
+
+
+
+## some non resolved (keep in mind ) issues from phase 3
+- content : " ### Issue 1
+src/agent_ready_merchant/services/payment_service.py:322-327
+**Ignored retries discard valid payments**
+
+When a payment webhook arrives before its local order exists, it is recorded as `IGNORED`; an identical retry after the order is created now returns `DUPLICATE_IGNORED` without processing the payment, leaving the order unsettled and its transaction credit absent unless a client later requests reconciliation.
+
+---
+
+For each issue above, determine whether it is valid and should be fixed. If so, fix it directly."
+
+- content : VALIDATE FIRST "
+Check if these issues are valid — if so, understand the root cause of each and fix them. If appropriate, use sub-agents to investigate and fix each issue separately.
+
+
+<file name="src/agent_ready_merchant/models/transaction.py">
+
+<violation number="1" location="src/agent_ready_merchant/models/transaction.py:76">
+P2: When a caller creates a `TransactionRecord` through `TransactionRecordCreate` without `settlement_ref`, validation accepts it but this model raises an `IntegrityError` at flush. Make the create schema and uncommitted lifecycle require or defer the reference consistently with this constraint.</violation>
+
+<violation number="2" location="src/agent_ready_merchant/models/transaction.py:78">
+P1: When an existing database contains a NULL `settlement_ref`, migration 004 fails before the new safeguards are installed. Backfill or explicitly remediate NULL rows before applying the NOT NULL constraint.</violation>
+</file>
+
+<file name="tests/test_phase3_3_end_to_end_verification.py">
+
+<violation number="1" location="tests/test_phase3_3_end_to_end_verification.py:495">
+P2: The tests claimed to verify concurrency (`test_failure_inventory_race_prevents_overselling`, `test_failure_duplicate_and_concurrent_webhooks`, `test_failure_concurrent_checkout_safe_serialization`) run every operation sequentially in a single coroutine with `await` one at a time. No `asyncio.gather`, separate sessions, or separate connections are used, so the actual race paths are never exercised: the DB unique-constraint collision branch, optimistic-lock contention, the `WebhookProcessingInProgressError` path, and true simultaneous inventory reservation. The PR description explicitly claims these 17 scenarios cover concurrency and races, but the suite only tests sequential idempotency/oversell-soon-after, so the concurrency guarantees are not actually verified.</violation>
+</file>
+
+<file name="src/agent_ready_merchant/services/payment_service.py">
+
+<violation number="1" location="src/agent_ready_merchant/services/payment_service.py:862">
+P2: If receipt lookup raises a non-Razorpay error, this catch hides it and proceeds to create another external order. Catch expected `RazorpayError` failures and surface unexpected errors instead.</violation>
+</file>
+
+<file name="src/agent_ready_merchant/gateway/registry.py">
+
+<violation number="1" location="src/agent_ready_merchant/gateway/registry.py:295">
+P2: The canonical catalog now marks `get_payment_status` as state-mutating, but the registered `GetPaymentStatusTool` still declares the same action `READ_ONLY`. Synchronize the alias/tool metadata or make the registry the sole source so agents do not apply read-only or cacheable policy on one execution path and reconciliation policy on another.</violation>
+</file>
+
+<file name="tests/test_phase3_1_razorpay_boundary.py">
+
+<violation number="1" location="tests/test_phase3_1_razorpay_boundary.py:154">
+P3: Webhook secrets and Razorpay credentials are inlined throughout the file, but the repo's agent contract (AGENTS.md "Never HardCode (specially tests)") and conftest.py define placeholder env variables (RAZORPAY_WEBHOOK_SECRET, RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET) for this purpose. Read the signing secret and credentials from these env values instead of string literals so the test suite carries no secrets and follows the documented guideline.</violation>
+</file>"
+
+---
+
+# Review 6: Phase 4.1 Security Boundary & Authorization Hardening
+
+> **Reviewed on:** 2026-08-28
+> **Scope:** Server-Authoritative Identity, Constant-Time Token Authentication, Multi-Tenant Session Boundary Gate, Server-Authoritative Capability Derivation, Anti-Resource Existence Probing, and Adversarial Verification Suite.
+
+---
+
+## Deliverables & Security Verification Summary
+
+1. **Server-Authoritative Session Authentication:**
+   - Implemented constant-time cryptographic verification (`hmac.compare_digest(hashlib.sha256(token).hexdigest(), db_sess.auth_token_hash)`) protecting against timing analysis attacks.
+   - Missing or invalid tokens fail closed with `AUTH_INVALID_CREDENTIAL`.
+
+2. **Mandatory Session Boundary Gate:**
+   - Stateful and privileged financial operations (`get_quote`, `negotiate_quote`, `accept_quote`, `create_order`, `request_checkout`, `get_payment_status`, `get_order_status`, `terminate_session`) strictly require an active, non-expired session (`AUTH_SESSION_NOT_FOUND` fail-closed).
+   - Anonymous requests are strictly bounded to read-only discovery capabilities (`discover_products`, `get_product`, `check_inventory`, `calculate_shipping`).
+
+3. **Server-Authoritative Capability Derivation:**
+   - Capabilities are strictly derived from `db_sess.granted_capabilities` in PostgreSQL.
+   - Client-supplied `X-Capabilities` headers can never elevate permissions or self-grant financial capabilities (`INV-AGY-05`). Calling unauthorized capabilities fails closed with `CAPABILITY_DENIED`.
+
+4. **Multi-Tenant & Cross-Session Isolation:**
+   - Strict row-level isolation ensuring buyers cannot query, negotiate, accept, order, or check payment status for quotes/orders belonging to different merchants or sessions.
+   - Mismatches return uniform generic errors (`QUOTE_NOT_FOUND`, `ORDER_NOT_FOUND`, `AUTH_SESSION_NOT_FOUND`) without leaking resource existence or tenant details.
+
+5. **Adversarial Test Suite (`tests/test_phase4_1_security_and_authorization.py`):**
+   - 12 comprehensive test scenarios verifying forged tokens, wrong merchants, wrong sessions, forged capabilities, expired sessions, replayed credentials, cross-tenant access, unauthorized financial mutations, anonymous caller rejections, and malformed contexts.
+
+6. **Quality Gate Status:**
+   - `ruff format --check .`: 100% PASS (122 files)
+   - `ruff check .`: 100% PASS (0 errors)
+   - `mypy src tests`: 100% PASS (0 errors in 117 source files)
+   - `pytest`: 100% PASS (215 passed, 2 skipped, 0 failed)
+

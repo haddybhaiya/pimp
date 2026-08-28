@@ -150,8 +150,17 @@
   - *Positive:* Fast, 100% deterministic, hermetic verification in CI without external network dependencies or live API key leaks. Completely preserves and exercises all internal domain models, state machines, database constraints, and cryptographic signatures.
   - *Negative:* The fake transport must be maintained in sync with any Razorpay API contract changes.
 
+---
 
+## ADR-013: Server-Authoritative Identity, Session Authentication & Multi-Tenant Capability Boundary Enforcement
 
-
-
-
+- **Status:** ACCEPTED
+- **Context:** External AI buyers, adapters, or adversaries may present forged credentials, forged `X-Capabilities` headers, expired session tokens, or attempt to probe/manipulate quotes and orders across tenant or session boundaries. Allowing client-supplied capability headers to elevate privileges or leaking resource existence through descriptive 403 errors enables credential forging and tenant snooping.
+- **Decision:**
+  1. **Constant-Time Cryptographic Token Verification:** Verify presented `auth_token` against database `BuyerAgentSession.auth_token_hash` using `hmac.compare_digest(sha256(auth_token), db_hash)` to protect against timing analysis attacks. Missing or invalid tokens fail closed with `AUTH_INVALID_CREDENTIAL`.
+  2. **Mandatory Session Gate for Privileged/Stateful Capabilities:** Stateful and privileged financial operations (`get_quote`, `negotiate_quote`, `accept_quote`, `create_order`, `request_checkout`, `get_payment_status`, `get_order_status`, `terminate_session`) strictly require an active, non-expired session (`AUTH_SESSION_NOT_FOUND` / `AUTH_SESSION_EXPIRED`). Anonymous requests are bounded strictly to read capabilities (`discover_products`, `get_product`, `check_inventory`, `calculate_shipping`).
+  3. **Server-Authoritative Capability Derivation:** Gateway capabilities are strictly bounded by `BuyerAgentSession.granted_capabilities` persisted in PostgreSQL. Client-supplied headers (e.g. `X-Capabilities: buyer:checkout`) can never self-grant or elevate permissions beyond the persisted grant (`INV-AGY-05`).
+  4. **Strict Cross-Tenant & Cross-Session Isolation:** All entity queries (`PriceQuote`, `Order`, `InventoryItem`, `BuyerAgentSession`) strictly filter by `merchant_id` and `session_id`. Mismatches return uniform generic not-found errors (`QUOTE_NOT_FOUND`, `ORDER_NOT_FOUND`, `AUTH_SESSION_NOT_FOUND`) without revealing resource existence across merchant or session boundaries.
+- **Consequences:**
+  - *Positive:* Eliminates privilege escalation, cross-tenant resource snooping, replay attacks, and timing attacks. Preserves strict separation of intelligence and authority.
+  - *Negative:* Session creation is required for all quoting and ordering workflows.
