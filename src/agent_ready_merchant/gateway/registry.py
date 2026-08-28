@@ -36,6 +36,8 @@ from agent_ready_merchant.gateway.schemas import (
     NegotiateQuoteGatewayResponse,
     RequestCheckoutRequest,
     RequestCheckoutResponse,
+    ResolveApprovalRequest,
+    ResolveApprovalResponse,
     TerminateSessionRequest,
     TerminateSessionResponse,
 )
@@ -318,6 +320,32 @@ class CapabilityRegistry:
             approval_requirement="NONE",
             idempotency_requirement=False,
             failure_states=["ORDER_NOT_FOUND", "UNAUTHORIZED"],
+        ),
+        "resolve_approval": CapabilityDefinition(
+            name="resolve_approval",
+            description="Authorize or reject a pending Human-In-The-Loop merchant approval ticket.",
+            input_schema_name="ResolveApprovalRequest",
+            output_schema_name="ResolveApprovalResponse",
+            input_schema=ResolveApprovalRequest.model_json_schema(),
+            output_schema=ResolveApprovalResponse.model_json_schema(),
+            classification="PRIVILEGED_FINANCIAL",
+            side_effects=[
+                "mutates_approval_ticket_state",
+                "advances_price_quote_if_approved",
+                "appends_audit_event",
+            ],
+            monetary_impact=True,
+            required_capability="merchant:admin",
+            approval_requirement="EXPLICIT_HUMAN",
+            idempotency_requirement=True,
+            failure_states=[
+                "APPROVAL_NOT_FOUND",
+                "APPROVAL_ALREADY_RESOLVED",
+                "APPROVAL_EXPIRED",
+                "QUOTE_NOT_FOUND",
+                "QUOTE_EXPIRED",
+                "UNAUTHORIZED",
+            ],
         ),
     }
 

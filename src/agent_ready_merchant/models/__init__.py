@@ -1,9 +1,10 @@
 """Canonical SQLAlchemy domain models package.
 
-Exports all 12 canonical domain entities defined in docs/domain-model.md.
+Exports all canonical domain entities defined in docs/domain-model.md and Phase 4.2.
 """
 
 from agent_ready_merchant.models.agent_run import AgentRun
+from agent_ready_merchant.models.approval import MerchantApproval
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.intent import BuyerIntent
 from agent_ready_merchant.models.inventory import InventoryItem
@@ -34,4 +35,5 @@ __all__ = [
     "AuditEvent",
     "AgentRun",
     "ProcessedWebhook",
+    "MerchantApproval",
 ]

@@ -66,6 +66,8 @@ from agent_ready_merchant.gateway.schemas import (
     QuoteLineItemDetail,
     RequestCheckoutRequest,
     RequestCheckoutResponse,
+    ResolveApprovalRequest,
+    ResolveApprovalResponse,
     ShippingAddressGateway,
     StateOrientedContext,
     TerminateSessionRequest,
@@ -77,10 +79,12 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     RazorpayError,
     RazorpayTimeoutError,
 )
+from agent_ready_merchant.models.approval import MerchantApproval
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.models.order import Order
 from agent_ready_merchant.models.payment import PaymentAttempt
+from agent_ready_merchant.models.policy import PolicyRule
 from agent_ready_merchant.models.product import Product, ProductVariant
 from agent_ready_merchant.models.quote import PriceQuote, QuoteItem
 from agent_ready_merchant.models.session import BuyerAgentSession
@@ -1391,6 +1395,14 @@ class CanonicalCommerceGateway:
                 f"PriceQuote '{request.quote_id}' expired at {quote_expires.isoformat()}.",
             )
 
+        # Governance limit: max 3 negotiation rounds per quote (INV-AGY-04 / Phase 4.2)
+        if quote.version >= 7:
+            return self._rejected_envelope(
+                "negotiate_quote",
+                "MAX_NEGOTIATION_ATTEMPTS_EXCEEDED",
+                "Quote negotiation limit reached (maximum 3 negotiation rounds allowed).",
+            )
+
         if quote.status not in {"PROPOSED", "NEGOTIATING"}:
             return self._rejected_envelope(
                 "negotiate_quote",
@@ -1446,6 +1458,46 @@ class CanonicalCommerceGateway:
                 f"Counter-offer rejected by policy: {eval_res.reason}",
             )
         elif eval_res.verdict == PolicyVerdict.ESCALATE_APPROVAL:
+            # Persist authoritative MerchantApproval ticket (Phase 4.2 HITL Gate)
+            approval_exp = min(
+                quote_expires,
+                now + timedelta(minutes=15),
+            )
+            approval = MerchantApproval(
+                merchant_id=context.merchant_id,
+                quote_id=quote.id,
+                session_id=context.session_id,
+                approval_type="QUOTE_DISCOUNT",
+                status="PENDING",
+                requested_amount_paise=request.proposed_total_paise,
+                proposed_discount_paise=calculated_discount,
+                policy_decision_hash=eval_res.policy_hash or "0" * 64,
+                policy_rule_code=eval_res.rule_code,
+                reason=eval_res.reason,
+                expires_at=approval_exp,
+            )
+            session.add(approval)
+            await session.flush()
+
+            audit_event = await AuditEvent.create_event(
+                session=session,
+                merchant_id=context.merchant_id,
+                actor_type="BUYER_AGENT",
+                event_type="MERCHANT_APPROVAL_REQUESTED",
+                payload={
+                    "approval_id": str(approval.id),
+                    "quote_id": str(quote.id),
+                    "request_id": str(context.request_id),
+                    "requested_amount_paise": request.proposed_total_paise,
+                    "proposed_discount_paise": calculated_discount,
+                    "policy_decision_hash": eval_res.policy_hash,
+                    "policy_rule_code": eval_res.rule_code,
+                    "reason": eval_res.reason,
+                    "verdict": "ESCALATE_APPROVAL",
+                },
+                session_id=context.session_id,
+            )
+
             resp_data = NegotiateQuoteGatewayResponse(
                 quote_id=quote.id,
                 status="PENDING_APPROVAL",
@@ -1463,6 +1515,7 @@ class CanonicalCommerceGateway:
                 status="SUCCESS",
                 capability="negotiate_quote",
                 data=resp_data,
+                audit_event_id=audit_event.id,
                 state=StateOrientedContext(
                     entity_type="PriceQuote",
                     entity_id=str(quote.id),
@@ -1606,10 +1659,15 @@ class CanonicalCommerceGateway:
             event_type="PRICE_QUOTE_NEGOTIATED",
             payload={
                 "quote_id": str(quote.id),
+                "request_id": str(context.request_id),
                 "proposed_total_paise": request.proposed_total_paise,
                 "applied_discount_paise": final_discount,
                 "applied_total_paise": final_total,
                 "verdict": "ALLOW",
+                "policy_decision_hash": eval_res.policy_hash,
+                "policy_rule_code": eval_res.rule_code,
+                "reason": eval_res.reason,
+                "policy_version": policy_ctx.policy_version,
             },
             session_id=context.session_id,
         )
@@ -1833,6 +1891,224 @@ class CanonicalCommerceGateway:
         )
 
     # -------------------------------------------------------------------------
+    # 12. resolve_approval (Phase 4.2 HITL Gate)
+    # -------------------------------------------------------------------------
+    async def resolve_approval(
+        self,
+        session: AsyncSession,
+        request: ResolveApprovalRequest,
+        context: GatewayContext,
+    ) -> GatewayResponseEnvelope[ResolveApprovalResponse]:
+        """Authorizes or rejects a pending Human-In-The-Loop approval ticket (Phase 4.2)."""
+        auth_ok, auth_err = CapabilityRegistry.check_authorization("resolve_approval", context)
+        if not auth_ok:
+            return self._rejected_envelope(
+                "resolve_approval", "CAPABILITY_DENIED", auth_err or "Unauthorized"
+            )
+
+        # 1. Cross-tenant & existence check
+        stmt = select(MerchantApproval).where(
+            MerchantApproval.id == request.approval_id,
+            MerchantApproval.merchant_id == context.merchant_id,
+        )
+        approval = (await session.execute(stmt)).scalar_one_or_none()
+        if not approval:
+            return self._rejected_envelope(
+                "resolve_approval",
+                "APPROVAL_NOT_FOUND",
+                f"Approval ticket '{request.approval_id}' not found for authenticated merchant.",
+            )
+
+        # 2. Status check
+        if approval.status != "PENDING":
+            return self._rejected_envelope(
+                "resolve_approval",
+                "APPROVAL_ALREADY_RESOLVED",
+                (
+                    f"Approval ticket '{request.approval_id}' is "
+                    f"already in status '{approval.status}'."
+                ),
+            )
+
+        # 3. Expiration check
+        now = datetime.now(UTC)
+        appr_exp = (
+            approval.expires_at
+            if approval.expires_at.tzinfo is not None
+            else approval.expires_at.replace(tzinfo=UTC)
+        )
+        if now > appr_exp:
+            approval.status = "EXPIRED"
+            approval.resolved_at = now
+            await session.flush()
+            return self._rejected_envelope(
+                "resolve_approval",
+                "APPROVAL_EXPIRED",
+                f"Approval ticket '{request.approval_id}' expired at {appr_exp.isoformat()}.",
+            )
+
+        # 4. Process decision
+        if request.decision == "APPROVE":
+            if approval.quote_id:
+                q_stmt = (
+                    select(PriceQuote)
+                    .options(
+                        selectinload(PriceQuote.items)
+                        .selectinload(QuoteItem.variant)
+                        .selectinload(ProductVariant.product)
+                    )
+                    .where(
+                        PriceQuote.id == approval.quote_id,
+                        PriceQuote.merchant_id == context.merchant_id,
+                    )
+                )
+                quote = (await session.execute(q_stmt)).scalar_one_or_none()
+                if not quote:
+                    return self._rejected_envelope(
+                        "resolve_approval",
+                        "QUOTE_NOT_FOUND",
+                        f"Associated quote '{approval.quote_id}' not found for merchant.",
+                    )
+
+                quote_exp = (
+                    quote.expires_at
+                    if quote.expires_at.tzinfo is not None
+                    else quote.expires_at.replace(tzinfo=UTC)
+                )
+                if now > quote_exp:
+                    return self._rejected_envelope(
+                        "resolve_approval",
+                        "QUOTE_EXPIRED",
+                        (
+                            f"Associated quote '{approval.quote_id}' "
+                            f"expired at {quote_exp.isoformat()}."
+                        ),
+                    )
+
+                if quote.status in {"ACCEPTED", "EXPIRED", "SUPERSEDED", "REJECTED"}:
+                    return self._rejected_envelope(
+                        "resolve_approval",
+                        "INVALID_STATE_TRANSITION",
+                        f"Quote is in terminal state '{quote.status}'.",
+                    )
+
+                applied_discount = approval.proposed_discount_paise
+                applied_total = quote.subtotal_paise - applied_discount + quote.shipping_paise
+
+                if quote.status == "PROPOSED":
+                    await PriceQuoteStateMachine.transition(
+                        session=session,
+                        quote=quote,
+                        target_state="NEGOTIATING",
+                        expected_version=quote.version,
+                        actor_type="MERCHANT_ADMIN",
+                        reason=f"Merchant Admin approval: {request.reason or 'Approved'}",
+                    )
+                await PriceQuoteStateMachine.transition(
+                    session=session,
+                    quote=quote,
+                    target_state="PROPOSED",
+                    expected_version=quote.version,
+                    actor_type="MERCHANT_ADMIN",
+                    reason=f"Merchant Admin approval: {request.reason or 'Approved'}",
+                    additional_updates={
+                        "discount_paise": applied_discount,
+                        "total_paise": applied_total,
+                        "discount_reason": (
+                            f"Merchant Admin approval: {request.reason or 'Approved'}"
+                        ),
+                    },
+                )
+
+            approval.status = "APPROVED"
+            approval.approver_identifier = str(context.merchant_id)
+            approval.resolved_at = now
+            await session.flush()
+
+            audit_ev = await AuditEvent.create_event(
+                session=session,
+                merchant_id=context.merchant_id,
+                actor_type="MERCHANT_ADMIN",
+                event_type="MERCHANT_APPROVAL_GRANTED",
+                payload={
+                    "approval_id": str(approval.id),
+                    "quote_id": str(approval.quote_id) if approval.quote_id else None,
+                    "request_id": str(context.request_id),
+                    "decision": "APPROVE",
+                    "reason": request.reason,
+                    "policy_decision_hash": approval.policy_decision_hash,
+                    "approver": str(context.merchant_id),
+                },
+                session_id=approval.session_id,
+            )
+
+            return GatewayResponseEnvelope[ResolveApprovalResponse](
+                status="SUCCESS",
+                capability="resolve_approval",
+                data=ResolveApprovalResponse(
+                    approval_id=approval.id,
+                    status="APPROVED",
+                    quote_id=approval.quote_id,
+                    decision="APPROVE",
+                    resolved_at=now,
+                ),
+                audit_event_id=audit_ev.id,
+            )
+        else:  # REJECT
+            if approval.quote_id:
+                q_stmt = select(PriceQuote).where(
+                    PriceQuote.id == approval.quote_id,
+                    PriceQuote.merchant_id == context.merchant_id,
+                )
+                quote = (await session.execute(q_stmt)).scalar_one_or_none()
+                if quote and quote.status not in {"ACCEPTED", "EXPIRED", "SUPERSEDED", "REJECTED"}:
+                    await PriceQuoteStateMachine.transition(
+                        session=session,
+                        quote=quote,
+                        target_state="REJECTED",
+                        expected_version=quote.version,
+                        actor_type="MERCHANT_ADMIN",
+                        reason=(
+                            f"Merchant Admin rejected counter-offer: {request.reason or 'Rejected'}"
+                        ),
+                    )
+
+            approval.status = "REJECTED"
+            approval.approver_identifier = str(context.merchant_id)
+            approval.resolved_at = now
+            await session.flush()
+
+            audit_ev = await AuditEvent.create_event(
+                session=session,
+                merchant_id=context.merchant_id,
+                actor_type="MERCHANT_ADMIN",
+                event_type="MERCHANT_APPROVAL_REJECTED",
+                payload={
+                    "approval_id": str(approval.id),
+                    "quote_id": str(approval.quote_id) if approval.quote_id else None,
+                    "request_id": str(context.request_id),
+                    "decision": "REJECT",
+                    "reason": request.reason,
+                    "policy_decision_hash": approval.policy_decision_hash,
+                    "approver": str(context.merchant_id),
+                },
+                session_id=approval.session_id,
+            )
+
+            return GatewayResponseEnvelope[ResolveApprovalResponse](
+                status="SUCCESS",
+                capability="resolve_approval",
+                data=ResolveApprovalResponse(
+                    approval_id=approval.id,
+                    status="REJECTED",
+                    quote_id=approval.quote_id,
+                    decision="REJECT",
+                    resolved_at=now,
+                ),
+                audit_event_id=audit_ev.id,
+            )
+
+    # -------------------------------------------------------------------------
     # Unified Capability Dispatcher
     # -------------------------------------------------------------------------
     async def execute_capability(
@@ -1994,6 +2270,26 @@ class CanonicalCommerceGateway:
                 auth_err or f"Session unauthorized for capability '{capability_name}'.",
                 request_id=request_id,
             )
+
+        # 1h. Authoritative Merchant Policy Loading & Anti-Tampering Gate
+        # For non-admin buyers, policy settings (autonomy level, discount cap, margin, tx limit)
+        # must be loaded authoritatively from active merchant DB rules (INV-AGY-05 / Phase 4.2).
+        if context.actor_type != "MERCHANT_ADMIN":
+            policy_stmt = select(PolicyRule).where(
+                PolicyRule.merchant_id == context.merchant_id,
+                PolicyRule.is_active.is_(True),
+            )
+            db_rules = list((await session.execute(policy_stmt)).scalars().all())
+            for rule in db_rules:
+                val = rule.rule_value
+                if rule.rule_type == "MAX_DISCOUNT_PCT" and "max_discount_pct" in val:
+                    context.max_discount_percentage = float(val["max_discount_pct"])
+                elif rule.rule_type == "AUTONOMY_LEVEL" and "autonomy_level" in val:
+                    context.autonomy_level = int(val["autonomy_level"])
+                elif rule.rule_type == "MAX_CART_VALUE" and "max_single_tx_paise" in val:
+                    context.max_single_transaction_paise = int(val["max_single_tx_paise"])
+                elif rule.rule_type == "MIN_MARGIN_PCT" and "min_margin_pct" in val:
+                    context.min_margin_percentage = float(val["min_margin_pct"])
 
         # 2. Bounded Payload Size Validation (Max 64 KB)
         is_payload_valid, payload_size = validate_payload_size(payload)
@@ -2185,6 +2481,10 @@ class CanonicalCommerceGateway:
         elif capability_name == "get_order_status":
             req_ord_stat = GetOrderStatusRequest.model_validate(payload)
             return await self.get_order_status(session, req_ord_stat, context)
+
+        elif capability_name == "resolve_approval":
+            req_appr = ResolveApprovalRequest.model_validate(payload)
+            return await self.resolve_approval(session, req_appr, context)
 
         else:
             return self._rejected_envelope(
