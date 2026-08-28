@@ -879,7 +879,7 @@ class CanonicalCommerceGateway:
                 "create_order",
                 GatewayErrorCode.TIMEOUT_BOUNDARY_EXCEEDED.value,
                 f"Razorpay payment gateway timeout: {exc}",
-                retryable=False,
+                retryable=True,
             )
         except RazorpayError as exc:
             await session.rollback()
@@ -999,7 +999,7 @@ class CanonicalCommerceGateway:
                     "request_checkout",
                     GatewayErrorCode.TIMEOUT_BOUNDARY_EXCEEDED.value,
                     f"Razorpay payment gateway timeout: {exc}",
-                    retryable=False,
+                    retryable=True,
                 )
             except RazorpayError as exc:
                 await session.rollback()

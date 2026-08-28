@@ -24,6 +24,7 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     InvalidWebhookSignatureError,
     OrderMismatchError,
     TransactionBindingError,
+    WebhookProcessingInProgressError,
     WebhookReplayError,
     WebhookTimestampError,
 )
@@ -149,6 +150,13 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(exc),
+            ) from exc
+        except WebhookProcessingInProgressError as exc:
+            logger.info("Concurrent webhook processing in progress: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Webhook event is currently processing; retryable",
+                headers={"Retry-After": "1"},
             ) from exc
         except AmountMismatchFraudError as exc:
             logger.error("Fraud attempt caught during webhook processing: %s", exc)

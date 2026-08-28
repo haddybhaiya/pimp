@@ -50,6 +50,13 @@ def upgrade() -> None:
     )
     op.create_index("ix_processed_webhooks_status", "processed_webhooks", ["status"])
 
+    op.alter_column(
+        "transaction_records",
+        "settlement_ref",
+        existing_type=sa.String(128),
+        nullable=False,
+    )
+
     op.create_unique_constraint(
         "uq_transaction_records_settlement_entry",
         "transaction_records",
@@ -62,5 +69,11 @@ def downgrade() -> None:
         "uq_transaction_records_settlement_entry",
         "transaction_records",
         type_="unique",
+    )
+    op.alter_column(
+        "transaction_records",
+        "settlement_ref",
+        existing_type=sa.String(128),
+        nullable=True,
     )
     op.drop_table("processed_webhooks")
