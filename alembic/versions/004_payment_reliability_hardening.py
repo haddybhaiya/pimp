@@ -50,6 +50,16 @@ def upgrade() -> None:
     )
     op.create_index("ix_processed_webhooks_status", "processed_webhooks", ["status"])
 
+    # Backfill any legacy NULL settlement_ref rows before applying the NOT NULL constraint.
+    # Without this, databases with historical rows (created before migration 004) will fail
+    # with a constraint violation. The sentinel preserves the original row ID for audit
+    # traceability (fix: Issue 3 — P1 migration safety).
+    op.execute(
+        "UPDATE transaction_records "
+        "SET settlement_ref = 'BACKFILL_LEGACY_NULL_' || CAST(id AS VARCHAR) "
+        "WHERE settlement_ref IS NULL"
+    )
+
     op.alter_column(
         "transaction_records",
         "settlement_ref",

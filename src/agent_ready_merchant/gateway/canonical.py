@@ -872,9 +872,11 @@ class CanonicalCommerceGateway:
             )
         except ValueError as exc:
             await session.rollback()
+            session.expire_all()
             return self._rejected_envelope("create_order", "ORDER_CREATION_FAILED", str(exc))
         except RazorpayTimeoutError as exc:
             await session.rollback()
+            session.expire_all()
             return self._error_envelope(
                 "create_order",
                 GatewayErrorCode.TIMEOUT_BOUNDARY_EXCEEDED.value,
@@ -883,6 +885,7 @@ class CanonicalCommerceGateway:
             )
         except RazorpayError as exc:
             await session.rollback()
+            session.expire_all()
             return self._error_envelope(
                 "create_order",
                 GatewayErrorCode.COMMERCE_PAYMENT_GATEWAY_ERROR.value,
@@ -891,6 +894,7 @@ class CanonicalCommerceGateway:
             )
         except OptimisticLockError as exc:
             await session.rollback()
+            session.expire_all()
             return self._rejected_envelope("create_order", "CONCURRENCY_CONFLICT", str(exc))
 
         # Query audit event created
@@ -949,6 +953,15 @@ class CanonicalCommerceGateway:
         settings = get_settings()
         order: Order | None = None
 
+        # Resolve the Razorpay client once so its key_id can be returned in the checkout
+        # response — the checkout SDK must use credentials matching the account that created
+        # the remote order (fix: Issue 4).
+        rzp_client = self.rzp_client or RazorpayClient(
+            key_id=settings.RAZORPAY_KEY_ID,
+            key_secret=settings.RAZORPAY_KEY_SECRET,
+            base_url=settings.RAZORPAY_API_BASE_URL,
+        )
+
         if request.order_id:
             ord_stmt = (
                 select(Order)
@@ -973,11 +986,6 @@ class CanonicalCommerceGateway:
                     "MISSING_CHECKOUT_DETAILS",
                     "buyer_email and shipping_address are required when checking out from a quote.",
                 )
-            rzp_client = self.rzp_client or RazorpayClient(
-                key_id=settings.RAZORPAY_KEY_ID,
-                key_secret=settings.RAZORPAY_KEY_SECRET,
-                base_url=settings.RAZORPAY_API_BASE_URL,
-            )
             try:
                 order = await PaymentService.create_order_from_accepted_quote(
                     session=session,
@@ -990,11 +998,13 @@ class CanonicalCommerceGateway:
                 )
             except ValueError as exc:
                 await session.rollback()
+                session.expire_all()
                 return self._rejected_envelope(
                     "request_checkout", "CHECKOUT_CREATION_FAILED", str(exc)
                 )
             except RazorpayTimeoutError as exc:
                 await session.rollback()
+                session.expire_all()
                 return self._error_envelope(
                     "request_checkout",
                     GatewayErrorCode.TIMEOUT_BOUNDARY_EXCEEDED.value,
@@ -1003,6 +1013,7 @@ class CanonicalCommerceGateway:
                 )
             except RazorpayError as exc:
                 await session.rollback()
+                session.expire_all()
                 return self._error_envelope(
                     "request_checkout",
                     GatewayErrorCode.COMMERCE_PAYMENT_GATEWAY_ERROR.value,
@@ -1011,7 +1022,9 @@ class CanonicalCommerceGateway:
                 )
             except OptimisticLockError as exc:
                 await session.rollback()
+                session.expire_all()
                 return self._rejected_envelope("request_checkout", "CONCURRENCY_CONFLICT", str(exc))
+
         else:
             return self._rejected_envelope(
                 "request_checkout",
@@ -1045,10 +1058,11 @@ class CanonicalCommerceGateway:
             amount_paise=order.amount_paise,
             currency=order.currency,
             status=order.status,
-            key_id=settings.RAZORPAY_KEY_ID,
+            key_id=rzp_client.key_id,
             supported_payment_methods=["upi", "card", "netbanking", "wallet"],
             callback_url="/api/v1/payments/webhook",
         )
+
         return GatewayResponseEnvelope[RequestCheckoutResponse](
             status="SUCCESS",
             capability="request_checkout",
