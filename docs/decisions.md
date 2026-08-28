@@ -164,3 +164,21 @@
 - **Consequences:**
   - *Positive:* Eliminates privilege escalation, cross-tenant resource snooping, replay attacks, and timing attacks. Preserves strict separation of intelligence and authority.
   - *Negative:* Session creation is required for all quoting and ordering workflows.
+
+---
+
+## ADR-014: Safety, Policy & Governance Kernel
+
+- **Status:** ACCEPTED
+- **Context:** Autonomous and AI-assisted commerce operations require deterministic guardrails, explainable reason codes, tamper-resistant governance records, Human-In-The-Loop (HITL) approval mechanics, and platform safety ceilings that cannot be bypassed by prompt injection, configuration tampering, or LLM non-determinism. Furthermore, audit event logs must maintain cryptographic integrity across time without leaking secrets or buyer PII.
+- **Decision:**
+  1. **Centralized Policy Decision Record & Deterministic Hashing:** Every consequential action evaluated by `DeterministicPolicyEngine` produces a `PolicyDecisionRecord` containing rule codes, verdicts (`ALLOW`, `DENY`, `ESCALATE_APPROVAL`), and a deterministic SHA-256 `policy_hash` derived from the normalized policy configuration (`compute_policy_hash()`). Future policy modifications do not invalidate historical audit records.
+  2. **Platform Safety Boundaries & Governance Ceilings:** The engine enforces hard platform limits: max 20 items per quote (`MAX_ITEMS_PER_QUOTE_EXCEEDED`), absolute 50% discount ceiling (`GOVERNANCE_MAX_DISCOUNT_CEILING_EXCEEDED`), ₹1,00,000 (10,000,000 paise) single transaction limit (`GOVERNANCE_MAX_TRANSACTION_LIMIT_EXCEEDED`), and maximum 3 negotiation rounds per quote (`MAX_NEGOTIATION_ATTEMPTS_EXCEEDED`).
+  3. **Human-In-The-Loop (HITL) Merchant Approval Model:** When a proposal exceeds merchant autonomy or discount limits, the system transitions to `ESCALATE_APPROVAL` and persists a `MerchantApproval` row. Resolving approvals via `resolve_approval` enforces strict merchant ownership, expiration deadlines, state machine validations, and optimistic locking to prevent race conditions.
+  4. **Immutable Audit Linkage & Cryptographic Hash Verification:** Every domain mutation logs an immutable audit event recording `request_id -> session_id -> quote_id -> policy_decision_hash -> order_id`. `AuditEvent.verify_chain()` detects any back-channel database tampering.
+  5. **Zero Secret & Masked PII Redaction:** Audit payloads pass through `sanitize_audit_payload()` to redact sensitive tokens/secrets (`auth_token`, `key_secret`, `password`, `card_number`) to `"[REDACTED_SECRET]"` and mask buyer emails (`a***r@example.com`), ensuring audit logs remain safe for forensic inspection.
+  6. **Anti-Context Tampering Gate:** For non-admin callers, gateway capability execution overrides caller-supplied policy parameters by loading authoritative merchant rules directly from PostgreSQL (`PolicyRule`).
+- **Consequences:**
+  - *Positive:* Physically guarantees explainability, policy boundaries, audit traceability, and zero secret leakage. Protects merchants from runaway agent behavior and external adversarial manipulation.
+  - *Negative:* Escrow/HITL requests require asynchronous merchant resolution, slightly increasing order negotiation latency for high-value counter-offers.
+

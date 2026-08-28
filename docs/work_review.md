@@ -438,3 +438,45 @@ P3: Webhook secrets and Razorpay credentials are inlined throughout the file, bu
    - `mypy src tests`: 100% PASS (0 errors in 117 source files)
    - `pytest`: 100% PASS (215 passed, 2 skipped, 0 failed)
 
+---
+
+# Review 7: Phase 4.2 Safety, Policy & Governance Kernel
+
+> **Reviewed on:** 2026-08-28
+> **Scope:** Centralized Policy Decision Records, Deterministic Policy Hashing, Platform Safety Ceilings, Human-In-The-Loop (HITL) Merchant Approval Gate, Immutable Audit Linkage, Zero Secret/PII Sanitization, Anti-Context Tampering, and Adversarial Verification Suite.
+
+---
+
+## Deliverables & Governance Verification Summary
+
+1. **Centralized Policy Decision Record & Deterministic Hashing (`INV-GOV-01`):**
+   - Implemented `PolicyDecisionRecord` tracking `decision_id`, `policy_version`, `policy_hash`, `verdict`, `rule_code`, `reason`, and `context_snapshot`.
+   - Implemented `compute_policy_hash()` producing deterministic SHA-256 digests over normalized merchant policy rules. Policy versions and hashes are stamped immutably onto audit logs.
+
+2. **Platform Governance Safety Ceilings (`INV-GOV-02`):**
+   - Max 20 items per quote (`MAX_ITEMS_PER_QUOTE_EXCEEDED`).
+   - Max 50% absolute discount ceiling (`GOVERNANCE_MAX_DISCOUNT_CEILING_EXCEEDED`).
+   - Max ₹1,00,000 (10,000,000 paise) single transaction limit (`GOVERNANCE_MAX_TRANSACTION_LIMIT_EXCEEDED`).
+   - Max 3 negotiation rounds per quote (`MAX_NEGOTIATION_ATTEMPTS_EXCEEDED`).
+
+3. **Human-In-The-Loop (HITL) Approval Gate (`INV-GOV-03`):**
+   - Created `MerchantApproval` database model with Alembic migration `005_safety_policy_governance.py`.
+   - Added `resolve_approval` capability requiring `merchant:admin` permissions with optimistic locking, strict expiration handling, and state machine validation.
+
+4. **Audit Cryptographic Hash Chain & Sanitization (`INV-GOV-04`):**
+   - `AuditEvent.create_event` automatically redacts credentials (`auth_token`, `key_secret`, `password`, `card_number`) and masks emails (`a***r@example.com`).
+   - Cryptographic SHA-256 chain verification (`AuditEvent.verify_chain`) detects any back-channel storage tampering.
+
+5. **Anti-Context Tampering Gate:**
+   - Gateway loads merchant policy configuration from PostgreSQL for non-admin actors, preventing buyer context injection attacks.
+
+6. **Adversarial Test Suite (`tests/test_phase4_2_safety_policy_governance.py`):**
+   - 12 comprehensive adversarial tests covering floor price protection, immutable policy hashes, expired approvals, forged/cross-tenant approvals, audit tampering detection, secret/PII redaction, race safety, context tampering override, governance bounds, and non-authoritative LLM mutations (100% PASS).
+
+7. **Quality Gate Status:**
+   - `ruff format --check .`: 100% PASS (125 files)
+   - `ruff check .`: 100% PASS (0 errors)
+   - `mypy src tests`: 100% PASS (0 errors in 119 source files)
+   - `pytest`: 100% PASS (227 passed, 2 skipped, 0 failed)
+
+
