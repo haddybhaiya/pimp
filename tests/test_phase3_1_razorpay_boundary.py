@@ -27,6 +27,7 @@ from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent_ready_merchant.config import get_settings
 from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
 from agent_ready_merchant.integrations.razorpay.exceptions import (
     AmountMismatchFraudError,
@@ -54,8 +55,10 @@ from agent_ready_merchant.state_machines.base import (
 from agent_ready_merchant.state_machines.order import OrderStateMachine
 from agent_ready_merchant.state_machines.payment_attempt import PaymentAttemptStateMachine
 
+TEST_WEBHOOK_SECRET: str = get_settings().RAZORPAY_WEBHOOK_SECRET.get_secret_value()
 
-def _sign(body: bytes, secret: str) -> str:
+
+def _sign(body: bytes, secret: str = TEST_WEBHOOK_SECRET) -> str:
     """Computes HMAC SHA-256 webhook signature."""
     return hmac.new(key=secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256).hexdigest()
 
@@ -151,7 +154,7 @@ async def test_successful_payment(db_session: AsyncSession) -> None:
     merchant, session, quote, order = await _seed_test_order(
         db_session, amount_paise=300000, rzp_order_id="order_success_p31"
     )
-    secret = "test_secret_p31"
+    secret = TEST_WEBHOOK_SECRET
 
     payload = {
         "event": "order.paid",
@@ -215,7 +218,7 @@ async def test_wrong_amount(db_session: AsyncSession) -> None:
     merchant, session, quote, order = await _seed_test_order(
         db_session, amount_paise=500000, rzp_order_id="order_wrong_amount_p31"
     )
-    secret = "test_secret_p31"
+    secret = TEST_WEBHOOK_SECRET
 
     # Webhook claims to pay only 1000 paise (₹10) for a 500,000 paise (₹5000) order
     payload = {
@@ -276,7 +279,7 @@ async def test_wrong_currency(db_session: AsyncSession) -> None:
     merchant, session, quote, order = await _seed_test_order(
         db_session, amount_paise=500000, currency="INR", rzp_order_id="order_wrong_curr_p31"
     )
-    secret = "test_secret_p31"
+    secret = TEST_WEBHOOK_SECRET
 
     # Webhook presents payment in USD instead of INR
     payload = {
@@ -335,7 +338,7 @@ async def test_wrong_order(db_session: AsyncSession) -> None:
     merchant, session, quote, order = await _seed_test_order(
         db_session, amount_paise=250000, rzp_order_id="order_legit_001"
     )
-    secret = "test_secret_p31"
+    secret = TEST_WEBHOOK_SECRET
 
     # Webhook references order_legit_001 on outer envelope but pay entity binds to different order
     payload = {
@@ -383,7 +386,7 @@ async def test_unknown_payment(db_session: AsyncSession) -> None:
     merchant, session, quote, order = await _seed_test_order(
         db_session, amount_paise=200000, rzp_order_id="order_unknown_p31"
     )
-    secret = "test_secret_p31"
+    secret = TEST_WEBHOOK_SECRET
 
     # Case A: Missing payment ID in capture event
     payload_no_pid = {
@@ -438,7 +441,7 @@ async def test_duplicate_payment(db_session: AsyncSession) -> None:
     merchant, session, quote, order = await _seed_test_order(
         db_session, amount_paise=400000, rzp_order_id="order_dup_p31"
     )
-    secret = "test_secret_p31"
+    secret = TEST_WEBHOOK_SECRET
 
     payload = {
         "event": "order.paid",
@@ -499,7 +502,7 @@ async def test_delayed_webhook(db_session: AsyncSession) -> None:
     merchant, session, quote, order = await _seed_test_order(
         db_session, amount_paise=150000, rzp_order_id="order_delayed_p31"
     )
-    secret = "test_secret_p31"
+    secret = TEST_WEBHOOK_SECRET
 
     # Step 1: Simulate out-of-band reconciliation settling the order first
     def mock_handler(request: httpx.Request) -> httpx.Response:
@@ -594,7 +597,7 @@ async def test_webhook_reconciliation_race(db_session: AsyncSession) -> None:
     merchant, session, quote, order = await _seed_test_order(
         db_session, amount_paise=180000, rzp_order_id="order_race_p31"
     )
-    secret = "test_secret_p31"
+    secret = TEST_WEBHOOK_SECRET
     payment_id = "pay_race_concurrent_01"
 
     # Webhook payload

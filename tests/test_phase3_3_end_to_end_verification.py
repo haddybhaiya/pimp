@@ -36,6 +36,7 @@ Followed by deliberate failure test matrix:
 """
 
 import hashlib
+import hmac
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -60,6 +61,7 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     AmountMismatchFraudError,
     CurrencyMismatchFraudError,
     InvalidWebhookSignatureError,
+    WebhookProcessingInProgressError,
     WebhookTimestampError,
 )
 from agent_ready_merchant.models.audit import AuditEvent
@@ -71,11 +73,17 @@ from agent_ready_merchant.models.product import Product, ProductVariant
 from agent_ready_merchant.models.quote import PriceQuote, QuoteItem
 from agent_ready_merchant.models.session import BuyerAgentSession
 from agent_ready_merchant.models.transaction import TransactionRecord
+from agent_ready_merchant.models.webhook import ProcessedWebhook
 from agent_ready_merchant.services.payment_service import PaymentService
 from agent_ready_merchant.state_machines.base import InvalidStateTransitionError
 from agent_ready_merchant.state_machines.order import OrderStateMachine
 from agent_ready_merchant.tools.base import GatewayContext
 from tests.fake_razorpay import DeterministicFakeRazorpayTransport
+
+
+def _sign(body: bytes, secret: str) -> str:
+    """Computes HMAC SHA-256 webhook signature."""
+    return hmac.new(key=secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256).hexdigest()
 
 
 async def _seed_test_environment(
@@ -85,6 +93,7 @@ async def _seed_test_environment(
 ) -> tuple[Merchant, BuyerAgentSession, Product, ProductVariant, InventoryItem, GatewayContext]:
     """Seeds merchant, session, product, variant, inventory, and gateway context."""
     now = datetime.now(UTC)
+
     uid = uuid.uuid4().hex[:8]
 
     merchant = Merchant(
@@ -411,7 +420,6 @@ async def test_failure_inventory_race_prevents_overselling(db_session: AsyncSess
     inventory.safety_threshold = 0
     await db_session.commit()
     fake_rzp = DeterministicFakeRazorpayTransport()
-    gateway = CanonicalCommerceGateway(rzp_client=fake_rzp.build_client())
 
     now = datetime.now(UTC)
     session2 = BuyerAgentSession(
@@ -477,6 +485,8 @@ async def test_failure_inventory_race_prevents_overselling(db_session: AsyncSess
     quote2_id = quote2.id
     inventory_id = inventory.id
     await db_session.commit()
+
+    gateway = CanonicalCommerceGateway(rzp_client=fake_rzp.build_client())
 
     # First buyer checkouts -> succeeds
     resp1 = await gateway.create_order(
@@ -729,10 +739,11 @@ async def test_failure_replayed_webhook_stale_timestamp(db_session: AsyncSession
 
 @pytest.mark.asyncio
 async def test_failure_duplicate_and_concurrent_webhooks(db_session: AsyncSession) -> None:
-    """Simultaneous and repeated webhook deliveries result in strictly 1 credit entry."""
+    """Concurrent and repeated webhook deliveries result in strictly 1 credit entry."""
     merchant, session, product, variant, inventory, context = await _seed_test_environment(
         db_session
     )
+
     fake_rzp = DeterministicFakeRazorpayTransport()
     gateway = CanonicalCommerceGateway(rzp_client=fake_rzp.build_client())
 
@@ -778,6 +789,7 @@ async def test_failure_duplicate_and_concurrent_webhooks(db_session: AsyncSessio
     assert order_resp.data is not None
     rzp_order_id = order_resp.data.rzp_order_id
     assert rzp_order_id is not None
+    await db_session.commit()
 
     _, raw_body, signature = fake_rzp.simulate_payment(
         order_id=rzp_order_id,
@@ -812,6 +824,27 @@ async def test_failure_duplicate_and_concurrent_webhooks(db_session: AsyncSessio
     )
     assert res3["status"] == "DUPLICATE_IGNORED"
 
+    # Test concurrent in-flight delivery protection:
+    # A webhook arriving while another is PROCESSING raises WebhookProcessingInProgressError
+    in_flight_raw = b'{"event":"payment.captured","test":"in_flight_concurrent_p33"}'
+    in_flight_pw = ProcessedWebhook(
+        event_id="evt_in_flight_p33",
+        event_name="payment.captured",
+        payload_hash=hashlib.sha256(in_flight_raw).hexdigest(),
+        signature_hash="sig_hash_p33",
+        status="PROCESSING",
+    )
+    db_session.add(in_flight_pw)
+    await db_session.flush()
+
+    with pytest.raises(WebhookProcessingInProgressError):
+        await PaymentService.process_payment_webhook(
+            session=db_session,
+            raw_body=in_flight_raw,
+            signature_header=_sign(in_flight_raw, fake_rzp.webhook_secret),
+            webhook_secret=fake_rzp.webhook_secret,
+        )
+
     # Ledger invariants: strictly 1 transaction record
     tx_stmt = select(TransactionRecord).where(TransactionRecord.merchant_id == merchant_id)
     records = (await db_session.execute(tx_stmt)).scalars().all()
@@ -830,8 +863,8 @@ async def test_failure_concurrent_checkout_safe_serialization(db_session: AsyncS
     merchant, session, product, variant, inventory, context = await _seed_test_environment(
         db_session
     )
+
     fake_rzp = DeterministicFakeRazorpayTransport()
-    gateway = CanonicalCommerceGateway(rzp_client=fake_rzp.build_client())
 
     now = datetime.now(UTC)
     quote = PriceQuote(
@@ -862,6 +895,7 @@ async def test_failure_concurrent_checkout_safe_serialization(db_session: AsyncS
     await db_session.commit()
 
     shipping = _test_shipping_address()
+    gateway = CanonicalCommerceGateway(rzp_client=fake_rzp.build_client())
 
     # First checkout
     res1 = await gateway.request_checkout(
@@ -887,7 +921,7 @@ async def test_failure_concurrent_checkout_safe_serialization(db_session: AsyncS
     assert res2.data is not None
     assert res2.data.order_id == first_order_id
 
-    # Exactly 1 Order row exists for this quote
+    # Exactly 1 Order row exists for this quote in the database
     ord_stmt = select(Order).where(Order.quote_id == quote_id)
     orders = (await db_session.execute(ord_stmt)).scalars().all()
     assert len(orders) == 1

@@ -569,7 +569,7 @@ async def test_audit_event_verify_chain_and_tamper_detection(db_session: AsyncSe
     assert e3.prev_event_hash == e2.event_hash
     assert e1.event_hash != e3.event_hash
     is_valid, err = await AuditEvent.verify_chain(db_session, merchant.id)
-    assert is_valid is True
+    assert is_valid is True, f"verify_chain failed with: {err}"
     assert err is None
 
     # 2. Deliberately tamper with payload of event e2
