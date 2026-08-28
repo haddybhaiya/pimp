@@ -9,6 +9,7 @@ Adheres strictly to Phase 2.1 specifications:
 
 import asyncio
 import hashlib
+import hmac
 import logging
 import time
 import uuid
@@ -77,6 +78,7 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     RazorpayTimeoutError,
 )
 from agent_ready_merchant.models.audit import AuditEvent
+from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.models.order import Order
 from agent_ready_merchant.models.payment import PaymentAttempt
 from agent_ready_merchant.models.product import Product, ProductVariant
@@ -1183,6 +1185,15 @@ class CanonicalCommerceGateway:
         merchant_id: uuid.UUID,
     ) -> GatewayResponseEnvelope[InitializeSessionResponse]:
         """Initializes a new authoritative BuyerAgentSession for an external AI buyer."""
+        m_stmt = select(Merchant).where(Merchant.id == merchant_id)
+        merchant = (await session.execute(m_stmt)).scalar_one_or_none()
+        if not merchant or merchant.status != "ACTIVE":
+            return self._rejected_envelope(
+                "initialize_session",
+                GatewayErrorCode.AUTH_INVALID_MERCHANT.value,
+                f"Merchant with ID '{merchant_id}' not found or inactive.",
+            )
+
         now = datetime.now(UTC)
         expires_at = now + timedelta(minutes=request.duration_minutes)
         raw_token = request.auth_token_raw or f"token_{uuid.uuid4().hex}"
@@ -1869,8 +1880,45 @@ class CanonicalCommerceGateway:
                 request_id=request_id,
             )
 
-        # 1d. Authoritative Session Validation & Capability Derivation
-        if capability_name != "initialize_session" and context.session_id:
+        # 1d. Authoritative Merchant Authentication Gate
+        m_stmt = select(Merchant).where(Merchant.id == context.merchant_id)
+        db_merchant = (await session.execute(m_stmt)).scalar_one_or_none()
+        if not db_merchant or db_merchant.status != "ACTIVE":
+            return self._rejected_envelope(
+                capability_name,
+                GatewayErrorCode.AUTH_INVALID_MERCHANT.value,
+                f"Merchant with ID '{context.merchant_id}' not found or inactive.",
+                request_id=request_id,
+            )
+
+        # 1e. Mandatory Session Boundary Gate
+        session_required_caps = {
+            "get_quote",
+            "negotiate_quote",
+            "accept_quote",
+            "create_order",
+            "request_checkout",
+            "get_payment_status",
+            "get_order_status",
+            "terminate_session",
+        }
+        has_session = context.session_id is not None and context.session_id != uuid.UUID(
+            "00000000-0000-0000-0000-000000000000"
+        )
+
+        if capability_name in session_required_caps and not has_session:
+            return self._rejected_envelope(
+                capability_name,
+                GatewayErrorCode.AUTH_SESSION_NOT_FOUND.value,
+                (
+                    f"Capability '{capability_name}' strictly requires "
+                    f"an active authenticated session."
+                ),
+                request_id=request_id,
+            )
+
+        # 1f. Authoritative Session Validation, Token Verification & Capability Derivation
+        if capability_name != "initialize_session" and has_session:
             sess_stmt = select(BuyerAgentSession).where(
                 BuyerAgentSession.id == context.session_id,
                 BuyerAgentSession.merchant_id == context.merchant_id,
@@ -1906,7 +1954,7 @@ class CanonicalCommerceGateway:
                     request_id=request_id,
                 )
 
-            # Authoritative Token Authentication: fail-closed verification
+            # Authoritative Token Authentication: fail-closed cryptographic verification
             if db_sess.auth_token_hash:
                 if not context.auth_token:
                     return self._rejected_envelope(
@@ -1916,7 +1964,7 @@ class CanonicalCommerceGateway:
                         request_id=request_id,
                     )
                 presented_hash = hashlib.sha256(context.auth_token.encode("utf-8")).hexdigest()
-                if presented_hash != db_sess.auth_token_hash:
+                if not hmac.compare_digest(presented_hash, db_sess.auth_token_hash):
                     return self._rejected_envelope(
                         capability_name,
                         GatewayErrorCode.AUTH_INVALID_CREDENTIAL.value,
@@ -1924,13 +1972,28 @@ class CanonicalCommerceGateway:
                         request_id=request_id,
                     )
 
-            # Server-authoritative capability derivation: narrow request-derived
-            # grants to the persisted session grant. Sessions without a stored
-            # grant (legacy rows) retain the previous default-grant behavior.
+            # Server-authoritative capability derivation:
+            # Overwrite caller-supplied permissions with persisted session grant (fail-closed).
             stored_caps_raw = db_sess.granted_capabilities
             if stored_caps_raw:
                 stored_caps = {c.strip() for c in stored_caps_raw.split(",") if c.strip()}
                 context.capabilities = context.capabilities & stored_caps
+            else:
+                context.capabilities = context.capabilities & _ALLOWED_BUYER_CAPABILITIES
+
+        elif not has_session:
+            # Anonymous public discovery context is strictly bounded to read capabilities
+            context.capabilities = context.capabilities & {"buyer:discover", "buyer:read"}
+
+        # 1g. Authoritative Capability Authorization Gate
+        auth_ok, auth_err = CapabilityRegistry.check_authorization(capability_name, context)
+        if not auth_ok:
+            return self._rejected_envelope(
+                capability_name,
+                "CAPABILITY_DENIED",
+                auth_err or f"Session unauthorized for capability '{capability_name}'.",
+                request_id=request_id,
+            )
 
         # 2. Bounded Payload Size Validation (Max 64 KB)
         is_payload_valid, payload_size = validate_payload_size(payload)
