@@ -463,12 +463,17 @@ class CreateOrderTool(BaseTool):
 
 
 class CheckPaymentStatusTool(BaseTool):
-    """Tool to check payment status for an order."""
+    """Tool to check payment status for an order.
+
+    Classified TRANSIENT_STATE (not READ_ONLY) to match CapabilityRegistry — this tool
+    may trigger out-of-band reconciliation, state transitions, and ledger entries
+    (fix: Issue 12 — metadata sync with CapabilityRegistry).
+    """
 
     name = "check_payment_status"
     description = "Verifies payment status directly against Razorpay and local ledger."
-    side_effect_class = "READ_ONLY"
-    required_capability = "buyer:read"
+    side_effect_class = "TRANSIENT_STATE"
+    required_capability = "buyer:payment_status"
     param_schema = CheckPaymentStatusParams
 
     async def execute(

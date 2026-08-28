@@ -176,8 +176,15 @@ class DeterministicFakeRazorpayTransport(httpx.AsyncBaseTransport):
         self.payments_by_order[order_id].append(pay_data)
 
         if order and status == "captured":
-            order["amount_paid"] = pay_amount
-            order["amount_due"] = max(0, order["amount"] - pay_amount)
+            # Accumulate total captured amount across all payments to correctly reflect
+            # multi-payment and partial-payment scenarios (fix: Issue 13).
+            total_captured = sum(
+                p["amount"]
+                for p in self.payments_by_order.get(order_id, [])
+                if p.get("status") == "captured"
+            )
+            order["amount_paid"] = total_captured
+            order["amount_due"] = max(0, order["amount"] - total_captured)
             if order["amount_due"] == 0:
                 order["status"] = "paid"
 
