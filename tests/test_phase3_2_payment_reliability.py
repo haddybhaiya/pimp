@@ -18,8 +18,8 @@ import hmac
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
 
+import httpx
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -28,9 +28,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
 from agent_ready_merchant.integrations.razorpay.exceptions import (
     InvalidWebhookSignatureError,
+    WebhookProcessingInProgressError,
     WebhookTimestampError,
 )
-from agent_ready_merchant.integrations.razorpay.models import RazorpayOrderResponse
 from agent_ready_merchant.integrations.razorpay.webhook import (
     assert_valid_webhook_signature,
     verify_razorpay_webhook_signature,
@@ -46,6 +46,7 @@ from agent_ready_merchant.models.session import BuyerAgentSession
 from agent_ready_merchant.models.transaction import TransactionRecord
 from agent_ready_merchant.models.webhook import ProcessedWebhook
 from agent_ready_merchant.services.payment_service import PaymentService
+from tests.fake_razorpay import DeterministicFakeRazorpayTransport
 
 TEST_SECRET = "webhook_hardening_secret_key_999"
 
@@ -258,12 +259,19 @@ async def test_atomic_webhook_deduplication_durable_table(db_session: AsyncSessi
         "event": "payment.captured",
         "created_at": int(datetime.now(UTC).timestamp()),
         "payload": {
-            "order": {"entity": {"id": order.rzp_order_id, "amount": order.amount_paise}},
+            "order": {
+                "entity": {
+                    "id": order.rzp_order_id,
+                    "amount": order.amount_paise,
+                    "currency": "INR",
+                }
+            },
             "payment": {
                 "entity": {
                     "id": pay_id,
                     "order_id": order.rzp_order_id,
                     "amount": order.amount_paise,
+                    "currency": "INR",
                     "status": "captured",
                 }
             },
@@ -321,13 +329,20 @@ async def test_concurrent_duplicate_deliveries_single_commitment(db_session: Asy
         "event": "payment.captured",
         "created_at": int(datetime.now(UTC).timestamp()),
         "payload": {
-            "order": {"entity": {"id": order.rzp_order_id, "amount": order.amount_paise}},
+            "order": {
+                "entity": {
+                    "id": order.rzp_order_id,
+                    "amount": order.amount_paise,
+                    "currency": "INR",
+                }
+            },
             "payment": {
                 "entity": {
                     "id": pay_id,
                     "order_id": order.rzp_order_id,
                     "amount": order.amount_paise,
                     "status": "captured",
+                    "currency": "INR",
                 }
             },
         },
@@ -341,13 +356,34 @@ async def test_concurrent_duplicate_deliveries_single_commitment(db_session: Asy
     )
     assert res_first["status"] == "PROCESSED"
 
-    # Subsequent re-delivery
+    # Subsequent re-delivery hits deduplication
     res_second = await PaymentService.process_payment_webhook(
         session=db_session, raw_body=raw, signature_header=sig, webhook_secret=TEST_SECRET
     )
     assert res_second["status"] == "DUPLICATE_IGNORED"
 
-    # Confirm ledger integrity: Exactly 1 CREDIT entry
+    # Test concurrent in-flight delivery protection:
+    # Arriving while another worker is PROCESSING triggers a retryable error
+    in_flight_raw = b'{"event":"payment.captured","test":"in_flight_concurrent"}'
+    in_flight_pw = ProcessedWebhook(
+        event_id="evt_in_flight_99",
+        event_name="payment.captured",
+        payload_hash=hashlib.sha256(in_flight_raw).hexdigest(),
+        signature_hash="sig_hash_99",
+        status="PROCESSING",
+    )
+    db_session.add(in_flight_pw)
+    await db_session.flush()
+
+    with pytest.raises(WebhookProcessingInProgressError):
+        await PaymentService.process_payment_webhook(
+            session=db_session,
+            raw_body=in_flight_raw,
+            signature_header=_sign(in_flight_raw, TEST_SECRET),
+            webhook_secret=TEST_SECRET,
+        )
+
+    # Confirm ledger integrity: Exactly 1 CREDIT entry for the committed payment
     tx_stmt = select(TransactionRecord).where(TransactionRecord.settlement_ref == pay_id)
     records = (await db_session.execute(tx_stmt)).scalars().all()
     assert len(records) == 1
@@ -366,42 +402,39 @@ async def test_order_creation_retry_reuses_remote_order_on_timeout(
 ) -> None:
     """A remote order created before a network timeout must be reused on retry."""
     _, _, quote, _ = await _seed_test_fixture(db_session)
+    assert quote is not None
 
     receipt_id = f"ord_{quote.id.hex[:32]}"
-    remote_order_id = "order_remote_discovered_123"
-
-    # Simulate Razorpay having already accepted and created the order with receipt_id
-    existing_remote = RazorpayOrderResponse(
-        id=remote_order_id,
-        amount=quote.total_paise,
-        currency="INR",
-        status="created",
-        receipt=receipt_id,
-        created_at=int(datetime.now(UTC).timestamp()),
+    transport = DeterministicFakeRazorpayTransport()
+    client = RazorpayClient(
+        key_id="rzp_test_mock",
+        key_secret="mock_secret",
+        http_client=httpx.AsyncClient(transport=transport),
     )
 
-    client = RazorpayClient(key_id="rzp_test_mock", key_secret="mock_secret")
+    # 1. Pre-create order on fake transport simulating remote order before timeout
+    pre_order = await client.create_order(
+        amount_paise=quote.total_paise,
+        currency="INR",
+        receipt=receipt_id,
+    )
+    initial_create_calls = transport.create_order_calls
 
-    # On retry, fetch_order_by_receipt discovers the existing remote order
-    with (
-        patch.object(RazorpayClient, "fetch_order_by_receipt", return_value=existing_remote),
-        patch.object(
-            RazorpayClient,
-            "create_order",
-            side_effect=AssertionError("create_order must NOT be called when remote order exists"),
-        ),
-    ):
-        order = await PaymentService.create_order_from_accepted_quote(
-            session=db_session,
-            quote_id=quote.id,
-            buyer_email="retry@example.com",
-            shipping_address={"city": "Delhi"},
-            rzp_client=client,
-        )
+    # 2. Call create_order_from_accepted_quote on retry
+    # It must discover and reuse the existing remote order via receipt fallback
+    order = await PaymentService.create_order_from_accepted_quote(
+        session=db_session,
+        quote_id=quote.id,
+        buyer_email="retry@example.com",
+        shipping_address={"city": "Delhi"},
+        rzp_client=client,
+    )
 
-    assert order.rzp_order_id == remote_order_id
+    assert order.rzp_order_id == pre_order.id
     assert order.amount_paise == quote.total_paise
     assert order.status == "PENDING_PAYMENT"
+    # Ensure NO duplicate create_order call was dispatched to Razorpay
+    assert transport.create_order_calls == initial_create_calls
 
 
 # =============================================================================

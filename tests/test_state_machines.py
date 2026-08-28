@@ -442,6 +442,7 @@ async def test_transaction_state_machine(db_session: AsyncSession) -> None:
         entry_type="CREDIT",
         amount_paise=100000,
         status="UNCOMMITTED",
+        settlement_ref="settle_tx_test_001",
     )
     db_session.add(tx)
     await db_session.flush()

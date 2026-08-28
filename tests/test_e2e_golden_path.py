@@ -286,6 +286,7 @@ async def test_complete_golden_path_commerce_lifecycle(db_session: AsyncSession)
                 "entity": {
                     "id": "order_GOLDEN_PATH_123",
                     "amount": 450000,
+                    "currency": "INR",
                     "status": "paid",
                 }
             },
@@ -294,6 +295,7 @@ async def test_complete_golden_path_commerce_lifecycle(db_session: AsyncSession)
                     "id": simulated_payment_id,
                     "order_id": "order_GOLDEN_PATH_123",
                     "amount": 450000,
+                    "currency": "INR",
                     "status": "captured",
                     "method": "upi",
                 }

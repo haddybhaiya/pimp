@@ -189,6 +189,7 @@ async def test_webhook_payment_success_and_idempotency(db_session: AsyncSession)
                 "entity": {
                     "id": "order_rzp_target_01",
                     "amount": 500000,
+                    "currency": "INR",
                     "status": "paid",
                 }
             },
@@ -197,6 +198,7 @@ async def test_webhook_payment_success_and_idempotency(db_session: AsyncSession)
                     "id": "pay_test_payment_99",
                     "order_id": "order_rzp_target_01",
                     "amount": 500000,
+                    "currency": "INR",
                     "status": "captured",
                     "method": "upi",
                 }
@@ -301,6 +303,7 @@ async def test_webhook_fraud_amount_mismatch_detection(db_session: AsyncSession)
                     "id": "pay_fake_cheap",
                     "order_id": "order_rzp_fraud_01",
                     "amount": 10000,  # Only ₹100!
+                    "currency": "INR",
                     "status": "captured",
                 }
             }

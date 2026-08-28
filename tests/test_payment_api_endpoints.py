@@ -82,6 +82,7 @@ async def test_api_webhook_valid_signature(client: AsyncClient, db_session: Asyn
                     "id": "pay_api_payment_01",
                     "order_id": "order_api_target_01",
                     "amount": 100000,
+                    "currency": "INR",
                     "status": "captured",
                     "method": "card",
                 }
@@ -172,6 +173,7 @@ async def test_api_webhook_fraud_mismatch_rejected(
                     "id": "pay_fapi_bad",
                     "order_id": "order_fapi_target",
                     "amount": 10000,  # Only 10,000 paise
+                    "currency": "INR",
                     "status": "captured",
                 }
             }
