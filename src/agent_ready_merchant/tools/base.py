@@ -18,6 +18,7 @@ class GatewayContext:
     merchant_id: uuid.UUID
     session_id: uuid.UUID
     capabilities: set[str]
+    actor_type: str = "BUYER_AGENT"
     autonomy_level: int = 1  # 0: Read-Only, 1: Bounded Auto, 2: HITL
     max_discount_percentage: float = 15.0
     min_margin_percentage: float = 20.0

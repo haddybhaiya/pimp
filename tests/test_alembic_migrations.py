@@ -10,7 +10,7 @@ def test_alembic_script_directory_and_head() -> None:
     script = ScriptDirectory.from_config(config)
 
     head = script.get_current_head()
-    assert head == "004_payment_reliability"
+    assert head == "005_safety_policy_governance"
 
     revision = script.get_revision("001_initial_schema")
     assert revision is not None
@@ -27,3 +27,7 @@ def test_alembic_script_directory_and_head() -> None:
     reliability_revision = script.get_revision("004_payment_reliability")
     assert reliability_revision is not None
     assert reliability_revision.down_revision == "003_session_capability_grants"
+
+    governance_revision = script.get_revision("005_safety_policy_governance")
+    assert governance_revision is not None
+    assert governance_revision.down_revision == "004_payment_reliability"
