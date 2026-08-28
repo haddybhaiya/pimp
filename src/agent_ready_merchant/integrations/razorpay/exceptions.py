@@ -102,6 +102,14 @@ class WebhookTimestampError(RazorpayError):
     pass
 
 
+class WebhookProcessingInProgressError(RazorpayError):
+    """Raised when a webhook payload is currently being processed concurrently."""
+
+    @property
+    def is_retryable(self) -> bool:
+        return True
+
+
 class AmountMismatchFraudError(RazorpayError):
     """Raised when verified payment amount differs from order amount."""
 

@@ -16,6 +16,7 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     RazorpayServerError,
     RazorpayTimeoutError,
     TransactionBindingError,
+    WebhookProcessingInProgressError,
     WebhookReplayError,
     WebhookTimestampError,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "RazorpayNetworkError",
     "RazorpayTimeoutError",
     "InvalidWebhookSignatureError",
+    "WebhookProcessingInProgressError",
     "WebhookReplayError",
     "WebhookTimestampError",
     "AmountMismatchFraudError",
