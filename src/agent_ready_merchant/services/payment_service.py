@@ -27,6 +27,7 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     RazorpayNetworkError,
     RazorpayTimeoutError,
     TransactionBindingError,
+    WebhookProcessingInProgressError,
     WebhookTimestampError,
 )
 from agent_ready_merchant.integrations.razorpay.webhook import (
@@ -306,12 +307,20 @@ class PaymentService:
         pw_stmt = select(ProcessedWebhook).where(ProcessedWebhook.payload_hash == payload_hash)
         existing_pw = (await session.execute(pw_stmt)).scalar_one_or_none()
         if existing_pw:
-            logger.info("Atomic webhook deduplication: payload %s already processed", payload_hash)
-            return {
-                "status": "DUPLICATE_IGNORED",
-                "order_id": str(existing_pw.rzp_order_id or ""),
-                "payment_id": existing_pw.rzp_payment_id,
-            }
+            if existing_pw.status == "PROCESSED":
+                logger.info(
+                    "Atomic webhook deduplication: payload %s already processed", payload_hash
+                )
+                return {
+                    "status": "DUPLICATE_IGNORED",
+                    "order_id": str(existing_pw.rzp_order_id or ""),
+                    "payment_id": existing_pw.rzp_payment_id,
+                }
+            elif existing_pw.status == "PROCESSING":
+                logger.info("Webhook %s currently processing in another transaction", payload_hash)
+                raise WebhookProcessingInProgressError(
+                    "Webhook payload is currently being processed by another transaction"
+                )
 
         pw_record = ProcessedWebhook(
             event_id=event_dict.get("id"),
@@ -325,13 +334,22 @@ class PaymentService:
         session.add(pw_record)
         try:
             await session.flush()
-        except IntegrityError:
+        except IntegrityError as exc:
             await session.rollback()
             logger.info("Concurrent webhook delivery collision caught by unique constraint")
-            return {
-                "status": "DUPLICATE_IGNORED",
-                "reason": "concurrent_duplicate_delivery",
-            }
+            pw_check_stmt = select(ProcessedWebhook).where(
+                ProcessedWebhook.payload_hash == payload_hash
+            )
+            committed_pw = (await session.execute(pw_check_stmt)).scalar_one_or_none()
+            if committed_pw and committed_pw.status == "PROCESSED":
+                return {
+                    "status": "DUPLICATE_IGNORED",
+                    "order_id": str(committed_pw.rzp_order_id or ""),
+                    "payment_id": committed_pw.rzp_payment_id,
+                }
+            raise WebhookProcessingInProgressError(
+                "Concurrent webhook delivery detected; winner transaction in flight"
+            ) from exc
 
         # 2c. Cross-payload order mismatch check
         if pay_order_id and envelope_order_id and pay_order_id != envelope_order_id:
@@ -465,9 +483,9 @@ class PaymentService:
         currency: str | None = None,
     ) -> dict[str, Any]:
         """Settles payment and executes transitions to PAID and TransactionRecord creation."""
-        # 1. Check Currency Invariant (Anti-Fraud)
+        # 1. Check Currency Invariant (Anti-Fraud: Fail-Closed)
         curr = currency or payment_data.get("currency")
-        if curr is not None and str(curr).upper() != order.currency.upper():
+        if not curr or str(curr).strip().upper() != order.currency.upper():
             await AuditEvent.create_event(
                 session=session,
                 merchant_id=order.merchant_id,
@@ -477,13 +495,13 @@ class PaymentService:
                 payload={
                     "order_id": str(order.id),
                     "expected_currency": order.currency,
-                    "received_currency": str(curr),
+                    "received_currency": str(curr) if curr else "MISSING",
                     "rzp_payment_id": rzp_payment_id,
                 },
             )
             raise CurrencyMismatchFraudError(
                 expected_currency=order.currency,
-                received_currency=str(curr),
+                received_currency=str(curr) if curr else "MISSING",
             )
 
         # 2. Check Amount Invariant (Anti-Fraud)
@@ -974,10 +992,10 @@ class PaymentService:
         captured_payment = next((p for p in payments if p.status == "captured"), None)
 
         if captured_payment:
-            # Server-authoritative currency check
+            # Server-authoritative currency check (Fail-Closed)
             if (
-                captured_payment.currency
-                and captured_payment.currency.upper() != order.currency.upper()
+                not captured_payment.currency
+                or captured_payment.currency.strip().upper() != order.currency.upper()
             ):
                 await AuditEvent.create_event(
                     session=session,
@@ -988,13 +1006,13 @@ class PaymentService:
                     payload={
                         "order_id": str(order.id),
                         "expected_currency": order.currency,
-                        "received_currency": captured_payment.currency,
+                        "received_currency": captured_payment.currency or "MISSING",
                         "rzp_payment_id": captured_payment.id,
                     },
                 )
                 raise CurrencyMismatchFraudError(
                     expected_currency=order.currency,
-                    received_currency=captured_payment.currency,
+                    received_currency=captured_payment.currency or "MISSING",
                 )
 
             # Reconcile missing webhook: settle payment

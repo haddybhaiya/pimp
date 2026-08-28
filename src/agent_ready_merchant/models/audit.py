@@ -125,10 +125,22 @@ class AuditEvent(Base):
             m_stmt = select(Merchant.id).where(Merchant.id == merchant_id).with_for_update()
             await session.execute(m_stmt)
 
+        # Select current leaf hash of the chain: event_hash not referenced as prev_event_hash
+        subq = (
+            select(cls.prev_event_hash)
+            .where(
+                cls.merchant_id == merchant_id,
+                cls.prev_event_hash.is_not(None),
+            )
+            .scalar_subquery()
+        )
         stmt = (
             select(cls.event_hash)
-            .where(cls.merchant_id == merchant_id)
-            .order_by(cls.created_at.desc(), cls.id.desc())
+            .where(
+                cls.merchant_id == merchant_id,
+                cls.event_hash.not_in(subq),
+            )
+            .order_by(cls.created_at.desc())
             .limit(1)
         )
         prev_hash = (await session.execute(stmt)).scalar_one_or_none() or cls.GENESIS_HASH
@@ -162,33 +174,49 @@ class AuditEvent(Base):
         merchant_id: uuid.UUID,
     ) -> tuple[bool, str | None]:
         """Validates cryptographic hash chain integrity for a merchant's audit log."""
-        stmt = (
-            select(cls)
-            .where(cls.merchant_id == merchant_id)
-            .order_by(cls.created_at.asc(), cls.id.asc())
-        )
-        events = (await session.execute(stmt)).scalars().all()
-        expected_prev = cls.GENESIS_HASH
-        for idx, event in enumerate(events):
-            if event.prev_event_hash != expected_prev:
+        stmt = select(cls).where(cls.merchant_id == merchant_id)
+        events = list((await session.execute(stmt)).scalars().all())
+        if not events:
+            return True, None
+
+        # Build map: prev_event_hash -> list of child events
+        prev_map: dict[str, list[AuditEvent]] = {}
+        for ev in events:
+            prev = ev.prev_event_hash or cls.GENESIS_HASH
+            prev_map.setdefault(prev, []).append(ev)
+
+        curr_hash = cls.GENESIS_HASH
+        verified_count = 0
+        while curr_hash in prev_map:
+            children = prev_map[curr_hash]
+            if len(children) > 1:
                 return (
                     False,
-                    f"Broken chain at index {idx}: expected {expected_prev}, "
-                    f"got {event.prev_event_hash}",
+                    f"Chain fork detected: multiple events reference parent hash '{curr_hash}'",
                 )
+            ev = children[0]
             expected_digest = cls.compute_digest(
-                prev_hash=event.prev_event_hash or cls.GENESIS_HASH,
-                merchant_id=event.merchant_id,
-                session_id=event.session_id,
-                actor_type=event.actor_type,
-                event_type=event.event_type,
-                payload=event.payload,
+                prev_hash=ev.prev_event_hash or cls.GENESIS_HASH,
+                merchant_id=ev.merchant_id,
+                session_id=ev.session_id,
+                actor_type=ev.actor_type,
+                event_type=ev.event_type,
+                payload=ev.payload,
             )
-            if event.event_hash != expected_digest:
+            if ev.event_hash != expected_digest:
                 return (
                     False,
-                    f"Digest mismatch at index {idx}: expected {expected_digest}, "
-                    f"got {event.event_hash}",
+                    f"Digest mismatch at event {ev.id}: expected {expected_digest}, "
+                    f"got {ev.event_hash}",
                 )
-            expected_prev = event.event_hash
+            curr_hash = ev.event_hash
+            verified_count += 1
+
+        if verified_count != len(events):
+            unlinked = len(events) - verified_count
+            return (
+                False,
+                f"Broken chain: {unlinked} unlinked or orphaned audit events detected",
+            )
+
         return True, None

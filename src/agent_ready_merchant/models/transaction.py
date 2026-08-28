@@ -73,9 +73,9 @@ class TransactionRecord(Base, OptimisticLockMixin):
         nullable=False,
         index=True,
     )
-    settlement_ref: Mapped[str | None] = mapped_column(
+    settlement_ref: Mapped[str] = mapped_column(
         String(128),
-        nullable=True,
+        nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
