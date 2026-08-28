@@ -20,7 +20,13 @@ from agent_ready_merchant.db.session import close_db_engine, get_db_session, get
 from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
 from agent_ready_merchant.integrations.razorpay.exceptions import (
     AmountMismatchFraudError,
+    CurrencyMismatchFraudError,
     InvalidWebhookSignatureError,
+    OrderMismatchError,
+    TransactionBindingError,
+    WebhookProcessingInProgressError,
+    WebhookReplayError,
+    WebhookTimestampError,
 )
 from agent_ready_merchant.services.payment_service import PaymentService
 
@@ -139,11 +145,42 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid webhook signature",
             ) from exc
+        except (WebhookReplayError, WebhookTimestampError) as exc:
+            logger.warning("Rejected replay or stale webhook: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        except WebhookProcessingInProgressError as exc:
+            logger.info("Concurrent webhook processing in progress: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Webhook event is currently processing; retryable",
+                headers={"Retry-After": "1"},
+            ) from exc
         except AmountMismatchFraudError as exc:
             logger.error("Fraud attempt caught during webhook processing: %s", exc)
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Amount mismatch fraud detected",
+            ) from exc
+        except CurrencyMismatchFraudError as exc:
+            logger.error("Currency fraud attempt caught during webhook processing: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Currency mismatch fraud detected",
+            ) from exc
+        except OrderMismatchError as exc:
+            logger.error("Order mismatch caught during webhook processing: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        except TransactionBindingError as exc:
+            logger.error("Transaction binding violation during webhook processing: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Transaction binding violation",
             ) from exc
 
     @app.post(

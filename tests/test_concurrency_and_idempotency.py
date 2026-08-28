@@ -74,12 +74,20 @@ async def test_duplicate_webhook_burst_guarantees_single_transaction_record(
     webhook_payload = {
         "event": "payment.captured",
         "payload": {
-            "order": {"entity": {"id": "order_BURST_01", "amount": 350000, "status": "paid"}},
+            "order": {
+                "entity": {
+                    "id": "order_BURST_01",
+                    "amount": 350000,
+                    "currency": "INR",
+                    "status": "paid",
+                }
+            },
             "payment": {
                 "entity": {
                     "id": "pay_BURST_CAPTURED_01",
                     "order_id": "order_BURST_01",
                     "amount": 350000,
+                    "currency": "INR",
                     "status": "captured",
                 }
             },

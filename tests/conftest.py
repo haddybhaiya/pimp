@@ -49,11 +49,23 @@ async def test_engine() -> AsyncGenerator[AsyncEngine, None]:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    import agent_ready_merchant.db.session as db_session_module
+
+    db_session_module._engine = engine
+    db_session_module._session_factory = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
     yield engine
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
 
+    db_session_module._engine = None
+    db_session_module._session_factory = None
     await engine.dispose()
 
 
@@ -69,6 +81,17 @@ async def db_session(test_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, N
     async with session_factory() as session:
         yield session
         await session.rollback()
+
+
+@pytest_asyncio.fixture(scope="function")
+async def session_factory(test_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    """Yields a session factory for creating independent sessions (concurrent tests)."""
+    return async_sessionmaker(
+        bind=test_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
 
 
 @pytest_asyncio.fixture(scope="function")

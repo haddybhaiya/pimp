@@ -104,5 +104,54 @@
   - *Positive:* Protocol-agnostic core domain; external protocol adapters are swappable without modifying canonical services; deterministic machine-readable errors; hardened against concurrent mutation races, replay attacks, and denial-of-service bursts.
   - *Negative:* Additional translation hop between external wire messages and canonical gateway requests.
 
+---
+
+## ADR-010: Authoritative Razorpay Payment Boundary & Invariant Hardening
+
+- **Status:** ACCEPTED
+- **Context:** Financial settlement must be protected against malicious tampering, currency/amount mismatches, cross-order spoofing, out-of-order/delayed webhooks, network timeouts, and state regression attacks. Client-side callbacks can never be trusted to dictate financial state.
+- **Decision:**
+  1. Enforce strict server-authoritative amount AND currency verification (`CurrencyMismatchFraudError`, `AmountMismatchFraudError`) with immediate tamper-evident audit logging (`PAYMENT_CURRENCY_FRAUD_DETECTED`, `PAYMENT_AMOUNT_FRAUD_DETECTED`).
+  2. Enforce strict payment-to-order binding (`OrderMismatchError`) validating that webhook payload order references match authoritative DB orders prior to state transitions.
+  3. Enforce multi-entity transaction binding (`validate_transaction_binding` raising `TransactionBindingError`) guaranteeing that append-only `TransactionRecord` ledger entries bind strictly to `CAPTURED` attempts matching the exact order amount, order ID, and merchant ID.
+  4. Normalize Razorpay client errors into typed subclasses (`RazorpayBadRequestError`, `RazorpayNotFoundError`, `RazorpayRateLimitError`, `RazorpayServerError`, `RazorpayTimeoutError`, `RazorpayNetworkError`) with explicit `is_retryable` semantics.
+  5. Prevent state regression: enforce terminal states and ignore stale/delayed failure webhooks on already settled orders (`STATE_REGRESSION_IGNORED`).
+- **Consequences:**
+  - *Positive:* Mathematically guarantees zero false payment success, prevents ledger pollution, eliminates race conditions between webhook and reconciliation, and ensures strict adherence to INV-FIN-01 through INV-FIN-05 and INV-STA-01 through INV-STA-05.
+  - *Negative:* Requires strict error hierarchy and validation overhead on all payment-related endpoints.
+
+---
+
+## ADR-011: Payment Reliability Hardening & Durable Transaction Safeguards
+
+- **Status:** ACCEPTED
+- **Context:** Webhooks, reconciliation, and payment order creation face network instability, timeouts, concurrent duplicate deliveries, replay attacks, and potential database transaction rollbacks vs external gateway side effects. A remote mutation succeeded at Razorpay followed by a local network timeout or application crash must never lead to blind duplicate order creation on retry. Concurrently delivered webhooks must not create duplicate ledger entries or race state transitions.
+- **Decision:**
+  1. **Durable Webhook Ingestion & Deduplication Table:** Persist all received webhooks in a canonical `ProcessedWebhook` database table with a unique constraint on `payload_hash` (`sha256(raw_body)`). Replayed or concurrent duplicates are atomically caught by the database unique constraint and safely ignored (`DUPLICATE_IGNORED`).
+  2. **Timestamp Replay Bounds:** Webhook payloads must contain a timestamp within a valid 24-hour freshness window and not exceed 300 seconds in the future (preventing clock-skew / replay attacks). Violations immediately fail closed with `WebhookTimestampError`.
+  3. **External Order Recovery & Retry Safety:** In `PaymentService.create_order_from_accepted_quote`, record durable intent breadcrumbs before external invocation. On retry following a timeout or crash, query Razorpay by deterministic receipt (`ord_<quote_id>`) via `RazorpayClient.fetch_order_by_receipt` before creating any remote order, binding to the existing open order without creating a duplicate.
+  4. **Database-Enforced Ledger Uniqueness:** Enforce database unique constraint `uq_transaction_records_settlement_entry` on `(settlement_ref, entry_type)` in `TransactionRecord`. Duplicate credits for the same Razorpay payment are physically prohibited at the database level regardless of application concurrency.
+  5. **Audit Hash Chain Concurrency Serialization:** Enforce row-level tenant locking (`SELECT ... FOR UPDATE` on `Merchant`) during `AuditEvent.create_event` in PostgreSQL to prevent parallel chain forking. Provide cryptographic verification via `AuditEvent.verify_chain`.
+- **Consequences:**
+  - *Positive:* Physically guarantees idempotency across network retries, protects against double-charging, ensures audit log integrity under heavy concurrent load, and provides fail-closed replay protection.
+  - *Negative:* Requires additional database roundtrips for deduplication and receipt verification.
+
+---
+
+## ADR-012: Deterministic End-to-End Payment Verification & Transport Decoupling
+
+- **Status:** ACCEPTED
+- **Context:** Verifying the full canonical commerce lifecycle and edge cases (concurrency races, timeout-after-save, dropped webhooks, fraud detection, cross-tenant isolation) cannot rely on external third-party network services or live test credentials during automated CI runs. At the same time, mocking domain logic obscures real system integration and state-machine race bugs.
+- **Decision:**
+  1. Implement a protocol-faithful, stateful fake Razorpay transport (`DeterministicFakeRazorpayTransport`) using `httpx.AsyncBaseTransport`. This transport deterministically simulates the external Razorpay REST API (`/v1/orders`, `/v1/payments`, order lookup by receipt, payment capture, and cryptographic HMAC-SHA256 webhook signatures) as well as wire-level faults (connection timeouts, 500 internal errors, and remote-success-followed-by-timeout).
+  2. Decouple `CanonicalCommerceGateway` to accept an injected `RazorpayClient`, ensuring the entire gateway end-to-end lifecycle runs against the exact domain models, policies, state machines, and database constraints without mocking away business logic.
+  3. Build a comprehensive 17-scenario end-to-end verification suite covering the complete golden path and 16 deliberate edge/failure conditions.
+- **Consequences:**
+  - *Positive:* Fast, 100% deterministic, hermetic verification in CI without external network dependencies or live API key leaks. Completely preserves and exercises all internal domain models, state machines, database constraints, and cryptographic signatures.
+  - *Negative:* The fake transport must be maintained in sync with any Razorpay API contract changes.
+
+
+
+
 
 

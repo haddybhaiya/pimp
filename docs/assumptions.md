@@ -43,3 +43,36 @@
 - **CONFIDENCE:** 100%
 - **FAILURE IF WRONG:** Inventory drops below zero or duplicate transaction records are committed.
 - **MITIGATION:** Enforce database check constraints and version-checked atomic mutations.
+
+---
+
+### 5. Multi-Entity Razorpay Payment Binding & Currency Isolation
+- **ASSUMPTION:** External payment webhook entities may originate from spoofed or cross-tenant sources, requiring cryptographic verification, currency validation, and strict payment attempt to order ledger binding.
+- **EVIDENCE:** Verified via `tests/test_phase3_1_razorpay_boundary.py` (all 12 boundary test scenarios passing deterministically).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Cross-order payment appropriation, currency spoofing (e.g. paying in USD for an INR order), or committing transaction records without captured payment attempts.
+- **MITIGATION:** `CurrencyMismatchFraudError`, `OrderMismatchError`, and `validate_transaction_binding` raising `TransactionBindingError` fail-closed with audit event logging before committing to ledger.
+
+---
+
+### 6. Durable Webhook Deduplication, Replay Windows & External Order Recovery
+- **ASSUMPTION:** Network jitter, provider retries, or local server crashes after remote API mutations can cause concurrent duplicate webhooks, stale replay attacks, or blind duplicate order creation on retry. Process-local locks are insufficient in distributed deployments.
+- **EVIDENCE:** Verified via `tests/test_phase3_2_payment_reliability.py` (all 9 reliability, concurrency, and adversarial scenarios passing).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Duplicate customer charges, replay of stale payment webhooks, split-brain audit hash chains, or double-entry credits in transaction ledger.
+- **MITIGATION:** Canonical `ProcessedWebhook` database table with unique constraint on `payload_hash`, timestamp freshness validation (24h replay window), `uq_transaction_records_settlement_entry` database constraint, receipt-based external order recovery (`RazorpayClient.fetch_order_by_receipt`), and tenant row-level locking for cryptographic audit chain verification.
+
+---
+
+### 7. Hermetic End-to-End Testability via Deterministic Fake Transports
+- **ASSUMPTION:** The complete commerce flow (discovery -> quote -> reservation -> payment -> reconciliation -> audit) and edge failure modes can be verified deterministically without external live Razorpay sandbox dependencies by substituting the HTTP transport layer with an in-memory transport adhering strictly to the Razorpay protocol and HMAC signatures.
+- **EVIDENCE:** Verified via `tests/test_phase3_3_end_to_end_verification.py` (all 17 end-to-end scenarios passing, including network timeout-after-save, dropped webhooks, inventory races, fraud detection, and cross-session isolation).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** False confidence due to transport diverging from live Razorpay API behavior.
+- **MITIGATION:** Fake transport implements real HMAC SHA-256 signatures, exact payload structures, and receipt querying matching the real Razorpay API contract.
+
+
+

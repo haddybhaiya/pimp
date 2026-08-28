@@ -12,7 +12,11 @@ from pydantic import SecretStr
 from agent_ready_merchant.integrations.razorpay.exceptions import (
     RazorpayAPIError,
     RazorpayAuthenticationError,
+    RazorpayBadRequestError,
     RazorpayNetworkError,
+    RazorpayNotFoundError,
+    RazorpayRateLimitError,
+    RazorpayServerError,
     RazorpayTimeoutError,
 )
 from agent_ready_merchant.integrations.razorpay.models import (
@@ -53,6 +57,8 @@ class RazorpayClient:
         method: str,
         endpoint: str,
         json_data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Dispatches an authenticated HTTP request with timeout and error handling."""
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
@@ -64,6 +70,8 @@ class RazorpayClient:
                 url=url,
                 auth=auth,
                 json=json_data,
+                headers=headers,
+                params=params,
                 timeout=self.timeout,
             )
 
@@ -95,6 +103,30 @@ class RazorpayClient:
                     error_code,
                     description,
                 )
+                if response.status_code == 400:
+                    raise RazorpayBadRequestError(
+                        status_code=response.status_code,
+                        error_code=error_code,
+                        description=description,
+                    )
+                if response.status_code == 404:
+                    raise RazorpayNotFoundError(
+                        status_code=response.status_code,
+                        error_code=error_code,
+                        description=description,
+                    )
+                if response.status_code == 429:
+                    raise RazorpayRateLimitError(
+                        status_code=response.status_code,
+                        error_code=error_code,
+                        description=description,
+                    )
+                if response.status_code >= 500:
+                    raise RazorpayServerError(
+                        status_code=response.status_code,
+                        error_code=error_code,
+                        description=description,
+                    )
                 raise RazorpayAPIError(
                     status_code=response.status_code,
                     error_code=error_code,
@@ -117,8 +149,9 @@ class RazorpayClient:
         receipt: str = "",
         payment_capture: int = 1,
         notes: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> RazorpayOrderResponse:
-        """Creates an order in Razorpay (POST /v1/orders)."""
+        """Creates an order in Razorpay (POST /v1/orders) with idempotent header support."""
         req_payload = RazorpayOrderCreateRequest(
             amount=amount_paise,
             currency=currency,
@@ -126,8 +159,25 @@ class RazorpayClient:
             payment_capture=payment_capture,
             notes=notes or {},
         )
-        data = await self._send_request("POST", "orders", json_data=req_payload.model_dump())
+        headers: dict[str, str] = {}
+        idem = idempotency_key or (receipt[:40] if receipt else None)
+        if idem:
+            headers["X-Razorpay-Idempotency-Key"] = idem
+
+        data = await self._send_request(
+            "POST", "orders", json_data=req_payload.model_dump(), headers=headers or None
+        )
         return RazorpayOrderResponse.model_validate(data)
+
+    async def fetch_order_by_receipt(self, receipt: str) -> RazorpayOrderResponse | None:
+        """Fetches an order by merchant receipt identifier (GET /v1/orders?receipt=...)."""
+        data = await self._send_request(
+            "GET", "orders", params={"receipt": receipt[:40], "count": 1}
+        )
+        items = data.get("items", []) if isinstance(data, dict) else []
+        if items:
+            return RazorpayOrderResponse.model_validate(items[0])
+        return None
 
     async def fetch_order(self, rzp_order_id: str) -> RazorpayOrderResponse:
         """Fetches order details by Razorpay order ID (GET /v1/orders/{id})."""

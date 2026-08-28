@@ -1,8 +1,8 @@
 # Phase Status & Roadmap: Agent-Ready Merchant
 
-> **Current Phase:** Phase 2.3 (Protocol Boundary + Production-Grade Demo Hardening)  
+> **Current Phase:** Phase 3 (End-to-End Payment Boundary & Verification)  
 > **Status:** 100% COMPLETED & SIGNED OFF  
-> **Next Milestone:** Phase 3.0 (Autonomous Merchant Optimization & Governance Dashboard)
+> **Next Milestone:** Phase 4 (Autonomous Merchant Optimization & External Ecosystem)
 
 ---
 
@@ -20,22 +20,36 @@
 | **Phase 2.1** | Canonical Commerce Gateway & Merchant AI Representation | **COMPLETED** | 8 canonical capabilities, CapabilityRegistry, MerchantAIRepresentation, strict envelopes |
 | **Phase 2.2** | External AI Buyer Commerce Flow | **COMPLETED** | Autonomous AIBuyerClient, explicit states, bounded negotiation, security matrix, deliberate failure recovery |
 | **Phase 2.3** | Protocol Boundary + Production-Grade Demo Hardening | **COMPLETED** | ACP Protocol Adapter, AgentProtocolClient, contract versioning, idempotency manager, rate limiting, bounded payloads, safe error sanitization |
-| **Phase 3** | Autonomous Merchant Optimization Agent & Control Plane | PLANNED | Revenue experiments, catalog auto-tuning, conversion analytics, merchant supervision |
+| **Phase 3.1** | Razorpay Payment Boundary & Invariant Hardening | **COMPLETED** | Server-authoritative amount/currency verification, payment-order binding, multi-entity transaction binding, error normalization, race safety |
+| **Phase 3.2** | Payment Reliability Hardening | **COMPLETED** | Durable webhook deduplication, replay protection, order creation retry safety, ledger uniqueness, audit chain integrity |
+| **Phase 3.3** | End-to-End Payment Verification & Deliberate Failure Suite | **COMPLETED** | Deterministic E2E verification suite, fake Razorpay transport, 1 golden-path lifecycle + 16 deliberate failure scenarios (17 total), zero side-effect verification |
 
 ---
 
-## Phase 2.3 Deliverables Completed
+## Phase 3.3 Deliverables Completed
 
-- [x] Protocol-neutral external API boundary (`src/agent_ready_merchant/protocols/base.py`):
-  * Replaceable `BaseProtocolAdapter` interface with bidirectional schema mapping.
-- [x] Agent Commerce Protocol (ACP) Adapter (`src/agent_ready_merchant/protocols/acp.py`):
-  * Full translation for all canonical capabilities with strict version negotiation (`2026-03-01`).
-- [x] Protocol Agent Client (`src/agent_ready_merchant/protocols/client.py`):
-  * Autonomous client operating strictly via protocol wire messages with safe retry policies.
-- [x] Production-grade hardening infrastructure (`src/agent_ready_merchant/gateway/hardening.py`):
-  * Hierarchical error codes (`GatewayErrorCode`), thread-safe `IdempotencyManager`, sliding-window `GatewayRateLimiter`, 64 KB payload bounds, timeout boundary guards, structured observability, and zero secret/DB leakage error sanitization.
-- [x] Protocol wire endpoint on FastAPI (`POST /api/v1/protocol/acp` in `src/agent_ready_merchant/main.py`).
-- [x] Comprehensive test suite (`tests/test_phase2_3_protocol_and_hardening.py`):
-  * 150 passed automated tests across entire repository (Phase 1, Phase 2.1, Phase 2.2, Phase 2.3).
-  * Quality gates passed: `ruff check .`, `ruff format --check .`, `mypy src tests`, `pytest`.
+- [x] Protocol-Faithful Deterministic Fake Transport (`DeterministicFakeRazorpayTransport`) inheriting from `httpx.AsyncBaseTransport` for in-memory, zero-mocking end-to-end verification.
+- [x] Wire-level Fault Simulation: wire timeouts, 500 server errors, and remote-success-followed-by-timeout simulating network crashes.
+- [x] Full Canonical E2E Payment Lifecycle: Buyer session -> canonical gateway -> accepted quote -> atomic inventory reservation -> Razorpay order -> payment -> HMAC-signed webhook -> reconciliation -> PaymentAttempt -> TransactionRecord -> immutable AuditEvent hash chain -> terminal completed state.
+- [x] Deliberate Failure Matrix (16 explicit edge/failure scenarios):
+  1. Expired quote rejection
+  2. Changed quote version mismatch
+  3. Inventory concurrency race preventing overselling
+  4. Wrong payment amount detected as fraud
+  5. Wrong payment currency detected as fraud
+  6. Forged webhook HMAC signature rejection
+  7. Replayed webhook with stale timestamp rejection
+  8. Duplicate and concurrent webhook deduplication
+  9. Concurrent checkout safe serialization
+  10. Razorpay timeout after remote success receipt recovery
+  11. Local DB failure after remote success safe recovery
+  12. Out-of-band reconciliation after lost webhook
+  13. Invalid state transition fail-closed guard
+  14. Cross-merchant access prevention
+  15. Cross-session access prevention
+  16. Retry after partial failure clean recovery
+- [x] Full Quality Gate Compliance: 100% clean passes on `ruff format`, `ruff check`, `mypy (strict)`, and `pytest` (203 passing tests).
+
+
+
 

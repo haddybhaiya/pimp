@@ -424,6 +424,7 @@ async def test_concurrent_identical_webhook_delivery_atomic_deduplication(
                     "id": rzp_payment_id,
                     "order_id": rzp_order_id,
                     "amount": 250_000,
+                    "currency": "INR",
                     "status": "captured",
                     "method": "upi",
                 }
@@ -432,6 +433,7 @@ async def test_concurrent_identical_webhook_delivery_atomic_deduplication(
                 "entity": {
                     "id": rzp_order_id,
                     "amount": 250_000,
+                    "currency": "INR",
                     "status": "paid",
                 }
             },

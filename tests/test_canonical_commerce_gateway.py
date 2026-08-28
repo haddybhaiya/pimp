@@ -954,9 +954,7 @@ async def test_initialize_session_returns_server_generated_token_once(
         capabilities={"buyer:discover", "buyer:read", "buyer:quote"},
         auth_token=res.data.auth_token,
     )
-    prod_res = await gateway.get_product(
-        db_session, GetProductRequest(sku="RUN-SHOE-PRO"), ctx
-    )
+    prod_res = await gateway.get_product(db_session, GetProductRequest(sku="RUN-SHOE-PRO"), ctx)
     assert prod_res.status != "REJECTED" or (
         prod_res.error is not None and prod_res.error.code != "AUTH_INVALID_CREDENTIAL"
     )

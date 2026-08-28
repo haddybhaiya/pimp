@@ -284,13 +284,20 @@ class CapabilityRegistry:
         ),
         "get_payment_status": CapabilityDefinition(
             name="get_payment_status",
-            description="Retrieve order payment status, attempts, and reconciliation state.",
+            description=(
+                "Retrieve order payment status, attempts, and perform "
+                "lazy out-of-band reconciliation."
+            ),
             input_schema_name="GetPaymentStatusRequest",
             output_schema_name="GetPaymentStatusResponse",
             input_schema=GetPaymentStatusRequest.model_json_schema(),
             output_schema=GetPaymentStatusResponse.model_json_schema(),
-            classification="READ_ONLY",
-            side_effects=["none"],
+            classification="TRANSIENT_STATE",
+            side_effects=[
+                "reconciles_out_of_band_payment_state",
+                "transitions_order_state_if_captured",
+                "creates_ledger_entry_if_settled",
+            ],
             monetary_impact=True,
             required_capability="buyer:payment_status",
             approval_requirement="NONE",

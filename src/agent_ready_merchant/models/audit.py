@@ -89,6 +89,23 @@ class AuditEvent(Base):
     )
 
     @classmethod
+    def compute_digest(
+        cls,
+        prev_hash: str,
+        merchant_id: uuid.UUID,
+        session_id: uuid.UUID | None,
+        actor_type: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> str:
+        """Deterministically computes SHA-256 event digest."""
+        payload_json = json.dumps(payload, sort_keys=True, default=str)
+        raw = (
+            f"{prev_hash}:{merchant_id}:{session_id or ''}:{actor_type}:{event_type}:{payload_json}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @classmethod
     async def create_event(
         cls,
         session: AsyncSession,
@@ -99,19 +116,43 @@ class AuditEvent(Base):
         session_id: uuid.UUID | None = None,
     ) -> "AuditEvent":
         """Appends a new audit event with deterministic cryptographic hash chaining."""
+        # In PostgreSQL, serialize audit event appends per merchant to guarantee
+        # linear chain integrity
+        bind = session.get_bind()
+        if bind is not None and getattr(bind.dialect, "name", "") == "postgresql":
+            from agent_ready_merchant.models.merchant import Merchant
+
+            m_stmt = select(Merchant.id).where(Merchant.id == merchant_id).with_for_update()
+            await session.execute(m_stmt)
+
+        # Select current leaf hash of the chain: event_hash not referenced as prev_event_hash
+        subq = (
+            select(cls.prev_event_hash)
+            .where(
+                cls.merchant_id == merchant_id,
+                cls.prev_event_hash.is_not(None),
+            )
+            .scalar_subquery()
+        )
         stmt = (
             select(cls.event_hash)
-            .where(cls.merchant_id == merchant_id)
-            .order_by(cls.created_at.desc(), cls.id.desc())
+            .where(
+                cls.merchant_id == merchant_id,
+                cls.event_hash.not_in(subq),
+            )
+            .order_by(cls.created_at.desc())
             .limit(1)
         )
         prev_hash = (await session.execute(stmt)).scalar_one_or_none() or cls.GENESIS_HASH
 
-        payload_json = json.dumps(payload, sort_keys=True, default=str)
-        raw = (
-            f"{prev_hash}:{merchant_id}:{session_id or ''}:{actor_type}:{event_type}:{payload_json}"
+        digest = cls.compute_digest(
+            prev_hash=prev_hash,
+            merchant_id=merchant_id,
+            session_id=session_id,
+            actor_type=actor_type,
+            event_type=event_type,
+            payload=payload,
         )
-        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
         event = cls(
             merchant_id=merchant_id,
@@ -125,3 +166,65 @@ class AuditEvent(Base):
         session.add(event)
         await session.flush()
         return event
+
+    @classmethod
+    async def verify_chain(
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+    ) -> tuple[bool, str | None]:
+        """Validates cryptographic hash chain integrity for a merchant's audit log."""
+        stmt = select(cls).where(cls.merchant_id == merchant_id)
+        events = list((await session.execute(stmt)).scalars().all())
+        if not events:
+            return True, None
+
+        # Build map: prev_event_hash -> list of child events.
+        # Reject any event whose prev_event_hash is NULL — root events must store the explicit
+        # GENESIS_HASH sentinel. A NULL indicates storage tampering (INV-STA-05).
+        prev_map: dict[str, list[AuditEvent]] = {}
+        for ev in events:
+            if ev.prev_event_hash is None:
+                return (
+                    False,
+                    f"Tampered chain: event {ev.id} has NULL prev_event_hash; "
+                    "root events must store explicit GENESIS_HASH sentinel",
+                )
+            prev_map.setdefault(ev.prev_event_hash, []).append(ev)
+
+        curr_hash = cls.GENESIS_HASH
+        verified_count = 0
+        while curr_hash in prev_map:
+            children = prev_map[curr_hash]
+            if len(children) > 1:
+                return (
+                    False,
+                    f"Chain fork detected: multiple events reference parent hash '{curr_hash}'",
+                )
+            ev = children[0]
+            assert ev.prev_event_hash is not None
+            expected_digest = cls.compute_digest(
+                prev_hash=ev.prev_event_hash,
+                merchant_id=ev.merchant_id,
+                session_id=ev.session_id,
+                actor_type=ev.actor_type,
+                event_type=ev.event_type,
+                payload=ev.payload,
+            )
+            if ev.event_hash != expected_digest:
+                return (
+                    False,
+                    f"Digest mismatch at event {ev.id}: expected {expected_digest}, "
+                    f"got {ev.event_hash}",
+                )
+            curr_hash = ev.event_hash
+            verified_count += 1
+
+        if verified_count != len(events):
+            unlinked = len(events) - verified_count
+            return (
+                False,
+                f"Broken chain: {unlinked} unlinked or orphaned audit events detected",
+            )
+
+        return True, None

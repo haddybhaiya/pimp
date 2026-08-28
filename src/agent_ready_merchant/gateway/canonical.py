@@ -72,7 +72,10 @@ from agent_ready_merchant.gateway.schemas import (
     VariantDetailItem,
 )
 from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
-from agent_ready_merchant.integrations.razorpay.exceptions import RazorpayError
+from agent_ready_merchant.integrations.razorpay.exceptions import (
+    RazorpayError,
+    RazorpayTimeoutError,
+)
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.order import Order
 from agent_ready_merchant.models.payment import PaymentAttempt
@@ -108,8 +111,13 @@ _ALLOWED_BUYER_CAPABILITIES: frozenset[str] = frozenset(
 class CanonicalCommerceGateway:
     """Server-authoritative boundary between arbitrary AI buyers/adapters and commerce domain."""
 
-    def __init__(self, tool_gateway: ToolGateway | None = None) -> None:
+    def __init__(
+        self,
+        tool_gateway: ToolGateway | None = None,
+        rzp_client: RazorpayClient | None = None,
+    ) -> None:
         self.tool_gateway = tool_gateway or ToolGateway()
+        self.rzp_client = rzp_client
 
     async def get_merchant_representation(
         self,
@@ -847,7 +855,7 @@ class CanonicalCommerceGateway:
             )
 
         settings = get_settings()
-        rzp_client = RazorpayClient(
+        rzp_client = self.rzp_client or RazorpayClient(
             key_id=settings.RAZORPAY_KEY_ID,
             key_secret=settings.RAZORPAY_KEY_SECRET,
             base_url=settings.RAZORPAY_API_BASE_URL,
@@ -864,17 +872,29 @@ class CanonicalCommerceGateway:
             )
         except ValueError as exc:
             await session.rollback()
+            session.expire_all()
             return self._rejected_envelope("create_order", "ORDER_CREATION_FAILED", str(exc))
+        except RazorpayTimeoutError as exc:
+            await session.rollback()
+            session.expire_all()
+            return self._error_envelope(
+                "create_order",
+                GatewayErrorCode.TIMEOUT_BOUNDARY_EXCEEDED.value,
+                f"Razorpay payment gateway timeout: {exc}",
+                retryable=True,
+            )
         except RazorpayError as exc:
             await session.rollback()
+            session.expire_all()
             return self._error_envelope(
                 "create_order",
                 GatewayErrorCode.COMMERCE_PAYMENT_GATEWAY_ERROR.value,
                 f"Razorpay payment gateway error: {exc}",
-                retryable=True,
+                retryable=exc.is_retryable,
             )
         except OptimisticLockError as exc:
             await session.rollback()
+            session.expire_all()
             return self._rejected_envelope("create_order", "CONCURRENCY_CONFLICT", str(exc))
 
         # Query audit event created
@@ -933,6 +953,15 @@ class CanonicalCommerceGateway:
         settings = get_settings()
         order: Order | None = None
 
+        # Resolve the Razorpay client once so its key_id can be returned in the checkout
+        # response — the checkout SDK must use credentials matching the account that created
+        # the remote order (fix: Issue 4).
+        rzp_client = self.rzp_client or RazorpayClient(
+            key_id=settings.RAZORPAY_KEY_ID,
+            key_secret=settings.RAZORPAY_KEY_SECRET,
+            base_url=settings.RAZORPAY_API_BASE_URL,
+        )
+
         if request.order_id:
             ord_stmt = (
                 select(Order)
@@ -957,11 +986,6 @@ class CanonicalCommerceGateway:
                     "MISSING_CHECKOUT_DETAILS",
                     "buyer_email and shipping_address are required when checking out from a quote.",
                 )
-            rzp_client = RazorpayClient(
-                key_id=settings.RAZORPAY_KEY_ID,
-                key_secret=settings.RAZORPAY_KEY_SECRET,
-                base_url=settings.RAZORPAY_API_BASE_URL,
-            )
             try:
                 order = await PaymentService.create_order_from_accepted_quote(
                     session=session,
@@ -974,20 +998,33 @@ class CanonicalCommerceGateway:
                 )
             except ValueError as exc:
                 await session.rollback()
+                session.expire_all()
                 return self._rejected_envelope(
                     "request_checkout", "CHECKOUT_CREATION_FAILED", str(exc)
                 )
+            except RazorpayTimeoutError as exc:
+                await session.rollback()
+                session.expire_all()
+                return self._error_envelope(
+                    "request_checkout",
+                    GatewayErrorCode.TIMEOUT_BOUNDARY_EXCEEDED.value,
+                    f"Razorpay payment gateway timeout: {exc}",
+                    retryable=True,
+                )
             except RazorpayError as exc:
                 await session.rollback()
+                session.expire_all()
                 return self._error_envelope(
                     "request_checkout",
                     GatewayErrorCode.COMMERCE_PAYMENT_GATEWAY_ERROR.value,
                     f"Razorpay payment gateway error: {exc}",
-                    retryable=True,
+                    retryable=exc.is_retryable,
                 )
             except OptimisticLockError as exc:
                 await session.rollback()
+                session.expire_all()
                 return self._rejected_envelope("request_checkout", "CONCURRENCY_CONFLICT", str(exc))
+
         else:
             return self._rejected_envelope(
                 "request_checkout",
@@ -1021,10 +1058,11 @@ class CanonicalCommerceGateway:
             amount_paise=order.amount_paise,
             currency=order.currency,
             status=order.status,
-            key_id=settings.RAZORPAY_KEY_ID,
+            key_id=rzp_client.key_id,
             supported_payment_methods=["upi", "card", "netbanking", "wallet"],
             callback_url="/api/v1/payments/webhook",
         )
+
         return GatewayResponseEnvelope[RequestCheckoutResponse](
             status="SUCCESS",
             capability="request_checkout",
@@ -1075,7 +1113,7 @@ class CanonicalCommerceGateway:
         # Reconcile if order pending and has external order ID
         if order.status != "PAID" and order.rzp_order_id:
             settings = get_settings()
-            rzp_client = RazorpayClient(
+            rzp_client = self.rzp_client or RazorpayClient(
                 key_id=settings.RAZORPAY_KEY_ID,
                 key_secret=settings.RAZORPAY_KEY_SECRET,
                 base_url=settings.RAZORPAY_API_BASE_URL,
@@ -1454,9 +1492,7 @@ class CanonicalCommerceGateway:
             # per-line arithmetic valid. Never cross the policy-approved floor.
             sign = 1 if remainder > 0 else -1
             remaining = remainder
-            order_by_qty = sorted(
-                range(len(quote.items)), key=lambda i: -quote.items[i].quantity
-            )
+            order_by_qty = sorted(range(len(quote.items)), key=lambda i: -quote.items[i].quantity)
             for idx in order_by_qty:
                 if remaining == 0:
                     break

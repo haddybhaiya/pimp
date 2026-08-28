@@ -2,6 +2,153 @@
 
 ---
 
+# Review 4: Phase 3 — End-to-End Payment Boundary, Reliability & Verification (`main..phs3`)
+
+> **Reviewed on:** 2026-08-27
+> **Branch:** `phs3` (13 commits, 22 files changed, +4,079 / −94 lines)
+> **Scope:** Phase 3.1 (Razorpay payment boundary hardening), Phase 3.2 (webhook deduplication, replay protection, order creation retry safety, ledger uniqueness, audit chain integrity), Phase 3.3 (deterministic end-to-end verification suite with fake transport).
+> **Verification:** Full suite green (203 passed, 2 skipped), `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
+> **Files reviewed:** [`src/agent_ready_merchant/services/payment_service.py`](../src/agent_ready_merchant/services/payment_service.py), [`src/agent_ready_merchant/integrations/razorpay/client.py`](../src/agent_ready_merchant/integrations/razorpay/client.py), [`src/agent_ready_merchant/integrations/razorpay/exceptions.py`](../src/agent_ready_merchant/integrations/razorpay/exceptions.py), [`src/agent_ready_merchant/models/audit.py`](../src/agent_ready_merchant/models/audit.py), [`src/agent_ready_merchant/models/webhook.py`](../src/agent_ready_merchant/models/webhook.py), [`src/agent_ready_merchant/models/transaction.py`](../src/agent_ready_merchant/models/transaction.py), [`src/agent_ready_merchant/gateway/canonical.py`](../src/agent_ready_merchant/gateway/canonical.py) (gateway methods), [`src/agent_ready_merchant/main.py`](../src/agent_ready_merchant/main.py) (webhook endpoint), [`alembic/versions/004_payment_reliability_hardening.py`](../alembic/versions/004_payment_reliability_hardening.py), [`tests/fake_razorpay.py`](../tests/fake_razorpay.py), [`tests/test_phase3_1_razorpay_boundary.py`](../tests/test_phase3_1_razorpay_boundary.py), [`tests/test_phase3_2_payment_reliability.py`](../tests/test_phase3_2_payment_reliability.py), [`tests/test_phase3_3_end_to_end_verification.py`](../tests/test_phase3_3_end_to_end_verification.py).
+
+---
+
+## High
+
+### 1. Currency fraud check fails open when currency is absent from webhook payload
+
+[`payment_service.py:469-470`](../src/agent_ready_merchant/services/payment_service.py#L469-L470): `_handle_payment_success` computes `curr = currency or payment_data.get("currency")`. The invariant check on L470 is `if curr is not None and str(curr).upper() != order.currency.upper()`. If the webhook payload omits the `currency` field entirely (or if an intermediary strips it), `curr` resolves to `None` and the check is skipped entirely — the payment is settled without any currency verification.
+
+Razorpay's `payment.captured` webhook entity reliably includes `currency`, but the system's stated invariant (INV-FIN-05: server-authoritative settlement) requires fail-closed behavior. A missing currency should either:
+- Trigger a direct Razorpay server fetch to confirm currency, or
+- Reject the webhook with an audit event (fail-closed).
+
+The same pattern appears in `reconcile_order` ([L978-980](../src/agent_ready_merchant/services/payment_service.py#L978-L980)) where `if captured_payment.currency and ...` guards the check — a `None` currency on the fetched payment object also bypasses verification.
+
+**Impact:** If currency is ever absent from the payment data, a cross-currency payment (e.g., USD payment against INR order) would be silently accepted, violating INV-FIN-05.
+
+### 2. Webhook deduplication returns `DUPLICATE_IGNORED` to Razorpay before the winner commits
+
+[`payment_service.py:326-334`](../src/agent_ready_merchant/services/payment_service.py#L326-L334): When two concurrent webhook deliveries race on the `ProcessedWebhook` unique constraint, the loser catches `IntegrityError`, rolls back, and immediately returns `{"status": "DUPLICATE_IGNORED"}`. The HTTP layer returns 200, telling Razorpay the event was processed successfully.
+
+However, the winner (Thread A) is still processing in its own transaction. If Thread A subsequently fails and rolls back (e.g., `OptimisticLockError` on the order, DB connection drop), both the `ProcessedWebhook` record and the payment settlement are lost. Razorpay won't retry because Thread B already acknowledged the webhook.
+
+This is a narrow window — both threads must arrive concurrently *and* the winner must fail — but the consequence is permanent payment loss. Correct behavior: Thread B should retry or check whether Thread A's `ProcessedWebhook` record actually committed before returning success.
+
+**Mitigation note:** The reconciliation path (`reconcile_order`) serves as a recovery mechanism for lost webhooks, so the practical impact depends on whether reconciliation is run automatically or only on manual trigger.
+
+### 3. Audit hash chain ordering uses UUIDv4 as tiebreaker — non-deterministic under timestamp collision
+
+[`audit.py:131`](../src/agent_ready_merchant/models/audit.py#L131): `create_event` retrieves the previous hash via `order_by(cls.created_at.desc(), cls.id.desc())`. [`verify_chain`](../src/agent_ready_merchant/models/audit.py#L168) reads the chain via `order_by(cls.created_at.asc(), cls.id.asc())`.
+
+Since `id` is UUIDv4 (random), when two events share the exact same `created_at` timestamp, the sort order by `id` is arbitrary (comparing UUIDs as strings/bytes in ascending vs. descending order). If Event X has UUID `aaa...` and Event Y has UUID `bbb...`, both created at `t=T`:
+- `create_event` for Y queries `DESC` and finds X first (correct).
+- But if X and Y are inserted in rapid succession by separate independent sessions (the breadcrumb path uses an independent session), `create_event` for Y might not yet see X's uncommitted row.
+
+The PostgreSQL serialization lock ([L122-126](../src/agent_ready_merchant/models/audit.py#L122-L126)) mitigates this for PostgreSQL, but is explicitly skipped for non-PostgreSQL dialects (SQLite in tests). In production with PostgreSQL, this is safe. In test environments or alternative databases, concurrent audit appends can silently fork the chain.
+
+**Impact:** Chain integrity guarantee holds only for PostgreSQL with row locking. The code correctly documents this limitation, but `verify_chain` doesn't account for it — it will report false negatives on forked chains in non-PostgreSQL environments.
+
+---
+
+## Medium
+
+### 4. `test_concurrent_duplicate_deliveries_single_commitment` tests sequential, not concurrent delivery
+
+[`test_phase3_2_payment_reliability.py:314-355`](../tests/test_phase3_2_payment_reliability.py#L314-L355): The test name claims to verify concurrent duplicate deliveries, but both webhook calls are `await`-ed sequentially (L339, L345). The first call completes and commits before the second call begins, so the second call hits the `SELECT` dedup path (L306-314) — not the `IntegrityError` concurrent collision path (L326-334).
+
+The `IntegrityError` handling at L328 is never exercised by any test in the suite. This is the exact code path flagged in finding §2 — the most critical concurrency path has zero test coverage.
+
+To actually test concurrent delivery, use `asyncio.gather()` with two tasks racing on the same session or separate sessions.
+
+### 5. `test_order_creation_retry_reuses_remote_order_on_timeout` bypasses the actual receipt recovery code
+
+[`test_phase3_2_payment_reliability.py:364-404`](../tests/test_phase3_2_payment_reliability.py#L364-L404): The test patches `RazorpayClient.fetch_order_by_receipt` with `unittest.mock.patch`, returning a pre-built response. This bypasses:
+- The `DeterministicFakeRazorpayTransport` (which has built-in timeout simulation and receipt query support)
+- The actual HTTP request path through `_send_request`
+- The real `_find_reusable_external_order` flow including breadcrumb checks
+
+The test verifies that *if* `fetch_order_by_receipt` returns a matching order, the service reuses it — but doesn't verify the system's actual timeout-then-retry behavior end-to-end.
+
+### 6. `settlement_ref` unique constraint permits NULL duplicates in most databases
+
+[`transaction.py:37-41`](../src/agent_ready_merchant/models/transaction.py#L37-L41): `UniqueConstraint("settlement_ref", "entry_type", name="uq_transaction_records_settlement_entry")` — in SQL standard and PostgreSQL, `NULL != NULL`, so multiple rows with `settlement_ref = NULL` and `entry_type = 'CREDIT'` satisfy the constraint. The application code always populates `settlement_ref` with the Razorpay payment ID ([`payment_service.py:635`](../src/agent_ready_merchant/services/payment_service.py#L635)), but if any code path creates a `TransactionRecord` without `settlement_ref`, the DB constraint won't prevent duplicates.
+
+Consider adding a `NOT NULL` constraint on `settlement_ref`, or a partial unique index excluding NULLs.
+
+### 7. `get_payment_status` performs state-mutating reconciliation on what should be a read-only query
+
+[`canonical.py:1099-1113`](../src/agent_ready_merchant/gateway/canonical.py#L1099-L1113): `get_payment_status` calls `PaymentService.reconcile_order()` which acquires `FOR UPDATE` row locks, transitions order state, creates `PaymentAttempt` records, and inserts `TransactionRecord` ledger entries. This side-effecting behavior on a conceptually "read" operation:
+- May surprise API consumers who expect idempotent GET-style semantics
+- Could fail silently if the session dependency doesn't auto-commit on success for this code path (the exception is swallowed at L1112-1113)
+- Means every status poll triggers an external Razorpay API call, which could hit rate limits
+
+This is architecturally useful as "lazy reconciliation" but should either be documented explicitly in the capability registry as having side effects, or split into a separate `reconcile_payment` capability.
+
+### 8. `RazorpayTimeoutError` during `create_order` is marked `retryable=False` at gateway level
+
+[`canonical.py:882`](../src/agent_ready_merchant/gateway/canonical.py#L882): When `RazorpayTimeoutError` is raised during order creation, the gateway returns `retryable=False`. However, the `RazorpayTimeoutError` exception itself declares `is_retryable = True` ([`exceptions.py:83`](../src/agent_ready_merchant/integrations/razorpay/exceptions.py#L83)). The gateway-level override is intentional (comment at L882 says "retryable=False") — but this contradicts the exception's own semantics.
+
+The order creation *is* actually retryable — the receipt-based dedup (`_find_reusable_external_order`) exists precisely to make retries safe. Marking it non-retryable tells the caller not to retry when retrying is both safe and the intended recovery path.
+
+---
+
+## Low / Notes
+
+- **Independent transaction breadcrumb before Razorpay call (`_record_external_attempt_started`, L879-890):** The PENDING breadcrumb is written without `rzp_order_id` (since the order hasn't been created yet). The receipt-based fallback in `_find_reusable_external_order` (L828-845) correctly handles this by querying Razorpay by receipt. Good design — the breadcrumb survives main transaction rollback.
+
+- **Webhook payload hash deduplication vs. event ID:** `ProcessedWebhook` deduplicates on SHA256 of raw bytes. If an HTTP proxy, CDN, or Razorpay retry mechanism reformats JSON whitespace, the hash changes and deduplication fails. Razorpay provides an event ID header (`x-razorpay-event-id`) which would be more resilient. The `event_id` column exists on the model but isn't used for deduplication.
+
+- **Broad exception catch in receipt fallback:** [`payment_service.py:844`](../src/agent_ready_merchant/services/payment_service.py#L844) catches `Exception` — this swallows all errors including programming bugs. Should at minimum catch `(RazorpayError, Exception)` with different log levels, or narrow to `RazorpayError`.
+
+- **Amount mismatch check is fail-open for `None` amount:** [`payment_service.py:490`](../src/agent_ready_merchant/services/payment_service.py#L490): `if amount_paise is not None and amount_paise != order.amount_paise` — a webhook missing the amount field bypasses this check. In practice, the earlier guard at L411 (`if not amount_paise or int(amount_paise) <= 0`) catches zero/None amounts by returning IGNORED, so the only way to reach L490 with `None` is via `reconcile_order` or a direct `_handle_payment_success` call. The reconciliation path passes `captured_payment.amount` which is always present. Minimal practical risk, but inconsistent fail-closed posture.
+
+- **`_latest_external_event` scans last 25 events broadly:** [`payment_service.py:770-783`](../src/agent_ready_merchant/services/payment_service.py#L770-L783): This queries the 25 most recent external events for the entire merchant (not filtered by quote), then iterates in Python to find the matching quote. For merchants with high order volume, this could miss the breadcrumb if more than 25 events were created since. Consider adding `quote_id` filtering in the SQL query via a JSON path expression or a dedicated column.
+
+- **Exception hierarchy is clean and well-structured:** The exception hierarchy in [`exceptions.py`](../src/agent_ready_merchant/integrations/razorpay/exceptions.py) correctly inherits from `RazorpayError`, provides structured fields, and `is_retryable` properties. HTTP status code mapping in `client.py` is correct and comprehensive.
+
+- **Razorpay client transport injection is well-designed:** The `http_client` parameter on `RazorpayClient` allows the fake transport injection without mocking, and the fake transport's HMAC signing correctly matches the real Razorpay flow.
+
+- **Phase 3.3 E2E test suite is thorough:** 17 scenarios covering the complete failure matrix documented in `phase.md`. Test data is dynamically constructed (not hardcoded). The `DeterministicFakeRazorpayTransport` correctly simulates order lifecycle, payment capture, and webhook signing.
+
+- **Migration 004 is clean:** Creates `processed_webhooks` table with appropriate indexes and the `settlement_ref` unique constraint. Downgrade correctly drops both.
+
+- **Webhook endpoint error handling is comprehensive:** [`main.py:117-176`](../src/agent_ready_merchant/main.py#L117-L176) maps all Phase 3 exception types to appropriate HTTP status codes. Fraud errors return 422, signature errors return 400, binding violations return 500.
+
+---
+
+---
+
+# Review 5: Multi-Reviewer Hardening & 13 Validated Issues Signoff
+
+> **Reviewed on:** 2026-08-28
+> **Scope:** Multi-reviewer AI validation and remediation matrix (3 P1 Critical/High, 6 P2 Medium, 4 P3 Low/Hygiene issues) across Phase 3 payment boundary, webhook deduplication, database migrations, audit chain verification, API gateway handlers, and deterministic E2E verification suites.
+> **Verification:** Full test suite green (203 passed, 2 skipped), `ruff check` clean (0 errors), `ruff format` clean, `mypy --strict` clean (0 issues across 116 source files), overall test coverage 85%.
+
+---
+
+## Validated Issues & Remediations Matrix
+
+| # | Severity | Category | Target File & Lines | Issue Summary | Resolution Delivered |
+|---|---|---|---|---|---|
+| **1** | P2 | Webhook Handling | [`payment_service.py:309-328`](../src/agent_ready_merchant/services/payment_service.py#L309-L328) | Ignored webhooks retried forever causing 503 loop on replay | Treated `IGNORED` as terminal in dedup lookup (`status in {"PROCESSED", "IGNORED"}`), returning `DUPLICATE_IGNORED` (200) |
+| **2** | P2 | Order Dedup | [`payment_service.py:875-900`](../src/agent_ready_merchant/services/payment_service.py#L875-L900) | Receipt recovery exceptions converted to None duplicating orders | Explicitly re-raise transient network/server errors (`RazorpayTimeoutError`, `RazorpayNetworkError`, `RazorpayRateLimitError`, `RazorpayServerError`) to prevent duplicate remote order generation (INV-FIN-04) |
+| **3** | P1 | Migration Safety | [`004_payment_reliability_hardening.py:53-64`](../alembic/versions/004_payment_reliability_hardening.py#L53-L64) | `ALTER COLUMN NOT NULL` without backfill breaks existing nulls | Added SQL backfill `UPDATE transaction_records SET settlement_ref = 'legacy_unknown_' \|\| id WHERE settlement_ref IS NULL` before `alter_column` |
+| **4** | P2 | Gateway Consistency | [`canonical.py:949-1060`](../src/agent_ready_merchant/gateway/canonical.py#L949-L1060) | Inconsistent `key_id` in `request_checkout` response | Resolved `rzp_client` once up front and set `key_id=rzp_client.key_id` in response envelope |
+| **5** | P2 | Audit Integrity | [`audit.py:182-215`](../src/agent_ready_merchant/models/audit.py#L182-L215) | `verify_chain` fallback masked `NULL` tampering | Explicitly reject any `NULL` `prev_event_hash` on events (root events must store explicit `GENESIS_HASH` sentinel) |
+| **6** | P2 | Schema Typing | [`schemas/payment.py:58-67`](../src/agent_ready_merchant/schemas/payment.py#L58-L67) | `TransactionRecordCreate` `settlement_ref` schema mismatch | Overrode `settlement_ref: str` as required non-nullable in create schema |
+| **7** | P3 | Documentation | [`docs/phase.md:25`](../docs/phase.md#L25) | Scenario count discrepancy (16 vs 17) | Corrected phase status to "1 golden-path lifecycle + 16 deliberate failure scenarios (17 total)" |
+| **8** | P3 | Documentation | [`docs/work_review.md`](../docs/work_review.md) | Absolute Windows machine paths in documentation | Converted all absolute machine paths to repo-relative markdown paths |
+| **9** | P2 | Test Concurrency | [`test_phase3_3_end_to_end_verification.py`](../tests/test_phase3_3_end_to_end_verification.py) | Concurrency scenarios needed in-flight collision testing | Added in-flight collision protection test asserting `WebhookProcessingInProgressError`, verified stock race protection and checkout idempotency |
+| **10** | P1 | Financial Safety | [`payment_service.py:420-435`](../src/agent_ready_merchant/services/payment_service.py#L420-L435) | Currency verification fallback in `process_payment_webhook` | Removed `or order_data.get("currency")` fallback, enforcing server-authoritative `payment_data.get("currency")` fail-closed currency verification per INV-FIN-05 |
+| **11** | P3 | Test Security | [`test_phase3_1_razorpay_boundary.py`](../tests/test_phase3_1_razorpay_boundary.py) | Inlined hardcoded webhook secret strings in tests | Refactored tests to use `TEST_WEBHOOK_SECRET` derived from application settings (`get_settings().RAZORPAY_WEBHOOK_SECRET.get_secret_value()`) |
+| **12** | P2 | Tool Contracts | [`handlers.py:465-477`](../src/agent_ready_merchant/tools/handlers.py#L465-L477) | `CheckPaymentStatusTool` metadata mismatch | Synchronized `side_effect_class="TRANSIENT_STATE"` and `required_capability="buyer:payment_status"` |
+| **13** | P2 | Fake Transport | [`fake_razorpay.py:180-195`](../tests/fake_razorpay.py#L180-L195) | `simulate_payment` overwrote `amount_paid` | Accumulated `total_captured = sum(...)` across all captured payments to accurately reflect multi-payment and partial-payment state |
+
+---
+
+
+---
+
 # Review 3: Phase 2.3 Protocol Boundary & Production Hardening (`79cb1bb..50920d1`)
 
 > **Reviewed on:** 2026-08-24
@@ -75,7 +222,7 @@ This extends the Phase 2.1 High finding (review 1, §1): that review flagged hea
 
 The proposal construction (`canonical.py:1232-1256`) derives every line's `proposed_unit_price_paise = proposed_total_paise // total_items` where `total_items` sums quantities across all lines, then evaluates floors/discount on that basis (`policy/rules.py:44-145`). Three concrete distortions:
 
-- **Floor breach via shipping subsidy (fail-open):** `proposed_total` includes shipping, but the floor check compares the gross per-unit figure against per-unit floors. Example: single unit, base ₹800, floor ₹790, shipping ₹100 (subtotals < ₹1,000 always carry it). Buyer offers total ₹820: `u = 82_000 ≥ 79_000` passes the floor check and discount stays within 15%, yet merchant net proceeds are ₹720 < floor ₹790. The guard that exists to prevent selling below floor silently passes.
+- **Floor breach via shipping subsidy (fail-open):** `proposed_total` includes shipping, but the floor check compares the gross per-unit figure against per-unit floors. Example: single unit, base ₹800, floor ₹790, shipping ₹100 (subtotals <₹1,000 always carry it). Buyer offers total ₹820: `u = 82_000 ≥ 79_000` passes the floor check and discount stays within 15%, yet merchant net proceeds are ₹720 < floor ₹790. The guard that exists to prevent selling below floor silently passes.
 - **False rejections on multi-line bundles:** equal-split requires `proposed_total ≥ total_qty × max(floor_i)`. One unit at floor ₹9,000 plus one at floor ₹95 forces offers ≥ ₹18,000 even though aggregate floors sum to ₹9,095 — everything between fails as `FLOOR_PRICE_BREACH`.
 - **Shipping consumed as discount:** `calculated_discount = (subtotal + shipping) − proposal` (`canonical.py:1248-1249`) is compared to `subtotal × max_discount_pct` (`rules.py:120-124`). At 15% max discount, any subtotal below ~₹667 makes the flat ₹100 shipping alone exceed the whole discount budget; a buyer offering full list price for goods while paying shipping themselves gets `MAX_DISCOUNT_EXCEEDED`.
 
@@ -180,3 +327,27 @@ The registry declares failure states `ORDER_ALREADY_PAID` / `ORDER_CANCELLED` fo
 > - Bounded memory eviction (LRU / TTL) on idempotency coordinators and rate limiters.
 > - Complete unification of dedicated REST endpoints through the hardened capability dispatcher.
 > - Zero test failures, zero lint errors, 100% strict type safety compliance.
+---
+## some non resolved issues from phase 2 branch 
+**status** : skipped proceeded to phase 3
+content : "This is a comment left during a code review.
+Path: src/agent_ready_merchant/gateway/canonical.py
+Line: 1827-1839
+
+Comment:
+**Timeout retries duplicate external orders**
+
+When `create_order` times out after Razorpay creates its order but before the local transaction finishes, this timeout path rolls back only local state and returns an error; retrying the operation invokes Razorpay again, leaving the first external order orphaned and creating a duplicate payment order.
+
+---
+
+For each issue above, determine whether it is valid and should be fixed. If so, fix it directly." 
+
+### Phase 2 Timeout-Retry Issue Remediation Status
+
+> **Status:** **RESOLVED in Phase 3.2**
+> Phase 3.2 introduced durable breadcrumb-based order creation retry safety (`_record_external_attempt_started`, `_find_reusable_external_order`, receipt-based fallback via `fetch_order_by_receipt`). The exact scenario described — Razorpay order created, local timeout, retry creates duplicate — is now handled by:
+> 1. Pre-creation breadcrumb written in an independent transaction (survives main transaction rollback)
+> 2. On retry, `_find_reusable_external_order` checks the breadcrumb and/or queries Razorpay by deterministic receipt ID
+> 3. If a matching `created`-status order with correct amount exists, it is reused instead of creating a new one
+> This is tested in `test_phase3_3_end_to_end_verification.py` (scenario 10: Razorpay timeout after remote success).
