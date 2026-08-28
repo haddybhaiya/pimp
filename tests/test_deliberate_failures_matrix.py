@@ -407,13 +407,19 @@ async def test_df13_payment_amount_mismatch_fraud_detection(
         "event": "payment.captured",
         "payload": {
             "order": {
-                "entity": {"id": "order_FRAUD_CHECK_01", "amount": 1000000, "status": "paid"}
+                "entity": {
+                    "id": "order_FRAUD_CHECK_01",
+                    "amount": 1000000,
+                    "currency": "INR",
+                    "status": "paid",
+                }
             },
             "payment": {
                 "entity": {
                     "id": "pay_FRAUD_01",
                     "order_id": "order_FRAUD_CHECK_01",
                     "amount": 1000,  # Fraud: Only paid ₹10
+                    "currency": "INR",
                     "status": "captured",
                 }
             },
