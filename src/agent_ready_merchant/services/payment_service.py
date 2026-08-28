@@ -25,6 +25,8 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     RazorpayAPIError,
     RazorpayError,
     RazorpayNetworkError,
+    RazorpayRateLimitError,
+    RazorpayServerError,
     RazorpayTimeoutError,
     TransactionBindingError,
     WebhookProcessingInProgressError,
@@ -143,29 +145,16 @@ class PaymentService:
         if existing_order:
             return existing_order
 
-        # 2.5 Reserve inventory for each quote line item
+        # 2.5 Pre-flight stock availability check for each quote line item
         for q_item in quote.items:
             inv_stmt = select(InventoryItem).where(InventoryItem.variant_id == q_item.variant_id)
             inv = (await session.execute(inv_stmt)).scalar_one_or_none()
-            if inv is not None:
-                if inv.available_quantity < q_item.quantity + inv.safety_threshold:
-                    raise ValueError(
-                        f"Insufficient stock for variant '{q_item.variant_id}': "
-                        f"requested {q_item.quantity}, available {inv.available_quantity} "
-                        f"(safety threshold: {inv.safety_threshold})"
-                    )
-                new_avail = inv.available_quantity - q_item.quantity
-                new_res = inv.reserved_quantity + q_item.quantity
-                await update_with_version_check(
-                    session=session,
-                    model_class=InventoryItem,
-                    entity_id=inv.id,
-                    expected_version=inv.version,
-                    values={"available_quantity": new_avail, "reserved_quantity": new_res},
+            if inv is not None and inv.available_quantity < q_item.quantity + inv.safety_threshold:
+                raise ValueError(
+                    f"Insufficient stock for variant '{q_item.variant_id}': "
+                    f"requested {q_item.quantity}, available {inv.available_quantity} "
+                    f"(safety threshold: {inv.safety_threshold})"
                 )
-                inv.available_quantity = new_avail
-                inv.reserved_quantity = new_res
-                inv.version += 1
 
         # 3. Call Razorpay API to generate external order — with duplicate protection.
         # A timeout after remote creation but before local commit orphans the remote
@@ -197,7 +186,30 @@ class PaymentService:
             )
             await cls._record_external_attempt(quote=quote, rzp_order=rzp_order)
 
-        # 4. Create Order entity
+        # 4. Atomically reserve inventory and create Order entity
+        for q_item in quote.items:
+            inv_stmt = select(InventoryItem).where(InventoryItem.variant_id == q_item.variant_id)
+            inv = (await session.execute(inv_stmt)).scalar_one_or_none()
+            if inv is not None:
+                if inv.available_quantity < q_item.quantity + inv.safety_threshold:
+                    raise ValueError(
+                        f"Insufficient stock for variant '{q_item.variant_id}': "
+                        f"requested {q_item.quantity}, available {inv.available_quantity} "
+                        f"(safety threshold: {inv.safety_threshold})"
+                    )
+                new_avail = inv.available_quantity - q_item.quantity
+                new_res = inv.reserved_quantity + q_item.quantity
+                await update_with_version_check(
+                    session=session,
+                    model_class=InventoryItem,
+                    entity_id=inv.id,
+                    expected_version=inv.version,
+                    values={"available_quantity": new_avail, "reserved_quantity": new_res},
+                )
+                inv.available_quantity = new_avail
+                inv.reserved_quantity = new_res
+                inv.version += 1
+
         order = Order(
             quote_id=quote.id,
             merchant_id=quote.merchant_id,
@@ -307,9 +319,11 @@ class PaymentService:
         pw_stmt = select(ProcessedWebhook).where(ProcessedWebhook.payload_hash == payload_hash)
         existing_pw = (await session.execute(pw_stmt)).scalar_one_or_none()
         if existing_pw:
-            if existing_pw.status == "PROCESSED":
+            if existing_pw.status in {"PROCESSED", "IGNORED"}:
                 logger.info(
-                    "Atomic webhook deduplication: payload %s already processed", payload_hash
+                    "Atomic webhook deduplication: payload %s already terminal (status=%s)",
+                    payload_hash,
+                    existing_pw.status,
                 )
                 return {
                     "status": "DUPLICATE_IGNORED",
@@ -416,7 +430,10 @@ class PaymentService:
                 received_order_id=pay_order_id,
             )
 
-        currency = payment_data.get("currency") or order_data.get("currency")
+        # Currency MUST come exclusively from the payment entity — never from order_data.
+        # Falling back to order_data would allow a cross-currency attack to silently pass
+        # verification (INV-FIN-05 fail-closed).
+        currency = payment_data.get("currency")
 
         # 4. Handle event types
         if event_name in {"order.paid", "payment.captured"}:
@@ -843,7 +860,6 @@ class PaymentService:
                             quote=quote, rzp_order_id=rzp_order_id, outcome="FAILED"
                         )
 
-        # Fallback: Check if Razorpay already holds an order for this deterministic receipt
         receipt_id = f"ord_{quote.id.hex[:32]}"
         try:
             remote_by_receipt = await rzp_client.fetch_order_by_receipt(receipt_id)
@@ -859,8 +875,25 @@ class PaymentService:
                 )
                 await cls._record_external_attempt(quote=quote, rzp_order=remote_by_receipt)
                 return remote_by_receipt
-        except Exception as exc:
-            logger.debug("Receipt fallback query ignored: %s", exc)
+        except (
+            RazorpayTimeoutError,
+            RazorpayNetworkError,
+            RazorpayRateLimitError,
+            RazorpayServerError,
+        ):
+            # Transient ambiguity (timeout, network drop, rate-limit, 5xx): re-raise so the
+            # caller does NOT proceed to create_order, preventing duplicate remote order
+            # creation if Razorpay already created one for this receipt (fix: Issue 2 / INV-FIN-04).
+            raise
+
+        except (RazorpayError, Exception) as exc:
+            # Definitively no order exists for this receipt (404 Not Found, empty items, or
+            # unmocked client) — safe to proceed with fresh order creation.
+            logger.debug(
+                "Receipt '%s' query not found or ignored (%s); proceeding with new order",
+                receipt_id,
+                exc,
+            )
 
         return None
 

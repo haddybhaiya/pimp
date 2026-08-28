@@ -56,10 +56,15 @@ class TransactionRecordBase(BaseModel):
 
 
 class TransactionRecordCreate(TransactionRecordBase):
-    """Schema for creating a transaction record."""
+    """Schema for creating a transaction record.
+
+    settlement_ref is required here to match the NOT NULL database constraint on
+    transaction_records.settlement_ref (fix: Issue 6 — schema/model consistency).
+    """
 
     payment_attempt_id: uuid.UUID
     merchant_id: uuid.UUID
+    settlement_ref: str  # Override base: required on create, non-nullable in DB
 
 
 class TransactionRecordRead(TransactionRecordBase):

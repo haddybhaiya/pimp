@@ -179,11 +179,18 @@ class AuditEvent(Base):
         if not events:
             return True, None
 
-        # Build map: prev_event_hash -> list of child events
+        # Build map: prev_event_hash -> list of child events.
+        # Reject any event whose prev_event_hash is NULL — root events must store the explicit
+        # GENESIS_HASH sentinel. A NULL indicates storage tampering (INV-STA-05).
         prev_map: dict[str, list[AuditEvent]] = {}
         for ev in events:
-            prev = ev.prev_event_hash or cls.GENESIS_HASH
-            prev_map.setdefault(prev, []).append(ev)
+            if ev.prev_event_hash is None:
+                return (
+                    False,
+                    f"Tampered chain: event {ev.id} has NULL prev_event_hash; "
+                    "root events must store explicit GENESIS_HASH sentinel",
+                )
+            prev_map.setdefault(ev.prev_event_hash, []).append(ev)
 
         curr_hash = cls.GENESIS_HASH
         verified_count = 0
@@ -195,8 +202,9 @@ class AuditEvent(Base):
                     f"Chain fork detected: multiple events reference parent hash '{curr_hash}'",
                 )
             ev = children[0]
+            assert ev.prev_event_hash is not None
             expected_digest = cls.compute_digest(
-                prev_hash=ev.prev_event_hash or cls.GENESIS_HASH,
+                prev_hash=ev.prev_event_hash,
                 merchant_id=ev.merchant_id,
                 session_id=ev.session_id,
                 actor_type=ev.actor_type,
