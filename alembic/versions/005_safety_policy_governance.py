@@ -32,7 +32,7 @@ def upgrade() -> None:
         sa.Column(
             "quote_id",
             sa.UUID(),
-            sa.ForeignKey("price_quotes.id", ondelete="CASCADE"),
+            sa.ForeignKey("price_quotes.id", ondelete="RESTRICT"),
             nullable=True,
         ),
         sa.Column(
@@ -71,6 +71,14 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "approval_type IN ('QUOTE_DISCOUNT', 'ORDER_LIMIT', 'GENERAL')",
             name="ck_merchant_approvals_type_valid",
+        ),
+        sa.CheckConstraint(
+            "requested_amount_paise >= 0",
+            name="ck_merchant_approvals_requested_amount_non_negative",
+        ),
+        sa.CheckConstraint(
+            "proposed_discount_paise >= 0",
+            name="ck_merchant_approvals_proposed_discount_non_negative",
         ),
     )
     op.create_index("ix_merchant_approvals_merchant_id", "merchant_approvals", ["merchant_id"])

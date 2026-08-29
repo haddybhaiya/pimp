@@ -745,8 +745,18 @@ class MerchantApprovalItem(BaseModel):
     session_id: uuid.UUID | None = Field(default=None, description="Originating session ID")
     approval_type: str = Field(..., description="Type of approval ticket")
     status: str = Field(..., description="Ticket status (PENDING, APPROVED, REJECTED, EXPIRED)")
-    requested_amount_paise: int = Field(..., description="Requested proposal total in paise")
-    proposed_discount_paise: int = Field(..., description="Proposed discount in paise")
+    requested_amount_paise: int = Field(
+        ...,
+        ge=0,
+        le=MAX_64BIT_INT,
+        description="Requested proposal total in paise",
+    )
+    proposed_discount_paise: int = Field(
+        ...,
+        ge=0,
+        le=MAX_64BIT_INT,
+        description="Proposed discount in paise",
+    )
     policy_rule_code: str = Field(..., description="Policy rule code that triggered escalation")
     reason: str = Field(..., description="Reason for escalation")
     expires_at: datetime = Field(..., description="Approval ticket expiration timestamp")

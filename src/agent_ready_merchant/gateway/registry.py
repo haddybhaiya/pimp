@@ -346,6 +346,8 @@ class CapabilityRegistry:
                 "APPROVAL_EXPIRED",
                 "QUOTE_NOT_FOUND",
                 "QUOTE_EXPIRED",
+                "INVALID_STATE_TRANSITION",
+                "CAPABILITY_DENIED",
                 "UNAUTHORIZED",
             ],
         ),
@@ -362,7 +364,7 @@ class CapabilityRegistry:
             required_capability="merchant:admin",
             approval_requirement="NONE",
             idempotency_requirement=False,
-            failure_states=["UNAUTHORIZED"],
+            failure_states=["CAPABILITY_DENIED", "UNAUTHORIZED"],
         ),
     }
 

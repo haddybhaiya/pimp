@@ -863,6 +863,20 @@ class CanonicalCommerceGateway:
                 "create_order", "CAPABILITY_DENIED", auth_err or "Unauthorized"
             )
 
+        # Check quote existence and session binding (uniform not-found protection)
+        q_stmt = select(PriceQuote).where(
+            PriceQuote.id == request.quote_id,
+            PriceQuote.merchant_id == context.merchant_id,
+            PriceQuote.session_id == context.session_id,
+        )
+        bound_quote = (await session.execute(q_stmt)).scalar_one_or_none()
+        if not bound_quote:
+            return self._rejected_envelope(
+                "create_order",
+                "QUOTE_NOT_FOUND",
+                f"PriceQuote '{request.quote_id}' not found for active merchant and session.",
+            )
+
         settings = get_settings()
         rzp_client = self.rzp_client or RazorpayClient(
             key_id=settings.RAZORPAY_KEY_ID,
@@ -1584,6 +1598,50 @@ class CanonicalCommerceGateway:
                 f"Counter-offer rejected by policy: {eval_res.reason}",
             )
         elif eval_res.verdict == PolicyVerdict.ESCALATE_APPROVAL:
+            # Check for existing active PENDING approval ticket on this quote
+            existing_appr_stmt = select(MerchantApproval).where(
+                MerchantApproval.quote_id == quote.id,
+                MerchantApproval.status == "PENDING",
+            )
+            existing_appr = (await session.execute(existing_appr_stmt)).scalar_one_or_none()
+            if existing_appr:
+                existing_exp = (
+                    existing_appr.expires_at
+                    if existing_appr.expires_at.tzinfo is not None
+                    else existing_appr.expires_at.replace(tzinfo=UTC)
+                )
+                if now <= existing_exp:
+                    # Return existing pending approval without creating duplicate rows or audits
+                    resp_data = NegotiateQuoteGatewayResponse(
+                        quote_id=quote.id,
+                        status="PENDING_APPROVAL",
+                        currency="INR",
+                        subtotal_paise=quote.subtotal_paise,
+                        discount_paise=quote.discount_paise,
+                        shipping_paise=quote.shipping_paise,
+                        total_paise=quote.total_paise,
+                        verdict="ESCALATE_APPROVAL",
+                        rule_code=existing_appr.policy_rule_code,
+                        reason=(
+                            "Counter-offer requires merchant human approval: "
+                            f"{existing_appr.reason}"
+                        ),
+                        expires_at=quote.expires_at,
+                    )
+                    return GatewayResponseEnvelope[NegotiateQuoteGatewayResponse](
+                        status="SUCCESS",
+                        capability="negotiate_quote",
+                        data=resp_data,
+                    )
+                else:
+                    existing_appr.status = "EXPIRED"
+                    existing_appr.resolved_at = now
+                    await session.flush()
+
+            # Advance quote version to track negotiation rounds without prematurely mutating status
+            quote.version += 2
+            await session.flush()
+
             # Persist authoritative MerchantApproval ticket (Phase 4.2 HITL Gate)
             approval_exp = min(
                 quote_expires,
@@ -1981,6 +2039,22 @@ class CanonicalCommerceGateway:
             approval.status = "EXPIRED"
             approval.resolved_at = now
             await session.flush()
+
+            await AuditEvent.create_event(
+                session=session,
+                merchant_id=context.merchant_id,
+                actor_type=context.actor_type,
+                event_type="MERCHANT_APPROVAL_EXPIRED",
+                payload={
+                    "approval_id": str(approval.id),
+                    "quote_id": str(approval.quote_id) if approval.quote_id else None,
+                    "request_id": str(context.request_id),
+                    "policy_decision_hash": approval.policy_decision_hash,
+                    "expired_at": appr_exp.isoformat(),
+                },
+                session_id=approval.session_id,
+            )
+
             return self._rejected_envelope(
                 "resolve_approval",
                 "APPROVAL_EXPIRED",
@@ -2167,8 +2241,14 @@ class CanonicalCommerceGateway:
                 "list_approvals", "CAPABILITY_DENIED", auth_err or "Unauthorized"
             )
 
+        now = datetime.now(UTC)
         stmt = select(MerchantApproval).where(MerchantApproval.merchant_id == context.merchant_id)
-        if request.status:
+        if request.status == "PENDING":
+            stmt = stmt.where(
+                MerchantApproval.status == "PENDING",
+                MerchantApproval.expires_at > now,
+            )
+        elif request.status:
             stmt = stmt.where(MerchantApproval.status == request.status)
 
         count_stmt = select(func.count()).select_from(stmt.subquery())
@@ -2224,6 +2304,15 @@ class CanonicalCommerceGateway:
         settings = get_settings()
         request_id = context.request_id or uuid.uuid4()
         idempotency_key = payload.get("idempotency_key") or context.idempotency_key
+
+        # 0. Actor Type Verification (Fail-Closed)
+        if context.actor_type not in {"BUYER_AGENT", "MERCHANT_ADMIN", "SYSTEM"}:
+            return self._rejected_envelope(
+                capability_name,
+                "AUTH_INVALID_ACTOR_TYPE",
+                f"Unknown or untrusted actor type '{context.actor_type}'.",
+                request_id=request_id,
+            )
 
         # 1. Check capability registration
         cap_def = CapabilityRegistry.get_capability(capability_name)
@@ -2365,6 +2454,12 @@ class CanonicalCommerceGateway:
         elif not has_session and context.actor_type == "BUYER_AGENT":
             # Anonymous public discovery context is strictly bounded to read capabilities
             context.capabilities = context.capabilities & {"buyer:discover", "buyer:read"}
+
+        elif context.actor_type == "MERCHANT_ADMIN":
+            context.capabilities = context.capabilities & {"merchant:admin"}
+
+        elif context.actor_type == "SYSTEM":
+            context.capabilities = context.capabilities & {"merchant:admin", "system:reconcile"}
 
         # 1g. Authoritative Capability Authorization Gate
         auth_ok, auth_err = CapabilityRegistry.check_authorization(capability_name, context)
