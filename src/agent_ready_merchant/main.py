@@ -5,11 +5,14 @@ Establishes the deterministic application lifecycle for the Agent-Ready Merchant
 
 import logging
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -97,16 +100,25 @@ def create_app() -> FastAPI:
             "database_connected": db_healthy,
         }
 
+    static_dir = Path(__file__).parent / "static"
+    if (static_dir / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="assets")
+
     @app.get(
         "/",
-        summary="Platform Root Descriptor",
+        summary="Platform Root Descriptor & Web Surface",
         tags=["System"],
         status_code=status.HTTP_200_OK,
     )
     async def root_descriptor(
+        request: Request,
         current_settings: Settings = Depends(get_settings),
-    ) -> dict[str, Any]:
-        """Returns machine-readable platform metadata."""
+    ) -> Any:
+        """Returns machine-readable metadata or web control plane surface based on Accept header."""
+        accept_header = request.headers.get("accept", "")
+        index_file = static_dir / "index.html"
+        if "text/html" in accept_header and index_file.exists():
+            return FileResponse(str(index_file), media_type="text/html")
         return {
             "name": "Agent-Ready Merchant Platform",
             "version": agent_ready_merchant.__version__,
@@ -114,6 +126,38 @@ def create_app() -> FastAPI:
             "docs_url": "/docs",
             "environment": current_settings.ENVIRONMENT,
         }
+
+    # SPA Client-Side Routing Fallbacks for Web Control Plane
+    for web_route in [
+        "/login",
+        "/signup",
+        "/onboarding",
+        "/dashboard",
+        "/approvals",
+        "/catalog",
+        "/orders",
+        "/policies",
+        "/audit",
+    ]:
+
+        def _make_route_handler(route_name: str) -> Callable[[], Awaitable[Any]]:
+            async def _handler() -> Any:
+                index_file = static_dir / "index.html"
+                if index_file.exists():
+                    return FileResponse(str(index_file), media_type="text/html")
+                return HTMLResponse(
+                    "<html><body><h1>Agent-Ready Merchant Control Plane</h1></body></html>"
+                )
+
+            return _handler
+
+        app.add_api_route(
+            web_route,
+            _make_route_handler(web_route),
+            methods=["GET"],
+            include_in_schema=False,
+            response_class=HTMLResponse,
+        )
 
     @app.post(
         "/api/v1/payments/webhook",
@@ -754,6 +798,109 @@ def create_app() -> FastAPI:
 
         envelope = await gateway_instance.execute_capability(db, capability, payload, ctx)
         return acp_adapter.from_canonical_envelope(capability, envelope, msg)
+
+    # =========================================================================
+    # Merchant Auth & Portal Control Plane Endpoints (Phase 5.1)
+    # =========================================================================
+    from agent_ready_merchant.schemas.merchant_auth import (
+        MerchantAuthResponse,
+        MerchantLoginRequest,
+        MerchantProfileResponse,
+        MerchantSetupRequest,
+        MerchantSignupRequest,
+    )
+    from agent_ready_merchant.services.merchant_auth_service import MerchantAuthService
+
+    @app.post(
+        "/api/v1/merchant/auth/signup",
+        summary="Merchant Registration & Store Creation",
+        tags=["Merchant Portal"],
+        response_model=MerchantAuthResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def merchant_signup_endpoint(
+        req: MerchantSignupRequest,
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> MerchantAuthResponse:
+        """Registers a new merchant, seeds initial policy bounds, and issues admin session."""
+        try:
+            return await MerchantAuthService.register_merchant(db, req, current_settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/merchant/auth/login",
+        summary="Merchant Admin Login",
+        tags=["Merchant Portal"],
+        response_model=MerchantAuthResponse,
+        status_code=status.HTTP_200_OK,
+    )
+    async def merchant_login_endpoint(
+        req: MerchantLoginRequest,
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> MerchantAuthResponse:
+        """Authenticates merchant by slug and issues active bearer session."""
+        try:
+            return await MerchantAuthService.authenticate_merchant(db, req, current_settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/merchant/auth/me",
+        summary="Get Authenticated Merchant Profile",
+        tags=["Merchant Portal"],
+        response_model=MerchantProfileResponse,
+    )
+    async def merchant_me_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> MerchantProfileResponse:
+        """Fetches active merchant profile and policy configuration."""
+        if x_auth_token:
+            secret = current_settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
+            is_valid, tok_m_id, err = MerchantAuthService.verify_admin_token(x_auth_token, secret)
+            if not is_valid or tok_m_id != x_merchant_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=err or "Invalid or expired admin session token.",
+                )
+
+        try:
+            return await MerchantAuthService.get_merchant_profile(db, x_merchant_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/merchant/setup/complete",
+        summary="Complete Onboarding & Update Policies",
+        tags=["Merchant Portal"],
+        response_model=MerchantProfileResponse,
+    )
+    async def merchant_complete_setup_endpoint(
+        req: MerchantSetupRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> MerchantProfileResponse:
+        """Updates merchant profile and policy bounds upon setup wizard completion."""
+        if x_auth_token:
+            secret = current_settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
+            is_valid, tok_m_id, err = MerchantAuthService.verify_admin_token(x_auth_token, secret)
+            if not is_valid or tok_m_id != x_merchant_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=err or "Invalid or expired admin session token.",
+                )
+
+        try:
+            return await MerchantAuthService.complete_merchant_setup(db, x_merchant_id, req)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     return app
 
