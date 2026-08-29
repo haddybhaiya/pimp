@@ -93,3 +93,15 @@
 - **CONFIDENCE:** 100%
 - **FAILURE IF WRONG:** Runaway discounts below merchant safety margins, unexplainable pricing decisions, retroactive audit invalidation when merchant rules change, or secret/PII leaks into compliance logs.
 - **MITIGATION:** Deterministic SHA-256 policy hashing (`compute_policy_hash()`), hard platform safety ceilings (max 20 items, max 50% discount, max ₹1,00,000 transaction, max 3 negotiation rounds), `MerchantApproval` tickets with explicit expirations and optimistic locking, `sanitize_audit_payload()` redaction of credentials/PII, and authoritative DB policy loading against non-admin callers.
+
+---
+
+### 10. Untrusted Browser Client & Server-Authoritative Merchant Control Plane
+- **ASSUMPTION:** The browser is an untrusted client and must never hold authoritative state over pricing, discounts, floor margins, inventory stock, payment capture, settlement states, or HITL approval resolution.
+- **EVIDENCE:** Verified via `tests/test_phase5_2_merchant_control_plane.py` (all 6 operations and tenant isolation tests passing) and `frontend/tests/portal-views.test.tsx` (all 6 view interaction suites passing).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Price manipulation, bypassing merchant floor prices or approval gates, stock overselling, or unauthorized cross-tenant data modification.
+- **MITIGATION:** All operations route through authenticated `/api/v1/merchant/...` endpoints backed by `MerchantPortalService`, enforcing server-side HMAC token verification, optimistic concurrency row locking, floor price margin invariant checks (`floor_price <= base_price`), platform policy ceilings, and cryptographic SHA-256 audit hash chain verification.
+
+

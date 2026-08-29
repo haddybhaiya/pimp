@@ -26,22 +26,26 @@
 | **Phase 4.1** | Security Boundary & Authorization Hardening | **COMPLETED** | Server-authoritative identity, constant-time token verification, mandatory session boundary on privileged/stateful capabilities, anti-resource existence probing, adversarial verification |
 | **Phase 4.2** | Safety, Policy & Governance Kernel | **COMPLETED** | Centralized policy decision records, immutable audit linkage, deterministic policy hashing, HITL approval gate, platform governance ceilings, zero secret/PII audit sanitization |
 | **Phase 5.1** | Web Foundation & Public Surface | **COMPLETED** | Public landing page, merchant authentication, setup wizard, authenticated SPA shell, responsive component tokens, typed API client, error normalization |
-| **Phase 5.2** | Merchant Admin Portal Views & HITL Operations | **NOT STARTED** | Approvals UI, catalog editor, orders & settlements, policy config, audit viewer |
+| **Phase 5.2** | Merchant Admin Portal Views & HITL Operations | **COMPLETED** | Approvals UI, catalog editor, inventory manager, orders & settlements, policy config, audit viewer |
 
 ---
 
-## Phase 5.1 Deliverables Completed
+## Phase 5.2 Deliverables Completed
 
-- [x] **Public Landing Page Surface:** Modern, responsive public hero surface highlighting autonomous AI commerce capabilities, ACP protocol support, policy governance, and live interactive protocol visualizer.
-- [x] **Server-Authoritative Merchant Authentication:** Implemented `MerchantAuthService` with HMAC SHA-256 signed bearer tokens, slug-based registration (`/api/v1/merchant/auth/signup`), login (`/api/v1/merchant/auth/login`), profile retrieval (`/api/v1/merchant/auth/me`), and multi-tenant isolation.
-- [x] **Multi-Step Onboarding / Setup Flow:** 4-step guided setup wizard (Store Identity -> Razorpay Settlement Gateway -> Autonomous Policy Bounds -> Review & Activation) with atomic persistence of seeded `PolicyRule` records.
-- [x] **Authenticated Application Shell & Navigation:** Desktop sidebar + mobile collapsible navigation drawer, active merchant context display, environment badge, session expiration detection, and route guards.
-- [x] **Reusable Accessible UI Component System:** Standardized foundational primitives (`Button`, `Input`, `Badge`, `Card`, `Dialog`, `StepIndicator`, `Skeleton`, `EmptyState`) respecting design tokens and zero secret leakage.
-- [x] **Strict Typed API Client Layer:** Frontend `ApiClient` handling standard headers (`X-Merchant-ID`, `X-Auth-Token`, `Authorization`), automatic 401/403 session expiration interception, and `ApiError` normalization.
-- [x] **Dual-Mode Root Endpoint & Static SPA Serving:** FastAPI serves compiled SPA assets (`src/agent_ready_merchant/static`) for browser visits across all web routes while preserving JSON metadata descriptors for API clients.
-- [x] **Test Verification Matrix:**
-  - Frontend: 17 unit and integration tests passing in Vitest (`api-client.test.ts`, `auth-store.test.tsx`, `ui-components.test.tsx`, `onboarding.test.tsx`, `router.test.tsx`).
-  - Backend: 11 integration tests passing in pytest (`tests/test_phase5_1_web_foundation.py`).
-- [x] **Full Quality Gate Compliance:** 100% clean passes on `ruff format`, `ruff check`, `mypy (strict)`, Vitest (17 tests), and Pytest (244 passing tests across all test suites, 2 skipped, 84% coverage).
+- [x] **Authoritative Merchant Dashboard:** Overview page with live aggregated metrics (active products count, order volumes, revenue in ₹, pending HITL approvals, policy fingerprint, autonomy state) without fake client analytics.
+- [x] **Product Catalog & Floor Price Enforcement:** Authoritative catalog management with floor price invariant protection (`floor_price <= base_price`), duplicate SKU prevention, category indexing, and live stock tracking.
+- [x] **Real-Time Inventory Management:** Stock ledger with optimistic concurrency locking, quantity threshold warnings, and strict non-negative delta adjustments.
+- [x] **Quotes & Price Negotiation Trace:** Comprehensive quote ledger showing line items, state machine transitions (`DRAFT` -> `PROPOSED` -> `ACCEPTED`), discount breakdowns, and negotiation histories.
+- [x] **Orders & Out-of-Band Payment Reconciliation:** Authoritative order ledger displaying payment attempts, Razorpay order IDs, capture statuses, and manual reconciliation triggers against Razorpay.
+- [x] **Payments & Capture Tracking:** Authoritative payment ledger tracking individual Razorpay payment attempts, capture statuses, and payment methods.
+- [x] **Human-In-The-Loop (HITL) Approvals Queue:** Dedicated approval workbench supporting status filtering (`PENDING`, `APPROVED`, `REJECTED`), expiration checks, note capture, and atomic quote term adjustments upon approval resolution.
+- [x] **Policy & Governance Rules Editor:** Dynamic autonomy and safety boundary configuration interface enforcing platform ceilings ($\le 50\%$ discount, $\le 100\%$ margin) and live deterministic SHA-256 policy hash preview.
+- [x] **Cryptographic Audit Trail Inspector:** Immutable audit ledger viewer with real-time SHA-256 hash chain verification badge, previous hash linking, and actor/payload inspector.
+- [x] **Store Settings & Public ACP Endpoints:** Merchant store profile details and copyable ACP protocol endpoint URLs.
+- [x] **Multi-Tenant Isolation & Security Matrix:** Server-authoritative isolation preventing cross-tenant data leakage or mutation across all endpoints.
+- [x] **Comprehensive Test Verification Matrix:**
+  - Frontend: 23 unit and integration tests passing in Vitest (`api-client.test.ts`, `auth-store.test.tsx`, `ui-components.test.tsx`, `onboarding.test.tsx`, `router.test.tsx`, `portal-views.test.tsx`).
+  - Backend: 6 comprehensive integration tests in pytest (`tests/test_phase5_2_merchant_control_plane.py`).
+- [x] **Full Quality Gate Compliance:** 100% clean passes on `ruff format`, `ruff check`, `mypy (strict)`, Vitest (23 tests), and Pytest (250 passing tests across all test suites, 2 skipped, 84% coverage).
 
 

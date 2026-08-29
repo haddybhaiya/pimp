@@ -613,6 +613,39 @@ Phase 5.1 establishes the production web foundation and merchant public surface 
 - `INV-AGY-03`: Zero secret leakage — API key secrets and webhook secrets remain in server environment and are never sent to or stored in the browser.
 - Multi-tenant token isolation: Cryptographic tokens verify merchant ID match; cross-tenant profile reads return 401 Unauthorized.
 
+---
+
+# Phase 5.2: Merchant Control Plane Operations & HITL Management Review Report
+
+### 1. Scope & Execution Summary
+Phase 5.2 implements the authenticated merchant control plane around the existing canonical backend:
+- **Authoritative Dashboard:** Real-time summary aggregates (active products, orders, total revenue paise, pending approvals count, policy hash, autonomy level) rendered directly from backend state without fabricated client metrics.
+- **Product Catalog Management:** Product listing, detail views, and interactive creation dialog enforcing floor price invariants (`floor_price <= base_price`), duplicate SKU prevention, category indexing, and live stock tracking.
+- **Inventory Management:** Stock ledger with optimistic concurrency locking, quantity threshold warnings, and strict non-negative delta adjustments.
+- **Quotes & Price Negotiation Trace:** Comprehensive quote ledger showing line items, state machine transitions (`DRAFT` -> `PROPOSED` -> `ACCEPTED`), discount breakdowns, and multi-round negotiation histories.
+- **Orders & Payments Management:** Authoritative order ledger displaying payment attempts, Razorpay order IDs, capture statuses, and manual reconciliation triggers against Razorpay.
+- **Human-In-The-Loop (HITL) Approvals Queue:** Dedicated approval workbench supporting status filtering (`PENDING`, `APPROVED`, `REJECTED`), expiration checks, note capture, and atomic quote term adjustments upon approval resolution.
+- **Policy Governance Rules Editor:** Dynamic autonomy and safety boundary configuration interface enforcing platform ceilings ($\le 50\%$ discount, $\le 100\%$ margin) and live deterministic SHA-256 policy hash preview.
+- **Cryptographic Audit Trail Inspector:** Immutable audit ledger viewer with real-time SHA-256 hash chain verification badge (`AuditEvent.verify_chain()`), previous hash linking, and actor/payload inspector.
+- **Merchant Settings:** Merchant store profile details and copyable ACP protocol endpoint URLs.
+- **Backend Service & REST Endpoints:** `MerchantPortalService` (`src/agent_ready_merchant/services/merchant_portal_service.py`) and schemas (`src/agent_ready_merchant/schemas/merchant_portal.py`) mounted at `/api/v1/merchant/...`.
+
+### 2. Quality Gate Verification
+- **Formatting (`ruff format --check .`):** 100% PASS (131 files checked)
+- **Linting (`ruff check .`):** 100% PASS (0 lint errors)
+- **Type Checking (`mypy src tests`):** 100% PASS (125 source files, 0 errors)
+- **Frontend Test Suite (`npm test` in `frontend/`):** 100% PASS (23 tests passing across 6 test files)
+- **Frontend Build (`npm run build` in `frontend/`):** 100% PASS (Vite production bundle compiled cleanly to `src/agent_ready_merchant/static/`)
+- **Backend Test Suite (`pytest`):** 100% PASS (250 passed, 2 skipped, 84% coverage)
+
+### 3. Invariants & Security Matrix Verified
+- `INV-FIN-01`: Integer paise representation enforced on all financial mutations, displays, and adjustments.
+- `INV-FIN-02`: Floor price guarantee enforced server-side on product creation and quote mutations.
+- `INV-AGY-01`: Separation of intelligence and authority strictly preserved; browser client is untrusted and cannot dictate financial or transaction state.
+- `INV-AGY-03`: Zero secret leakage — API key secrets and webhook secrets are strictly excluded from API responses and frontend views.
+- Multi-Tenant Isolation: Cross-tenant operations strictly rejected fail-closed (401 Unauthorized) across all control plane routes.
+
+
 
 
 

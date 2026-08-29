@@ -194,4 +194,21 @@
   - *Positive:* Delivers a complete, tested, responsive web foundation for the Agent-Ready Merchant control plane that seamlessly interfaces with existing canonical gateway and settlement endpoints.
   - *Negative:* Frontend assets require compilation with `npm run build` during distribution.
 
+---
+
+## ADR-016: Merchant Control Plane Operations & Human-In-The-Loop (HITL) Management
+
+- **Status:** ACCEPTED
+- **Context:** Operating autonomous agent-ready storefronts requires comprehensive merchant administrative surfaces: KPI overview, catalog management, inventory tracking, quotes and negotiations ledger, orders and payments management, policy governance configuration, HITL approval queue, and immutable audit trail verification. In accordance with the foundational separation of intelligence and authority ($\text{Intelligence} \neq \text{Authority}$, `INV-AGY-01`), the browser client is untrusted and must never hold authoritative state over pricing, margins, capabilities, payment settlements, or approvals.
+- **Decision:**
+  1. **Server-Authoritative Control Plane Endpoints:** Implemented authenticated REST endpoints under `/api/v1/merchant/...` backed by `MerchantPortalService`. Every request enforces HMAC-signed token validation, multi-tenant isolation, optimistic concurrency locking, and integer paise monetary arithmetic.
+  2. **Authoritative Human Approval Queue:** Dedicated workbench for reviewing escalated proposals. Approving or rejecting a ticket updates `MerchantApproval` records with optimistic concurrency control, mutates underlying quote terms and statuses, and emits cryptographically signed audit events.
+  3. **Policy Governance & Live Fingerprinting:** Merchant policy configurations are governed with platform-enforced hard ceilings (maximum 50% discount rate, 100% margin constraint). Updates dynamically re-calculate the SHA-256 `policy_hash` directly on the server.
+  4. **Cryptographic Chain Verification:** The control plane provides real-time verification of the immutable append-only `audit_events` hash chain (`AuditEvent.verify_chain()`), surfacing cryptographic tampering detection badges directly on the UI.
+  5. **Out-of-Band Payment Reconciliation:** Store operators can trigger server-side reconciliation for any order directly against Razorpay's authoritative payments API to resolve asynchronous delivery gaps.
+- **Consequences:**
+  - *Positive:* Full visibility and operational control over autonomous store actions with tamper-evident audit trails and zero secret exposure.
+  - *Negative:* All admin actions require active backend network roundtrips to maintain authoritative state.
+
+
 
