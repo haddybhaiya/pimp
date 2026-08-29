@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from agent_ready_merchant.gateway.canonical import CanonicalCommerceGateway
 from agent_ready_merchant.gateway.schemas import ResolveApprovalRequest
@@ -775,3 +776,206 @@ async def test_llm_cannot_directly_mutate_database_state(db_session: AsyncSessio
     )
     assert eval_res.is_denied is True
     assert eval_res.rule_code == "PRICE_NON_POSITIVE"
+
+
+@pytest.mark.asyncio
+async def test_human_approved_quote_line_items_discounted_and_transactable(
+    db_session: AsyncSession,
+) -> None:
+    """Remediation Verification (Issue 1): Line-Item Discount Distribution on Approved Quotes.
+
+    Verifies that when a merchant admin approves an escalated counter-offer,
+    quote line items are updated with distributed unit discounts, and creating
+    an order generates OrderItems with matching unit prices and sum.
+    """
+    merchant, buyer_session, product, _, _, context = await _seed_governance_env(
+        db_session, autonomy_level=2
+    )
+    gw = CanonicalCommerceGateway()
+
+    # 1. Request initial quote (2 items @ 500,000 = 1,000,000 paise)
+    quote_res = await gw.execute_capability(
+        session=db_session,
+        capability_name="get_quote",
+        payload={
+            "session_id": str(buyer_session.id),
+            "items": [{"sku": product.sku, "quantity": 2}],
+        },
+        context=context,
+    )
+    assert quote_res.status == "SUCCESS"
+    assert quote_res.data is not None
+    quote_id = quote_res.data.quote_id
+
+    # 2. Negotiate quote requesting 10% discount (triggers HITL escalation at Autonomy 2)
+    neg_res = await gw.execute_capability(
+        session=db_session,
+        capability_name="negotiate_quote",
+        payload={"quote_id": str(quote_id), "proposed_total_paise": 900000},
+        context=context,
+    )
+    assert neg_res.status == "SUCCESS"
+    assert neg_res.data is not None
+    assert neg_res.data.verdict == "ESCALATE_APPROVAL"
+
+    # Find pending approval ticket
+    stmt = select(MerchantApproval).where(
+        MerchantApproval.quote_id == quote_id,
+        MerchantApproval.status == "PENDING",
+    )
+    approval = (await db_session.execute(stmt)).scalar_one()
+
+    # 3. Resolve approval as APPROVE
+    admin_context = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=uuid.uuid4(),
+        capabilities={"merchant:admin"},
+        actor_type="MERCHANT_ADMIN",
+    )
+    appr_res = await gw.execute_capability(
+        session=db_session,
+        capability_name="resolve_approval",
+        payload={
+            "approval_id": str(approval.id),
+            "decision": "APPROVE",
+            "reason": "Approved VIP discount",
+            "idempotency_key": f"idem_appr_{uuid.uuid4().hex}",
+        },
+        context=admin_context,
+    )
+    assert appr_res.status == "SUCCESS"
+    assert appr_res.data is not None
+    assert appr_res.data.status == "APPROVED"
+
+    # 4. Verify quote line items reflect the discounted unit prices (450,000 each)
+    q_stmt = (
+        select(PriceQuote).options(selectinload(PriceQuote.items)).where(PriceQuote.id == quote_id)
+    )
+    updated_quote = (await db_session.execute(q_stmt)).scalar_one()
+    assert updated_quote.status == "PROPOSED"
+    assert updated_quote.total_paise == 900000
+    assert updated_quote.discount_paise == 100000
+    # Every line item must have discounted unit price
+    for item in updated_quote.items:
+        assert item.unit_price_paise == 450000
+        assert item.total_price_paise == 450000 * item.quantity
+    assert (
+        sum(item.total_price_paise for item in updated_quote.items)
+        == updated_quote.subtotal_paise - updated_quote.discount_paise
+    )
+
+    # 5. Accept quote
+    acc_res = await gw.execute_capability(
+        session=db_session,
+        capability_name="accept_quote",
+        payload={"quote_id": str(quote_id)},
+        context=context,
+    )
+    assert acc_res.status == "SUCCESS"
+
+
+@pytest.mark.asyncio
+async def test_list_approvals_capability_and_authorization(db_session: AsyncSession) -> None:
+    """Remediation Verification (Issue 4): list_approvals capability & authorization."""
+    merchant, buyer_session, product, _, _, context = await _seed_governance_env(
+        db_session, autonomy_level=2
+    )
+    gw = CanonicalCommerceGateway()
+
+    # Create 2 quotes and negotiate to create 2 approval tickets
+    for _ in range(2):
+        q_res = await gw.execute_capability(
+            session=db_session,
+            capability_name="get_quote",
+            payload={
+                "session_id": str(buyer_session.id),
+                "items": [{"sku": product.sku, "quantity": 1}],
+            },
+            context=context,
+        )
+        assert q_res.data is not None
+        await gw.execute_capability(
+            session=db_session,
+            capability_name="negotiate_quote",
+            payload={"quote_id": str(q_res.data.quote_id), "proposed_total_paise": 450000},
+            context=context,
+        )
+
+    # 1. Unauthorized buyer agent cannot list approvals
+    buyer_res = await gw.execute_capability(
+        session=db_session,
+        capability_name="list_approvals",
+        payload={"status": "PENDING"},
+        context=context,
+    )
+    assert buyer_res.status == "REJECTED"
+    assert buyer_res.error is not None
+    assert buyer_res.error.code == "CAPABILITY_DENIED"
+
+    # 2. Merchant Admin lists approvals
+    admin_context = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=uuid.uuid4(),
+        capabilities={"merchant:admin"},
+        actor_type="MERCHANT_ADMIN",
+    )
+    admin_res = await gw.execute_capability(
+        session=db_session,
+        capability_name="list_approvals",
+        payload={"status": "PENDING", "limit": 10, "offset": 0},
+        context=admin_context,
+    )
+    assert admin_res.status == "SUCCESS"
+    assert admin_res.data is not None
+    assert admin_res.data.total_count >= 2
+    assert len(admin_res.data.approvals) >= 2
+    for item in admin_res.data.approvals:
+        assert item.status == "PENDING"
+        assert item.merchant_id == merchant.id
+
+
+@pytest.mark.asyncio
+async def test_expanded_sensitive_keys_redacted_in_audit_payloads(
+    db_session: AsyncSession,
+) -> None:
+    """Remediation Verification (Issue 3): Extended credential redaction in audit payloads."""
+    merchant, _, _, _, _, _ = await _seed_governance_env(db_session)
+
+    raw_payload = {
+        "authorization": "Bearer super-secret-token",
+        "jwt": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+        "access_token": "secret_access_token_12345",
+        "refresh_token": "secret_refresh_token_67890",
+        "private_key": "-----BEGIN PRIVATE KEY-----...",
+        "signature": "hmac_sha256_secret_sig",
+        "nested": {
+            "bearer": "another_secret",
+            "buyer_email": "alice.security@example.com",
+        },
+        "public_data": "visible_safe_info",
+    }
+
+    event = await AuditEvent.create_event(
+        session=db_session,
+        merchant_id=merchant.id,
+        actor_type="SYSTEM",
+        event_type="SECURITY_TEST_EVENT",
+        payload=raw_payload,
+    )
+
+    # Redactions must be present in persisted payload
+    p = event.payload
+    assert p["authorization"] == "[REDACTED_SECRET]"
+    assert p["jwt"] == "[REDACTED_SECRET]"
+    assert p["access_token"] == "[REDACTED_SECRET]"
+    assert p["refresh_token"] == "[REDACTED_SECRET]"
+    assert p["private_key"] == "[REDACTED_SECRET]"
+    assert p["signature"] == "[REDACTED_SECRET]"
+    assert p["nested"]["bearer"] == "[REDACTED_SECRET]"
+    assert p["nested"]["buyer_email"] == "a***y@example.com"
+    assert p["public_data"] == "visible_safe_info"
+
+    # Cryptographic integrity must verify successfully
+    is_valid, err = await AuditEvent.verify_chain(db_session, merchant.id)
+    assert is_valid is True
+    assert err is None

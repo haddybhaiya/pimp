@@ -34,6 +34,13 @@ def sanitize_audit_payload(payload: Any) -> Any:
         "api_key",
         "card_number",
         "cvv",
+        "authorization",
+        "bearer",
+        "jwt",
+        "access_token",
+        "refresh_token",
+        "private_key",
+        "signature",
     }
     if isinstance(payload, dict):
         sanitized = {}

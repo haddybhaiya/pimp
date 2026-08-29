@@ -714,6 +714,9 @@ class ResolveApprovalRequest(BaseModel):
     reason: str | None = Field(
         default=None, description="Optional merchant explanation for decision"
     )
+    idempotency_key: str | None = Field(
+        default=None, max_length=128, description="Optional client idempotency key"
+    )
 
 
 class ResolveApprovalResponse(BaseModel):
@@ -748,3 +751,25 @@ class MerchantApprovalItem(BaseModel):
     reason: str = Field(..., description="Reason for escalation")
     expires_at: datetime = Field(..., description="Approval ticket expiration timestamp")
     created_at: datetime = Field(..., description="Creation timestamp")
+
+
+class ListApprovalsRequest(BaseModel):
+    """Request parameter for querying and listing merchant approval tickets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str | None = Field(
+        default="PENDING",
+        description="Filter by status ('PENDING', 'APPROVED', 'REJECTED', 'EXPIRED') or None",
+    )
+    limit: int = Field(default=20, ge=1, le=100, description="Max items to return")
+    offset: int = Field(default=0, ge=0, description="Pagination offset")
+
+
+class ListApprovalsResponse(BaseModel):
+    """Response payload containing a list of merchant approval tickets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approvals: list[MerchantApprovalItem] = Field(..., description="List of approval tickets")
+    total_count: int = Field(..., description="Total matching approvals count")
