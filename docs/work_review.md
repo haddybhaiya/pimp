@@ -479,4 +479,58 @@ P3: Webhook secrets and Razorpay credentials are inlined throughout the file, bu
    - `mypy src tests`: 100% PASS (0 errors in 119 source files)
    - `pytest`: 100% PASS (227 passed, 2 skipped, 0 failed)
 
+---
+
+# Review 8: Comprehensive Branch Review (Phase 4.2 / `phs4`)
+
+> **Reviewed on:** 2026-08-28
+> **Scope:** Full-branch analysis across `src/agent_ready_merchant/`, domain models, state machines, gateway capabilities, policy engine, Razorpay boundary, migrations, and adversarial test suites.
+
+---
+
+## 1. High-Priority Findings & Remediation Items
+
+### Issue 1: Line-Item Discount Distribution on Human-Approved Quote Resolution
+- **Location:** `src/agent_ready_merchant/gateway/canonical.py:1995-2021` (`resolve_approval`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Description:** When a merchant admin approves an escalated counter-offer (`APPROVE`), `quote.discount_paise` and `quote.total_paise` are updated at the quote header level. However, individual line item prices in `quote.items` (`unit_price_paise` and `total_price_paise`) remained at their original pre-negotiated base values.
+- **Resolution:** Extracted `_distribute_quote_line_discounts` helper on `CanonicalCommerceGateway` and wired it into both `negotiate_quote` and `resolve_approval`. Line-item unit prices are now proportionally adjusted upon human approval, maintaining exact arithmetic (`unit_price_paise * quantity == total_price_paise`) and ensuring `OrderItem` records accurately reflect negotiated totals.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_human_approved_quote_line_items_discounted_and_transactable`
+
+---
+
+## 2. Medium-Priority Findings & Architectural Hardening
+
+### Issue 2: Explicit Row-Level Lock for Concurrent Approval Resolution
+- **Location:** `src/agent_ready_merchant/gateway/canonical.py:1942-1950` (`resolve_approval`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Description:** Loading `MerchantApproval` used `select(MerchantApproval).where(...)` without `.with_for_update()`.
+- **Resolution:** Added `.with_for_update()` to `select(MerchantApproval).where(...)` in `resolve_approval` for atomic row-level locking.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_concurrent_approval_resolution_race_safety`
+
+### Issue 3: Expansion of Sensitive Key Redaction in Audit Logs
+- **Location:** `src/agent_ready_merchant/models/audit.py:25-37` (`sanitize_audit_payload`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Description:** Expanded `sensitive_keys` set to include `"authorization"`, `"bearer"`, `"jwt"`, `"access_token"`, `"refresh_token"`, `"private_key"`, and `"signature"`.
+- **Resolution:** Updated `sensitive_keys` in `sanitize_audit_payload` with all authorization/token key variants.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_expanded_sensitive_keys_redacted_in_audit_payloads`
+
+### Issue 4: Discovery Capability for Pending Merchant Approvals
+- **Location:** `src/agent_ready_merchant/gateway/registry.py` & `canonical.py`
+- **Status:** **RESOLVED & VERIFIED**
+- **Description:** The gateway lacked a discovery endpoint for merchant admins to query open `PENDING` approval tickets.
+- **Resolution:** Implemented and registered `list_approvals` capability in `CapabilityRegistry` requiring `merchant:admin` permission and returning paginated `MerchantApprovalItem` records. Added `ListApprovalsRequest` and `ListApprovalsResponse` schemas.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_list_approvals_capability_and_authorization`
+
+---
+
+## 3. Low / Notes & Observability
+
+- **Policy Hash Serialization Stability:** `compute_policy_hash` serializes policy dictionaries using `json.dumps(..., sort_keys=True)`. Ensure any future complex rule objects passed into `additional_rules` are JSON-serializable primitives (dicts/lists) to maintain deterministic hash digests.
+- **Negotiation Rounds FSM Counter:** `quote.version >= 7` strictly bounds negotiations to 3 rounds (initial creation: v1; 3 rounds of `PROPOSED -> NEGOTIATING -> PROPOSED` increment version by 2 each, reaching v7 on round 4 start). Cleanly verified in test suite.
+- **Zero Hardcoded Secrets in Tests:** Confirmed test suites use environment variable defaults and dynamic generators rather than hardcoded credentials.
+- **All Quality Gates 100% Green:** 230 tests passing, 0 Ruff errors, 0 Mypy strict type errors.
+
+
+
 

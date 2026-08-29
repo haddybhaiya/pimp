@@ -59,6 +59,9 @@ from agent_ready_merchant.gateway.schemas import (
     GetQuoteResponse,
     InitializeSessionRequest,
     InitializeSessionResponse,
+    ListApprovalsRequest,
+    ListApprovalsResponse,
+    MerchantApprovalItem,
     NegotiateQuoteGatewayRequest,
     NegotiateQuoteGatewayResponse,
     PaymentAttemptItem,
@@ -1346,6 +1349,129 @@ class CanonicalCommerceGateway:
         )
 
     # -------------------------------------------------------------------------
+    # Helper: Line-Item Discount Distribution
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _distribute_quote_line_discounts(
+        quote: PriceQuote,
+        proposed_goods_paise: int,
+        floors: list[int] | None = None,
+    ) -> tuple[int, int]:
+        """Distributes proposed goods total across quote line items.
+
+        Maintains arithmetic consistency:
+        - per-line: itm.total_price_paise == itm.unit_price_paise * itm.quantity
+        - quote-level: quote.total_paise == quote.subtotal_paise - discount + shipping
+        - floor bounds: each line remains >= its floor price
+        Returns (final_discount_paise, final_total_paise).
+        """
+        if not quote.items:
+            final_discount = max(0, quote.subtotal_paise - proposed_goods_paise)
+            final_total = quote.subtotal_paise - final_discount + quote.shipping_paise
+            return final_discount, final_total
+
+        item_floors = (
+            floors
+            if floors is not None
+            else [
+                itm.variant.product.floor_price_paise
+                if (itm.variant and itm.variant.product)
+                else 1
+                for itm in quote.items
+            ]
+        )
+
+        for itm in quote.items:
+            prop_share = itm.total_price_paise / max(1, quote.subtotal_paise)
+            item_proposed_total = int(proposed_goods_paise * prop_share)
+            item_proposed_unit = item_proposed_total // max(1, itm.quantity)
+            itm.unit_price_paise = item_proposed_unit
+            itm.total_price_paise = item_proposed_unit * itm.quantity
+
+        item_sum = sum(itm.total_price_paise for itm in quote.items)
+        remainder = proposed_goods_paise - item_sum
+
+        def _set_unit(itm: Any, new_unit: int) -> None:
+            itm.unit_price_paise = new_unit
+            itm.total_price_paise = new_unit * itm.quantity
+
+        if remainder != 0 and quote.items:
+            # Pass 1: a quantity-1 line absorbs any residue arithmetically.
+            unit_line = next((i for i in quote.items if i.quantity == 1), None)
+            if unit_line is not None and unit_line.total_price_paise + remainder > 0:
+                unit_line.total_price_paise += remainder
+                unit_line.unit_price_paise = unit_line.total_price_paise
+                remainder = 0
+
+        if remainder != 0 and quote.items:
+            # Pass 2: distribute whole unit-steps across lines (largest quantity first).
+            sign = 1 if remainder > 0 else -1
+            remaining = remainder
+            order_by_qty = sorted(range(len(quote.items)), key=lambda i: -quote.items[i].quantity)
+            for idx in order_by_qty:
+                if remaining == 0:
+                    break
+                itm = quote.items[idx]
+                step_count = abs(remaining) // itm.quantity
+                if step_count == 0:
+                    continue
+                new_unit = itm.unit_price_paise + sign * step_count
+                floor_guard = max(1, item_floors[idx] if idx < len(item_floors) else 1)
+                if sign < 0 and new_unit < floor_guard:
+                    step_count -= floor_guard - new_unit
+                    if step_count <= 0:
+                        continue
+                    new_unit = itm.unit_price_paise - step_count
+                _set_unit(itm, new_unit)
+                remaining -= sign * step_count * itm.quantity
+
+            # Pass 3: exact combination search over +/- whole unit steps across lines.
+            if remaining != 0:
+                limit = 30
+                spread = max(abs(remainder) + limit * 10, limit * 10)
+                plans: dict[int, list[list[tuple[int, int]]]] = {0: [[]]}
+                for idx in range(len(quote.items)):
+                    q = quote.items[idx].quantity
+                    nxt: dict[int, list[list[tuple[int, int]]]] = {}
+                    for val, plist in plans.items():
+                        for s in range(-limit, limit + 1):
+                            nv = val + s * q
+                            if abs(nv) > spread:
+                                continue
+                            bucket = nxt.setdefault(nv, [])
+                            for plan in plist:
+                                if len(bucket) >= 4:
+                                    break
+                                bucket.append(plan + [(idx, s)] if s else plan)
+                    plans = nxt
+
+                def _plan_is_feasible(plan: list[tuple[int, int]]) -> bool:
+                    for p_idx, p_s in plan:
+                        p_itm = quote.items[p_idx]
+                        nu = p_itm.unit_price_paise + p_s
+                        p_floor = max(1, item_floors[p_idx] if p_idx < len(item_floors) else 1)
+                        if nu < p_floor:
+                            return False
+                    return True
+
+                solution = None
+                for plan in plans.get(remaining, []):
+                    if _plan_is_feasible(plan):
+                        solution = plan
+                        break
+                if solution:
+                    for sol_idx, sol_s in solution:
+                        _set_unit(
+                            quote.items[sol_idx],
+                            quote.items[sol_idx].unit_price_paise + sol_s,
+                        )
+
+        final_subtotal = sum(itm.total_price_paise for itm in quote.items)
+        final_discount = max(0, quote.subtotal_paise - final_subtotal)
+        final_total = quote.subtotal_paise - final_discount + quote.shipping_paise
+        return final_discount, final_total
+
+    # -------------------------------------------------------------------------
     # 10. Quote Negotiation & Acceptance
     # -------------------------------------------------------------------------
     async def negotiate_quote(
@@ -1529,104 +1655,14 @@ class CanonicalCommerceGateway:
 
         # Policy ALLOW: advance quote state
         # Apply negotiated per-line prices keeping every line feasible under
-        # ck_*_items_total_arithmetic (total_price_paise = unit_price_paise * quantity).
-        for itm, prop in zip(quote.items, item_proposals, strict=False):
-            itm.unit_price_paise = prop.proposed_unit_price_paise
-            itm.total_price_paise = prop.proposed_unit_price_paise * itm.quantity
-
-        item_sum = sum(itm.total_price_paise for itm in quote.items)
-        remainder = proposed_goods_paise - item_sum
+        # ck_*_items_total_arithmetic (total_price_paise = unit_price_paise * quantity)
+        # and ck_price_quotes_total_arithmetic (total = subtotal - discount + shipping).
         floors = [p.unit_floor_price_paise for p in item_proposals]
-
-        def _set_unit(itm: Any, new_unit: int) -> None:
-            itm.unit_price_paise = new_unit
-            itm.total_price_paise = new_unit * itm.quantity
-
-        if remainder != 0 and quote.items:
-            # Pass 1: a quantity-1 line absorbs any residue arithmetically.
-            unit_line = next((i for i in quote.items if i.quantity == 1), None)
-            if unit_line is not None and unit_line.total_price_paise + remainder > 0:
-                unit_line.total_price_paise += remainder
-                unit_line.unit_price_paise = unit_line.total_price_paise
-                remainder = 0
-
-        if remainder != 0 and quote.items:
-            # Pass 2: distribute whole unit-steps across lines (largest quantity
-            # first). Each step shifts exactly `quantity` paise, keeping the
-            # per-line arithmetic valid. Never cross the policy-approved floor.
-            sign = 1 if remainder > 0 else -1
-            remaining = remainder
-            order_by_qty = sorted(range(len(quote.items)), key=lambda i: -quote.items[i].quantity)
-            for idx in order_by_qty:
-                if remaining == 0:
-                    break
-                itm = quote.items[idx]
-                step_count = abs(remaining) // itm.quantity
-                if step_count == 0:
-                    continue
-                new_unit = itm.unit_price_paise + sign * step_count
-                floor_guard = max(1, floors[idx] if idx < len(floors) else 1)
-                if sign < 0 and new_unit < floor_guard:
-                    step_count -= floor_guard - new_unit
-                    if step_count <= 0:
-                        continue
-                    new_unit = itm.unit_price_paise - step_count
-                _set_unit(itm, new_unit)
-                remaining -= sign * step_count * itm.quantity
-
-            # Pass 3: exact combination search over +/- whole unit steps across
-            # lines, so any remainder representable by the line quantities is
-            # fully assigned instead of being dropped (bounded small search).
-            if remaining != 0:
-                limit = 30
-                spread = max(abs(remainder) + limit * 10, limit * 10)
-                plans: dict[int, list[list[tuple[int, int]]]] = {0: [[]]}
-                for idx in range(len(quote.items)):
-                    q = quote.items[idx].quantity
-                    nxt: dict[int, list[list[tuple[int, int]]]] = {}
-                    for val, plist in plans.items():
-                        for s in range(-limit, limit + 1):
-                            nv = val + s * q
-                            if abs(nv) > spread:
-                                continue
-                            bucket = nxt.setdefault(nv, [])
-                            for plan in plist:
-                                if len(bucket) >= 4:
-                                    break
-                                bucket.append(plan + [(idx, s)] if s else plan)
-                    plans = nxt
-
-                def _plan_is_feasible(plan: list[tuple[int, int]]) -> bool:
-                    for p_idx, p_s in plan:
-                        p_itm = quote.items[p_idx]
-                        nu = p_itm.unit_price_paise + p_s
-                        p_floor = max(1, floors[p_idx] if p_idx < len(floors) else 1)
-                        if nu < p_floor:
-                            return False
-                    return True
-
-                solution = None
-                for plan in plans.get(remaining, []):
-                    if _plan_is_feasible(plan):
-                        solution = plan
-                        break
-                if solution:
-                    for sol_idx, sol_s in solution:
-                        _set_unit(
-                            quote.items[sol_idx],
-                            quote.items[sol_idx].unit_price_paise + sol_s,
-                        )
-                    remaining = 0
-
-        # True up quote-level totals against the feasible line sums so
-        # ck_price_quotes_total_arithmetic holds without violating per-line
-        # arithmetic (subtotal_paise itself is FSM-immutable). After exact
-        # distribution above, final_subtotal == proposed_goods_paise and this
-        # is a no-op; deviation only persists when line quantities share a
-        # common divisor that cannot represent the proposal (≤ gcd−1 paise).
-        final_subtotal = sum(itm.total_price_paise for itm in quote.items)
-        final_discount = max(0, quote.subtotal_paise - final_subtotal)
-        final_total = quote.subtotal_paise - final_discount + quote.shipping_paise
+        final_discount, final_total = self._distribute_quote_line_discounts(
+            quote=quote,
+            proposed_goods_paise=proposed_goods_paise,
+            floors=floors,
+        )
 
         if quote.status == "PROPOSED":
             await PriceQuoteStateMachine.transition(
@@ -1906,10 +1942,14 @@ class CanonicalCommerceGateway:
                 "resolve_approval", "CAPABILITY_DENIED", auth_err or "Unauthorized"
             )
 
-        # 1. Cross-tenant & existence check
-        stmt = select(MerchantApproval).where(
-            MerchantApproval.id == request.approval_id,
-            MerchantApproval.merchant_id == context.merchant_id,
+        # 1. Cross-tenant & existence check with row-level lock
+        stmt = (
+            select(MerchantApproval)
+            .where(
+                MerchantApproval.id == request.approval_id,
+                MerchantApproval.merchant_id == context.merchant_id,
+            )
+            .with_for_update()
         )
         approval = (await session.execute(stmt)).scalar_one_or_none()
         if not approval:
@@ -1992,8 +2032,11 @@ class CanonicalCommerceGateway:
                         f"Quote is in terminal state '{quote.status}'.",
                     )
 
-                applied_discount = approval.proposed_discount_paise
-                applied_total = quote.subtotal_paise - applied_discount + quote.shipping_paise
+                proposed_goods = max(0, approval.requested_amount_paise - quote.shipping_paise)
+                applied_discount, applied_total = self._distribute_quote_line_discounts(
+                    quote=quote,
+                    proposed_goods_paise=proposed_goods,
+                )
 
                 if quote.status == "PROPOSED":
                     await PriceQuoteStateMachine.transition(
@@ -2109,6 +2152,64 @@ class CanonicalCommerceGateway:
             )
 
     # -------------------------------------------------------------------------
+    # 13. list_approvals (Phase 4.2 HITL Gate Discovery)
+    # -------------------------------------------------------------------------
+    async def list_approvals(
+        self,
+        session: AsyncSession,
+        request: ListApprovalsRequest,
+        context: GatewayContext,
+    ) -> GatewayResponseEnvelope[ListApprovalsResponse]:
+        """Lists pending or historical merchant approval tickets (Phase 4.2)."""
+        auth_ok, auth_err = CapabilityRegistry.check_authorization("list_approvals", context)
+        if not auth_ok:
+            return self._rejected_envelope(
+                "list_approvals", "CAPABILITY_DENIED", auth_err or "Unauthorized"
+            )
+
+        stmt = select(MerchantApproval).where(MerchantApproval.merchant_id == context.merchant_id)
+        if request.status:
+            stmt = stmt.where(MerchantApproval.status == request.status)
+
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total_count = (await session.execute(count_stmt)).scalar_one()
+
+        stmt = (
+            stmt.order_by(MerchantApproval.created_at.desc())
+            .offset(request.offset)
+            .limit(request.limit)
+        )
+        approvals = list((await session.execute(stmt)).scalars().all())
+
+        items = [
+            MerchantApprovalItem(
+                approval_id=a.id,
+                merchant_id=a.merchant_id,
+                quote_id=a.quote_id,
+                order_id=a.order_id,
+                session_id=a.session_id,
+                approval_type=a.approval_type,
+                status=a.status,
+                requested_amount_paise=a.requested_amount_paise,
+                proposed_discount_paise=a.proposed_discount_paise,
+                policy_rule_code=a.policy_rule_code,
+                reason=a.reason,
+                expires_at=a.expires_at,
+                created_at=a.created_at or datetime.now(UTC),
+            )
+            for a in approvals
+        ]
+
+        return GatewayResponseEnvelope[ListApprovalsResponse](
+            status="SUCCESS",
+            capability="list_approvals",
+            data=ListApprovalsResponse(
+                approvals=items,
+                total_count=total_count,
+            ),
+        )
+
+    # -------------------------------------------------------------------------
     # Unified Capability Dispatcher
     # -------------------------------------------------------------------------
     async def execute_capability(
@@ -2194,7 +2295,11 @@ class CanonicalCommerceGateway:
             )
 
         # 1f. Authoritative Session Validation, Token Verification & Capability Derivation
-        if capability_name != "initialize_session" and has_session:
+        if (
+            capability_name != "initialize_session"
+            and has_session
+            and context.actor_type == "BUYER_AGENT"
+        ):
             sess_stmt = select(BuyerAgentSession).where(
                 BuyerAgentSession.id == context.session_id,
                 BuyerAgentSession.merchant_id == context.merchant_id,
@@ -2257,7 +2362,7 @@ class CanonicalCommerceGateway:
             else:
                 context.capabilities = context.capabilities & _ALLOWED_BUYER_CAPABILITIES
 
-        elif not has_session:
+        elif not has_session and context.actor_type == "BUYER_AGENT":
             # Anonymous public discovery context is strictly bounded to read capabilities
             context.capabilities = context.capabilities & {"buyer:discover", "buyer:read"}
 
@@ -2485,6 +2590,10 @@ class CanonicalCommerceGateway:
         elif capability_name == "resolve_approval":
             req_appr = ResolveApprovalRequest.model_validate(payload)
             return await self.resolve_approval(session, req_appr, context)
+
+        elif capability_name == "list_approvals":
+            req_list = ListApprovalsRequest.model_validate(payload)
+            return await self.list_approvals(session, req_list, context)
 
         else:
             return self._rejected_envelope(
