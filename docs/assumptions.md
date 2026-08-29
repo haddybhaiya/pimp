@@ -88,7 +88,7 @@
 
 ### 9. Deterministic Policy Hashing, Platform Ceilings & Human-In-The-Loop Approval Gates
 - **ASSUMPTION:** AI-assisted commerce operations can encounter rogue prompts, runaway discounts, or post-facto policy changes that might invalidate audit interpretations. Hard platform boundaries and Human-In-The-Loop (HITL) approval gates must be server-enforced, with deterministic cryptographic policy hashes stamped immutably onto audit logs.
-- **EVIDENCE:** Verified via `tests/test_phase4_2_safety_policy_governance.py` (all 12 adversarial governance tests passing deterministically).
+- **EVIDENCE:** Verified via `tests/test_phase4_2_safety_policy_governance.py` (all 18 adversarial governance tests passing deterministically).
 - **STATUS:** **VERIFIED (PASS)**
 - **CONFIDENCE:** 100%
 - **FAILURE IF WRONG:** Runaway discounts below merchant safety margins, unexplainable pricing decisions, retroactive audit invalidation when merchant rules change, or secret/PII leaks into compliance logs.

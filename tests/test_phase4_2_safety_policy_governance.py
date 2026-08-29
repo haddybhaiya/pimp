@@ -979,3 +979,149 @@ async def test_expanded_sensitive_keys_redacted_in_audit_payloads(
     is_valid, err = await AuditEvent.verify_chain(db_session, merchant.id)
     assert is_valid is True
     assert err is None
+
+
+@pytest.mark.asyncio
+async def test_duplicate_negotiation_escalation_deduplicated(db_session: AsyncSession) -> None:
+    """Adversarial Test: Repeated negotiation escalations must not spawn duplicate tickets."""
+    merchant, buyer_session, product, _, _, context = await _seed_governance_env(
+        db_session, autonomy_level=2
+    )
+    gw = CanonicalCommerceGateway()
+
+    # 1. Request initial quote
+    q_res = await gw.execute_capability(
+        session=db_session,
+        capability_name="get_quote",
+        payload={
+            "session_id": str(buyer_session.id),
+            "items": [{"sku": product.sku, "quantity": 1}],
+        },
+        context=context,
+    )
+    assert q_res.data is not None
+    quote_id = q_res.data.quote_id
+
+    # 2. Negotiate once -> triggers escalation
+    neg1 = await gw.execute_capability(
+        session=db_session,
+        capability_name="negotiate_quote",
+        payload={"quote_id": str(quote_id), "proposed_total_paise": 450000},
+        context=context,
+    )
+    assert neg1.status == "SUCCESS"
+    assert neg1.data is not None
+    assert neg1.data.verdict == "ESCALATE_APPROVAL"
+
+    # 3. Retry identical negotiation -> must return existing pending approval without duplicate rows
+    neg2 = await gw.execute_capability(
+        session=db_session,
+        capability_name="negotiate_quote",
+        payload={"quote_id": str(quote_id), "proposed_total_paise": 450000},
+        context=context,
+    )
+    assert neg2.status == "SUCCESS"
+    assert neg2.data is not None
+    assert neg2.data.verdict == "ESCALATE_APPROVAL"
+
+    # Verify exactly 1 approval ticket exists for this quote
+    appr_stmt = select(MerchantApproval).where(MerchantApproval.quote_id == quote_id)
+    approvals = list((await db_session.execute(appr_stmt)).scalars().all())
+    assert len(approvals) == 1
+    assert approvals[0].status == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_expired_approval_resolution_emits_audit_event(db_session: AsyncSession) -> None:
+    """Adversarial Test: Expired approval resolution must log MERCHANT_APPROVAL_EXPIRED event."""
+    merchant, buyer_session, product, _, _, context = await _seed_governance_env(
+        db_session, autonomy_level=2
+    )
+    gw = CanonicalCommerceGateway()
+
+    q_res = await gw.execute_capability(
+        session=db_session,
+        capability_name="get_quote",
+        payload={
+            "session_id": str(buyer_session.id),
+            "items": [{"sku": product.sku, "quantity": 1}],
+        },
+        context=context,
+    )
+    assert q_res.data is not None
+    quote_id = q_res.data.quote_id
+
+    await gw.execute_capability(
+        session=db_session,
+        capability_name="negotiate_quote",
+        payload={"quote_id": str(quote_id), "proposed_total_paise": 450000},
+        context=context,
+    )
+
+    appr_stmt = select(MerchantApproval).where(MerchantApproval.quote_id == quote_id)
+    approval = (await db_session.execute(appr_stmt)).scalar_one()
+
+    # Expire approval
+    approval.expires_at = datetime.now(UTC) - timedelta(minutes=5)
+    await db_session.flush()
+
+    admin_context = GatewayContext(
+        merchant_id=merchant.id,
+        session_id=uuid.uuid4(),
+        capabilities={"merchant:admin"},
+        actor_type="MERCHANT_ADMIN",
+    )
+    res_resp = await gw.execute_capability(
+        session=db_session,
+        capability_name="resolve_approval",
+        payload={
+            "approval_id": str(approval.id),
+            "decision": "APPROVE",
+            "reason": "Late resolution",
+            "idempotency_key": f"idem_{uuid.uuid4().hex}",
+        },
+        context=admin_context,
+    )
+    assert res_resp.status == "REJECTED"
+    assert res_resp.error is not None
+    assert res_resp.error.code == "APPROVAL_EXPIRED"
+
+    # Verify audit event was logged for expiration
+    audit_stmt = select(AuditEvent).where(
+        AuditEvent.merchant_id == merchant.id,
+        AuditEvent.event_type == "MERCHANT_APPROVAL_EXPIRED",
+    )
+    exp_event = (await db_session.execute(audit_stmt)).scalar_one_or_none()
+    assert exp_event is not None
+    assert exp_event.payload["approval_id"] == str(approval.id)
+
+
+@pytest.mark.asyncio
+async def test_generic_token_and_freetext_email_scrubbed_in_audit_payload(
+    db_session: AsyncSession,
+) -> None:
+    """Security Test: Generic token keys and free-text emails in strings are masked."""
+    merchant, _, _, _, _, _ = await _seed_governance_env(db_session)
+
+    payload = {
+        "token": "raw-sensitive-session-token",
+        "id_token": "raw-sensitive-id-token",
+        "reason": "User requested termination, contact security.lead@merchant-ops.com for logs",
+        "nested_note": "Sent copy to compliance@domain.org as required.",
+    }
+
+    event = await AuditEvent.create_event(
+        session=db_session,
+        merchant_id=merchant.id,
+        actor_type="SYSTEM",
+        event_type="SECURITY_SCRUB_TEST",
+        payload=payload,
+    )
+
+    p = event.payload
+    assert p["token"] == "[REDACTED_SECRET]"
+    assert p["id_token"] == "[REDACTED_SECRET]"
+    assert "s***d@merchant-ops.com" in p["reason"]
+    assert "security.lead@merchant-ops.com" not in p["reason"]
+    assert "c***e@domain.org" in p["nested_note"]
+    assert "compliance@domain.org" not in p["nested_note"]

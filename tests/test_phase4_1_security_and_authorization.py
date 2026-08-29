@@ -349,7 +349,7 @@ async def test_cross_session_quote_and_order_access_rejected_with_uniform_not_fo
     )
     assert ord_resp.status == "REJECTED"
     assert ord_resp.error is not None
-    assert ord_resp.error.code in {"ORDER_CREATION_FAILED", "QUOTE_NOT_FOUND"}
+    assert ord_resp.error.code == "QUOTE_NOT_FOUND"
 
     # Session 1 successfully creates its order
     ord1_resp = await gateway.create_order(

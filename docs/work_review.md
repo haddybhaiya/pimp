@@ -529,7 +529,55 @@ P3: Webhook secrets and Razorpay credentials are inlined throughout the file, bu
 - **Policy Hash Serialization Stability:** `compute_policy_hash` serializes policy dictionaries using `json.dumps(..., sort_keys=True)`. Ensure any future complex rule objects passed into `additional_rules` are JSON-serializable primitives (dicts/lists) to maintain deterministic hash digests.
 - **Negotiation Rounds FSM Counter:** `quote.version >= 7` strictly bounds negotiations to 3 rounds (initial creation: v1; 3 rounds of `PROPOSED -> NEGOTIATING -> PROPOSED` increment version by 2 each, reaching v7 on round 4 start). Cleanly verified in test suite.
 - **Zero Hardcoded Secrets in Tests:** Confirmed test suites use environment variable defaults and dynamic generators rather than hardcoded credentials.
-- **All Quality Gates 100% Green:** 230 tests passing, 0 Ruff errors, 0 Mypy strict type errors.
+- **All Quality Gates 100% Green:** 233 tests passing, 0 Ruff errors, 0 Mypy strict type errors.
+
+---
+
+# Review 9: Multi-Reviewer Hardening & Governance Validation (Phase 4.2 Signoff)
+
+> **Reviewers:** AI Reviewer 1 & AI Reviewer 2
+> **Focus:** HITL Gate Deduplication, DB Integrity Constraints, Audit Sanitization & Schema Bounds
+
+---
+
+## 1. Validated & Resolved P0–P2 Issues
+
+### Issue 1: Deduplication of Pending Approval State (`canonical.py:1586-1638`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** Repeated negotiation escalation created multiple duplicate `PENDING` approval rows and audit records without advancing quote rounds.
+- **Resolution:** `negotiate_quote` checks for existing active `PENDING` approval on `quote.id` and reuses it without duplicate creation, while incrementing `quote.version` by 2 per escalation round to strictly enforce the 3-round governance limit.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_duplicate_negotiation_escalation_deduplicated`
+
+### Issue 2: Foreign Key RESTRICT and Non-Negative Amount DB Constraints (`models/approval.py` & Alembic Migration 005)
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** `quote_id` had `ondelete="CASCADE"`, which destroyed approval audit trails if quotes were deleted, and lacked DB check constraints on non-negative amounts.
+- **Resolution:** Changed `quote_id` foreign key to `ondelete="RESTRICT"` and added `CheckConstraint("requested_amount_paise >= 0")` and `CheckConstraint("proposed_discount_paise >= 0")`.
+- **Verified by:** Model metadata and Alembic migration 005.
+
+### Issue 3: Expanded Token Key Redaction & Free-Text Email Masking (`models/audit.py`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** Generic token keys (`token`, `id_token`) and free-text strings containing emails (e.g. `TerminateSessionRequest.reason`) were not masked.
+- **Resolution:** Added `"token"` and `"id_token"` to sensitive keys and applied regex-based email masking (`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`) across string values.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_generic_token_and_freetext_email_scrubbed_in_audit_payload`
+
+### Issue 4: Audit Event on Expired Approval Resolution & Pending Filter (`canonical.py`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** Resolving expired approvals marked them `EXPIRED` without emitting an `AuditEvent`, and `list_approvals` returned expired tickets when filtering by `status="PENDING"`.
+- **Resolution:** Emitted `MERCHANT_APPROVAL_EXPIRED` `AuditEvent` in `resolve_approval` on lazy expiration, and added `expires_at > now` filter in `list_approvals` for pending queries.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_expired_approval_resolution_emits_audit_event`
+
+### Issue 5: Deterministic Hash Normalization & Model Imports (`policy/models.py`, `rules.py`, `engine.py`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** `COMMERCE_PROTOCOL_VERSION` imported from gateway module risked circular imports; `compute_policy_hash` lacked recursive structure normalization; `evaluate_governance_limits` needed line price discount verification.
+- **Resolution:** Re-pointed constant import to `agent_ready_merchant.constants`, added `_normalize_canonical()` recursive sorting, deep-copied decision snapshots, and guarded line price calculations against negative values.
+- **Verified by:** `tests/test_policy_engine.py` and `tests/test_phase4_2_safety_policy_governance.py`.
+
+### Issue 6: Range Validation on Schema Fields & Error Codes (`gateway/schemas.py`, `registry.py`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** `MerchantApprovalItem` missing `ge=0, le=MAX_64BIT_INT` bounds on amount fields; capability failure states omitted `INVALID_STATE_TRANSITION` and `CAPABILITY_DENIED`.
+- **Resolution:** Added field validation constraints to `MerchantApprovalItem` and registered complete failure codes in `CapabilityRegistry`.
+- **Verified by:** Typecheck and gateway capability tests.
+
 
 
 
