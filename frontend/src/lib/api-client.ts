@@ -1,5 +1,18 @@
 import { GatewayEnvelope } from '@/types/gateway';
 import { MerchantAuthResponse, LoginCredentials, SignupPayload, MerchantProfile } from '@/types/auth';
+import {
+  DashboardSummary,
+  ProductItem,
+  ProductCreatePayload,
+  InventoryItem,
+  QuoteDetail,
+  OrderDetail,
+  PaymentAttemptItem,
+  ApprovalItem,
+  ResolveApprovalPayload,
+  PolicyGovernance,
+  AuditLedger,
+} from '@/types/portal';
 
 export class ApiError extends Error {
   constructor(
@@ -93,7 +106,6 @@ export class ApiClient {
     }
   }
 
-  // Merchant Auth API
   async signup(payload: SignupPayload): Promise<MerchantAuthResponse> {
     return this.request<MerchantAuthResponse>('/api/v1/merchant/auth/signup', {
       method: 'POST',
@@ -219,7 +231,82 @@ export class ApiClient {
     };
   }
 
-  // Canonical Gateway Execute
+  async getDashboardSummary(): Promise<DashboardSummary> {
+    return this.request<DashboardSummary>('/api/v1/merchant/dashboard/summary');
+  }
+
+  async listProducts(): Promise<ProductItem[]> {
+    return this.request<ProductItem[]>('/api/v1/merchant/products');
+  }
+
+  async createProduct(payload: ProductCreatePayload): Promise<ProductItem> {
+    return this.request<ProductItem>('/api/v1/merchant/products', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async listInventory(): Promise<InventoryItem[]> {
+    return this.request<InventoryItem[]>('/api/v1/merchant/inventory');
+  }
+
+  async adjustInventory(payload: { sku: string; quantity_delta: number; reason?: string }): Promise<InventoryItem> {
+    return this.request<InventoryItem>('/api/v1/merchant/inventory/adjust', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async listQuotes(): Promise<QuoteDetail[]> {
+    return this.request<QuoteDetail[]>('/api/v1/merchant/quotes');
+  }
+
+  async listOrders(): Promise<OrderDetail[]> {
+    return this.request<OrderDetail[]>('/api/v1/merchant/orders');
+  }
+
+  async reconcileOrder(orderId: string): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>(`/api/v1/orders/${orderId}/reconcile`, {
+      method: 'POST',
+    });
+  }
+
+  async listPayments(): Promise<PaymentAttemptItem[]> {
+    return this.request<PaymentAttemptItem[]>('/api/v1/merchant/payments');
+  }
+
+  async listApprovals(status?: string): Promise<ApprovalItem[]> {
+    const query = status ? `?status=${status}` : '';
+    return this.request<ApprovalItem[]>(`/api/v1/merchant/approvals${query}`);
+  }
+
+  async resolveApproval(approvalId: string, payload: ResolveApprovalPayload): Promise<ApprovalItem> {
+    return this.request<ApprovalItem>(`/api/v1/merchant/approvals/${approvalId}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getPolicies(): Promise<PolicyGovernance> {
+    return this.request<PolicyGovernance>('/api/v1/merchant/policies');
+  }
+
+  async updatePolicies(payload: {
+    autonomy_level: number;
+    max_discount_percentage: number;
+    min_margin_percentage: number;
+    max_single_transaction_paise: number;
+  }): Promise<PolicyGovernance> {
+    return this.request<PolicyGovernance>('/api/v1/merchant/policies', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getAuditLedger(limit = 50): Promise<AuditLedger> {
+    return this.request<AuditLedger>(`/api/v1/merchant/audit?limit=${limit}`);
+  }
+
   async executeGateway<T>(capability: string, payload: Record<string, unknown> = {}): Promise<GatewayEnvelope<T>> {
     return this.request<GatewayEnvelope<T>>('/api/v1/gateway/execute', {
       method: 'POST',
