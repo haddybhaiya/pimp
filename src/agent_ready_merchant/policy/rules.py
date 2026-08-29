@@ -265,3 +265,68 @@ def evaluate_shipping(proposal: QuoteProposal) -> PolicyEvaluationResult:
         rule_code="SHIPPING_POLICY_OK",
         reason="Shipping details satisfy merchant shipping rules",
     )
+
+
+def evaluate_governance_limits(proposal: QuoteProposal) -> PolicyEvaluationResult:
+    """Enforces platform-wide governance boundaries and safety ceilings (Phase 4.2)."""
+    # 1. Platform-wide Item Quantity Limit (max 20 units per order)
+    total_quantity = sum(item.quantity for item in proposal.items)
+    if total_quantity > 20:
+        return PolicyEvaluationResult(
+            verdict=PolicyVerdict.DENY,
+            rule_code="MAX_ITEMS_PER_QUOTE_EXCEEDED",
+            reason=f"Order quantity {total_quantity} exceeds platform safety ceiling of 20 units",
+            metadata={"total_quantity": total_quantity, "max_allowed": 20},
+        )
+
+    # 2. Platform Absolute Maximum Discount Ceiling (50%)
+    if proposal.subtotal_paise > 0:
+        if any(item.proposed_unit_price_paise <= 0 for item in proposal.items):
+            effective_discount_paise = proposal.discount_paise
+        else:
+            line_items_total = (
+                sum(item.proposed_unit_price_paise * item.quantity for item in proposal.items)
+                if proposal.items
+                else proposal.subtotal_paise - proposal.discount_paise
+            )
+            effective_discount_paise = max(
+                proposal.discount_paise,
+                proposal.subtotal_paise - line_items_total,
+            )
+        discount_ratio = effective_discount_paise / proposal.subtotal_paise
+        if discount_ratio > 0.50:
+            return PolicyEvaluationResult(
+                verdict=PolicyVerdict.DENY,
+                rule_code="GOVERNANCE_MAX_DISCOUNT_CEILING_EXCEEDED",
+                reason=(
+                    f"Effective discount ratio {discount_ratio * 100:.1f}% exceeds absolute "
+                    "platform governance ceiling of 50.0%"
+                ),
+                metadata={
+                    "discount_ratio": discount_ratio,
+                    "effective_discount_paise": effective_discount_paise,
+                    "max_ceiling": 0.50,
+                },
+            )
+
+    # 3. Platform Absolute Maximum Single Transaction Limit (₹1,00,000 / 10,000,000 paise)
+    platform_max_single_tx_paise = 10_000_000
+    if proposal.total_paise > platform_max_single_tx_paise:
+        return PolicyEvaluationResult(
+            verdict=PolicyVerdict.DENY,
+            rule_code="GOVERNANCE_MAX_TRANSACTION_LIMIT_EXCEEDED",
+            reason=(
+                f"Transaction total ₹{proposal.total_paise / 100:.2f} exceeds absolute "
+                f"platform transaction limit of ₹{platform_max_single_tx_paise / 100:.2f}"
+            ),
+            metadata={
+                "total_paise": proposal.total_paise,
+                "platform_max_single_tx_paise": platform_max_single_tx_paise,
+            },
+        )
+
+    return PolicyEvaluationResult(
+        verdict=PolicyVerdict.ALLOW,
+        rule_code="GOVERNANCE_LIMITS_OK",
+        reason="Proposal satisfies platform-wide governance safety boundaries",
+    )

@@ -1,11 +1,18 @@
 """Domain models, contexts, and result types for the Deterministic Policy Engine.
 
-Adheres strictly to docs/policy-model.md and INV-FIN-01 / INV-FIN-02 / INV-FIN-03.
+Adheres strictly to docs/policy-model.md and INV-FIN-01 / INV-FIN-02 / INV-FIN-03 / INV-AGY-02.
 """
 
+import copy
+import hashlib
+import json
+import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
+
+from agent_ready_merchant.constants import COMMERCE_PROTOCOL_VERSION
 
 
 class PolicyVerdict(StrEnum):
@@ -14,6 +21,67 @@ class PolicyVerdict(StrEnum):
     ALLOW = "ALLOW"
     DENY = "DENY"
     ESCALATE_APPROVAL = "ESCALATE_APPROVAL"
+
+
+def _normalize_canonical(val: Any) -> Any:
+    """Recursively normalizes Python data structures for deterministic JSON serialization."""
+    if isinstance(val, dict):
+        return {
+            str(k): _normalize_canonical(v) for k, v in sorted(val.items(), key=lambda x: str(x[0]))
+        }
+    elif isinstance(val, (list, tuple)):
+        return [_normalize_canonical(item) for item in val]
+    elif isinstance(val, (set, frozenset)):
+        return sorted([_normalize_canonical(item) for item in val], key=str)
+    elif isinstance(val, (bool, int, float, str)) or val is None:
+        return val
+    return str(val)
+
+
+def compute_policy_hash(
+    autonomy_level: int,
+    max_discount_percentage: float,
+    min_margin_percentage: float,
+    max_single_transaction_paise: int,
+    version: str = COMMERCE_PROTOCOL_VERSION,
+    additional_rules: list[dict[str, Any]] | None = None,
+) -> str:
+    """Computes deterministic SHA-256 hash of active merchant policy configuration.
+
+    Guarantees that historical audit interpretation remains immutable even if
+    merchant configuration changes later in the database (INV-AGY-02).
+    """
+    clean_rules = additional_rules or []
+    canonical_dict = {
+        "autonomy_level": int(autonomy_level),
+        "max_discount_percentage": float(max_discount_percentage),
+        "max_single_transaction_paise": int(max_single_transaction_paise),
+        "min_margin_percentage": float(min_margin_percentage),
+        "rules": clean_rules,
+        "version": str(version),
+    }
+    normalized = _normalize_canonical(canonical_dict)
+    serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class PolicyDecisionRecord:
+    """Immutable, auditable snapshot of a consequential policy decision."""
+
+    decision_id: uuid.UUID
+    policy_version: str
+    policy_hash: str
+    verdict: PolicyVerdict
+    rule_code: str
+    reason: str
+    evaluated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    context_snapshot: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "context_snapshot", copy.deepcopy(self.context_snapshot))
+        object.__setattr__(self, "metadata", copy.deepcopy(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -26,6 +94,8 @@ class PolicyEvaluationResult:
     metadata: dict[str, Any] = field(default_factory=dict)
     required_capability: str | None = None
     required_approval: bool = False
+    policy_hash: str | None = None
+    policy_decision: PolicyDecisionRecord | None = None
 
     @property
     def is_allowed(self) -> bool:
@@ -85,3 +155,17 @@ class PolicyContext:
             "buyer:checkout",
         }
     )
+    policy_version: str = COMMERCE_PROTOCOL_VERSION
+    additional_rules: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def policy_hash(self) -> str:
+        """Computes deterministic SHA-256 hash for this policy context."""
+        return compute_policy_hash(
+            autonomy_level=self.merchant_autonomy_level,
+            max_discount_percentage=self.max_discount_percentage,
+            min_margin_percentage=self.min_margin_percentage,
+            max_single_transaction_paise=self.max_single_transaction_paise,
+            version=self.policy_version,
+            additional_rules=self.additional_rules,
+        )

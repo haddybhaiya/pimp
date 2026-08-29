@@ -351,3 +351,234 @@ For each issue above, determine whether it is valid and should be fixed. If so, 
 > 2. On retry, `_find_reusable_external_order` checks the breadcrumb and/or queries Razorpay by deterministic receipt ID
 > 3. If a matching `created`-status order with correct amount exists, it is reused instead of creating a new one
 > This is tested in `test_phase3_3_end_to_end_verification.py` (scenario 10: Razorpay timeout after remote success).
+
+
+
+## some non resolved (keep in mind ) issues from phase 3
+- content : " ### Issue 1
+src/agent_ready_merchant/services/payment_service.py:322-327
+**Ignored retries discard valid payments**
+
+When a payment webhook arrives before its local order exists, it is recorded as `IGNORED`; an identical retry after the order is created now returns `DUPLICATE_IGNORED` without processing the payment, leaving the order unsettled and its transaction credit absent unless a client later requests reconciliation.
+
+---
+
+For each issue above, determine whether it is valid and should be fixed. If so, fix it directly."
+
+- content : VALIDATE FIRST "
+Check if these issues are valid — if so, understand the root cause of each and fix them. If appropriate, use sub-agents to investigate and fix each issue separately.
+
+
+<file name="src/agent_ready_merchant/models/transaction.py">
+
+<violation number="1" location="src/agent_ready_merchant/models/transaction.py:76">
+P2: When a caller creates a `TransactionRecord` through `TransactionRecordCreate` without `settlement_ref`, validation accepts it but this model raises an `IntegrityError` at flush. Make the create schema and uncommitted lifecycle require or defer the reference consistently with this constraint.</violation>
+
+<violation number="2" location="src/agent_ready_merchant/models/transaction.py:78">
+P1: When an existing database contains a NULL `settlement_ref`, migration 004 fails before the new safeguards are installed. Backfill or explicitly remediate NULL rows before applying the NOT NULL constraint.</violation>
+</file>
+
+<file name="tests/test_phase3_3_end_to_end_verification.py">
+
+<violation number="1" location="tests/test_phase3_3_end_to_end_verification.py:495">
+P2: The tests claimed to verify concurrency (`test_failure_inventory_race_prevents_overselling`, `test_failure_duplicate_and_concurrent_webhooks`, `test_failure_concurrent_checkout_safe_serialization`) run every operation sequentially in a single coroutine with `await` one at a time. No `asyncio.gather`, separate sessions, or separate connections are used, so the actual race paths are never exercised: the DB unique-constraint collision branch, optimistic-lock contention, the `WebhookProcessingInProgressError` path, and true simultaneous inventory reservation. The PR description explicitly claims these 17 scenarios cover concurrency and races, but the suite only tests sequential idempotency/oversell-soon-after, so the concurrency guarantees are not actually verified.</violation>
+</file>
+
+<file name="src/agent_ready_merchant/services/payment_service.py">
+
+<violation number="1" location="src/agent_ready_merchant/services/payment_service.py:862">
+P2: If receipt lookup raises a non-Razorpay error, this catch hides it and proceeds to create another external order. Catch expected `RazorpayError` failures and surface unexpected errors instead.</violation>
+</file>
+
+<file name="src/agent_ready_merchant/gateway/registry.py">
+
+<violation number="1" location="src/agent_ready_merchant/gateway/registry.py:295">
+P2: The canonical catalog now marks `get_payment_status` as state-mutating, but the registered `GetPaymentStatusTool` still declares the same action `READ_ONLY`. Synchronize the alias/tool metadata or make the registry the sole source so agents do not apply read-only or cacheable policy on one execution path and reconciliation policy on another.</violation>
+</file>
+
+<file name="tests/test_phase3_1_razorpay_boundary.py">
+
+<violation number="1" location="tests/test_phase3_1_razorpay_boundary.py:154">
+P3: Webhook secrets and Razorpay credentials are inlined throughout the file, but the repo's agent contract (AGENTS.md "Never HardCode (specially tests)") and conftest.py define placeholder env variables (RAZORPAY_WEBHOOK_SECRET, RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET) for this purpose. Read the signing secret and credentials from these env values instead of string literals so the test suite carries no secrets and follows the documented guideline.</violation>
+</file>"
+
+---
+
+# Review 6: Phase 4.1 Security Boundary & Authorization Hardening
+
+> **Reviewed on:** 2026-08-28
+> **Scope:** Server-Authoritative Identity, Constant-Time Token Authentication, Multi-Tenant Session Boundary Gate, Server-Authoritative Capability Derivation, Anti-Resource Existence Probing, and Adversarial Verification Suite.
+
+---
+
+## Deliverables & Security Verification Summary
+
+1. **Server-Authoritative Session Authentication:**
+   - Implemented constant-time cryptographic verification (`hmac.compare_digest(hashlib.sha256(token).hexdigest(), db_sess.auth_token_hash)`) protecting against timing analysis attacks.
+   - Missing or invalid tokens fail closed with `AUTH_INVALID_CREDENTIAL`.
+
+2. **Mandatory Session Boundary Gate:**
+   - Stateful and privileged financial operations (`get_quote`, `negotiate_quote`, `accept_quote`, `create_order`, `request_checkout`, `get_payment_status`, `get_order_status`, `terminate_session`) strictly require an active, non-expired session (`AUTH_SESSION_NOT_FOUND` fail-closed).
+   - Anonymous requests are strictly bounded to read-only discovery capabilities (`discover_products`, `get_product`, `check_inventory`, `calculate_shipping`).
+
+3. **Server-Authoritative Capability Derivation:**
+   - Capabilities are strictly derived from `db_sess.granted_capabilities` in PostgreSQL.
+   - Client-supplied `X-Capabilities` headers can never elevate permissions or self-grant financial capabilities (`INV-AGY-05`). Calling unauthorized capabilities fails closed with `CAPABILITY_DENIED`.
+
+4. **Multi-Tenant & Cross-Session Isolation:**
+   - Strict row-level isolation ensuring buyers cannot query, negotiate, accept, order, or check payment status for quotes/orders belonging to different merchants or sessions.
+   - Mismatches return uniform generic errors (`QUOTE_NOT_FOUND`, `ORDER_NOT_FOUND`, `AUTH_SESSION_NOT_FOUND`) without leaking resource existence or tenant details.
+
+5. **Adversarial Test Suite (`tests/test_phase4_1_security_and_authorization.py`):**
+   - 12 comprehensive test scenarios verifying forged tokens, wrong merchants, wrong sessions, forged capabilities, expired sessions, replayed credentials, cross-tenant access, unauthorized financial mutations, anonymous caller rejections, and malformed contexts.
+
+6. **Quality Gate Status:**
+   - `ruff format --check .`: 100% PASS (122 files)
+   - `ruff check .`: 100% PASS (0 errors)
+   - `mypy src tests`: 100% PASS (0 errors in 117 source files)
+   - `pytest`: 100% PASS (215 passed, 2 skipped, 0 failed)
+
+---
+
+# Review 7: Phase 4.2 Safety, Policy & Governance Kernel
+
+> **Reviewed on:** 2026-08-28
+> **Scope:** Centralized Policy Decision Records, Deterministic Policy Hashing, Platform Safety Ceilings, Human-In-The-Loop (HITL) Merchant Approval Gate, Immutable Audit Linkage, Zero Secret/PII Sanitization, Anti-Context Tampering, and Adversarial Verification Suite.
+
+---
+
+## Deliverables & Governance Verification Summary
+
+1. **Centralized Policy Decision Record & Deterministic Hashing (`INV-GOV-01`):**
+   - Implemented `PolicyDecisionRecord` tracking `decision_id`, `policy_version`, `policy_hash`, `verdict`, `rule_code`, `reason`, and `context_snapshot`.
+   - Implemented `compute_policy_hash()` producing deterministic SHA-256 digests over normalized merchant policy rules. Policy versions and hashes are stamped immutably onto audit logs.
+
+2. **Platform Governance Safety Ceilings (`INV-GOV-02`):**
+   - Max 20 items per quote (`MAX_ITEMS_PER_QUOTE_EXCEEDED`).
+   - Max 50% absolute discount ceiling (`GOVERNANCE_MAX_DISCOUNT_CEILING_EXCEEDED`).
+   - Max ₹1,00,000 (10,000,000 paise) single transaction limit (`GOVERNANCE_MAX_TRANSACTION_LIMIT_EXCEEDED`).
+   - Max 3 negotiation rounds per quote (`MAX_NEGOTIATION_ATTEMPTS_EXCEEDED`).
+
+3. **Human-In-The-Loop (HITL) Approval Gate (`INV-GOV-03`):**
+   - Created `MerchantApproval` database model with Alembic migration `005_safety_policy_governance.py`.
+   - Added `resolve_approval` capability requiring `merchant:admin` permissions with optimistic locking, strict expiration handling, and state machine validation.
+
+4. **Audit Cryptographic Hash Chain & Sanitization (`INV-GOV-04`):**
+   - `AuditEvent.create_event` automatically redacts credentials (`auth_token`, `key_secret`, `password`, `card_number`) and masks emails (`a***r@example.com`).
+   - Cryptographic SHA-256 chain verification (`AuditEvent.verify_chain`) detects any back-channel storage tampering.
+
+5. **Anti-Context Tampering Gate:**
+   - Gateway loads merchant policy configuration from PostgreSQL for non-admin actors, preventing buyer context injection attacks.
+
+6. **Adversarial Test Suite (`tests/test_phase4_2_safety_policy_governance.py`):**
+   - 12 comprehensive adversarial tests covering floor price protection, immutable policy hashes, expired approvals, forged/cross-tenant approvals, audit tampering detection, secret/PII redaction, race safety, context tampering override, governance bounds, and non-authoritative LLM mutations (100% PASS).
+
+7. **Quality Gate Status:**
+   - `ruff format --check .`: 100% PASS (125 files)
+   - `ruff check .`: 100% PASS (0 errors)
+   - `mypy src tests`: 100% PASS (0 errors in 119 source files)
+   - `pytest`: 100% PASS (227 passed, 2 skipped, 0 failed)
+
+---
+
+# Review 8: Comprehensive Branch Review (Phase 4.2 / `phs4`)
+
+> **Reviewed on:** 2026-08-28
+> **Scope:** Full-branch analysis across `src/agent_ready_merchant/`, domain models, state machines, gateway capabilities, policy engine, Razorpay boundary, migrations, and adversarial test suites.
+
+---
+
+## 1. High-Priority Findings & Remediation Items
+
+### Issue 1: Line-Item Discount Distribution on Human-Approved Quote Resolution
+- **Location:** `src/agent_ready_merchant/gateway/canonical.py:1995-2021` (`resolve_approval`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Description:** When a merchant admin approves an escalated counter-offer (`APPROVE`), `quote.discount_paise` and `quote.total_paise` are updated at the quote header level. However, individual line item prices in `quote.items` (`unit_price_paise` and `total_price_paise`) remained at their original pre-negotiated base values.
+- **Resolution:** Extracted `_distribute_quote_line_discounts` helper on `CanonicalCommerceGateway` and wired it into both `negotiate_quote` and `resolve_approval`. Line-item unit prices are now proportionally adjusted upon human approval, maintaining exact arithmetic (`unit_price_paise * quantity == total_price_paise`) and ensuring `OrderItem` records accurately reflect negotiated totals.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_human_approved_quote_line_items_discounted_and_transactable`
+
+---
+
+## 2. Medium-Priority Findings & Architectural Hardening
+
+### Issue 2: Explicit Row-Level Lock for Concurrent Approval Resolution
+- **Location:** `src/agent_ready_merchant/gateway/canonical.py:1942-1950` (`resolve_approval`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Description:** Loading `MerchantApproval` used `select(MerchantApproval).where(...)` without `.with_for_update()`.
+- **Resolution:** Added `.with_for_update()` to `select(MerchantApproval).where(...)` in `resolve_approval` for atomic row-level locking.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_concurrent_approval_resolution_race_safety`
+
+### Issue 3: Expansion of Sensitive Key Redaction in Audit Logs
+- **Location:** `src/agent_ready_merchant/models/audit.py:25-37` (`sanitize_audit_payload`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Description:** Expanded `sensitive_keys` set to include `"authorization"`, `"bearer"`, `"jwt"`, `"access_token"`, `"refresh_token"`, `"private_key"`, and `"signature"`.
+- **Resolution:** Updated `sensitive_keys` in `sanitize_audit_payload` with all authorization/token key variants.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_expanded_sensitive_keys_redacted_in_audit_payloads`
+
+### Issue 4: Discovery Capability for Pending Merchant Approvals
+- **Location:** `src/agent_ready_merchant/gateway/registry.py` & `canonical.py`
+- **Status:** **RESOLVED & VERIFIED**
+- **Description:** The gateway lacked a discovery endpoint for merchant admins to query open `PENDING` approval tickets.
+- **Resolution:** Implemented and registered `list_approvals` capability in `CapabilityRegistry` requiring `merchant:admin` permission and returning paginated `MerchantApprovalItem` records. Added `ListApprovalsRequest` and `ListApprovalsResponse` schemas.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_list_approvals_capability_and_authorization`
+
+---
+
+## 3. Low / Notes & Observability
+
+- **Policy Hash Serialization Stability:** `compute_policy_hash` serializes policy dictionaries using `json.dumps(..., sort_keys=True)`. Ensure any future complex rule objects passed into `additional_rules` are JSON-serializable primitives (dicts/lists) to maintain deterministic hash digests.
+- **Negotiation Rounds FSM Counter:** `quote.version >= 7` strictly bounds negotiations to 3 rounds (initial creation: v1; 3 rounds of `PROPOSED -> NEGOTIATING -> PROPOSED` increment version by 2 each, reaching v7 on round 4 start). Cleanly verified in test suite.
+- **Zero Hardcoded Secrets in Tests:** Confirmed test suites use environment variable defaults and dynamic generators rather than hardcoded credentials.
+- **All Quality Gates 100% Green:** 233 tests passing, 0 Ruff errors, 0 Mypy strict type errors.
+
+---
+
+# Review 9: Multi-Reviewer Hardening & Governance Validation (Phase 4.2 Signoff)
+
+> **Reviewers:** AI Reviewer 1 & AI Reviewer 2
+> **Focus:** HITL Gate Deduplication, DB Integrity Constraints, Audit Sanitization & Schema Bounds
+
+---
+
+## 1. Validated & Resolved P0–P2 Issues
+
+### Issue 1: Deduplication of Pending Approval State (`canonical.py:1586-1638`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** Repeated negotiation escalation created multiple duplicate `PENDING` approval rows and audit records without advancing quote rounds.
+- **Resolution:** `negotiate_quote` checks for existing active `PENDING` approval on `quote.id` and reuses it without duplicate creation, while incrementing `quote.version` by 2 per escalation round to strictly enforce the 3-round governance limit.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_duplicate_negotiation_escalation_deduplicated`
+
+### Issue 2: Foreign Key RESTRICT and Non-Negative Amount DB Constraints (`models/approval.py` & Alembic Migration 005)
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** `quote_id` had `ondelete="CASCADE"`, which destroyed approval audit trails if quotes were deleted, and lacked DB check constraints on non-negative amounts.
+- **Resolution:** Changed `quote_id` foreign key to `ondelete="RESTRICT"` and added `CheckConstraint("requested_amount_paise >= 0")` and `CheckConstraint("proposed_discount_paise >= 0")`.
+- **Verified by:** Model metadata and Alembic migration 005.
+
+### Issue 3: Expanded Token Key Redaction & Free-Text Email Masking (`models/audit.py`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** Generic token keys (`token`, `id_token`) and free-text strings containing emails (e.g. `TerminateSessionRequest.reason`) were not masked.
+- **Resolution:** Added `"token"` and `"id_token"` to sensitive keys and applied regex-based email masking (`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`) across string values.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_generic_token_and_freetext_email_scrubbed_in_audit_payload`
+
+### Issue 4: Audit Event on Expired Approval Resolution & Pending Filter (`canonical.py`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** Resolving expired approvals marked them `EXPIRED` without emitting an `AuditEvent`, and `list_approvals` returned expired tickets when filtering by `status="PENDING"`.
+- **Resolution:** Emitted `MERCHANT_APPROVAL_EXPIRED` `AuditEvent` in `resolve_approval` on lazy expiration, and added `expires_at > now` filter in `list_approvals` for pending queries.
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_expired_approval_resolution_emits_audit_event`
+
+### Issue 5: Deterministic Hash Normalization & Model Imports (`policy/models.py`, `rules.py`, `engine.py`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** `COMMERCE_PROTOCOL_VERSION` imported from gateway module risked circular imports; `compute_policy_hash` lacked recursive structure normalization; `evaluate_governance_limits` needed line price discount verification.
+- **Resolution:** Re-pointed constant import to `agent_ready_merchant.constants`, added `_normalize_canonical()` recursive sorting, deep-copied decision snapshots, and guarded line price calculations against negative values.
+- **Verified by:** `tests/test_policy_engine.py` and `tests/test_phase4_2_safety_policy_governance.py`.
+
+### Issue 6: Range Validation on Schema Fields & Error Codes (`gateway/schemas.py`, `registry.py`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** `MerchantApprovalItem` missing `ge=0, le=MAX_64BIT_INT` bounds on amount fields; capability failure states omitted `INVALID_STATE_TRANSITION` and `CAPABILITY_DENIED`.
+- **Resolution:** Added field validation constraints to `MerchantApprovalItem` and registered complete failure codes in `CapabilityRegistry`.
+- **Verified by:** Typecheck and gateway capability tests.
+
+
+
+
+

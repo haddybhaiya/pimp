@@ -9,6 +9,7 @@ Adheres strictly to Phase 2.1 specifications:
 
 import asyncio
 import hashlib
+import hmac
 import logging
 import time
 import uuid
@@ -58,6 +59,9 @@ from agent_ready_merchant.gateway.schemas import (
     GetQuoteResponse,
     InitializeSessionRequest,
     InitializeSessionResponse,
+    ListApprovalsRequest,
+    ListApprovalsResponse,
+    MerchantApprovalItem,
     NegotiateQuoteGatewayRequest,
     NegotiateQuoteGatewayResponse,
     PaymentAttemptItem,
@@ -65,6 +69,8 @@ from agent_ready_merchant.gateway.schemas import (
     QuoteLineItemDetail,
     RequestCheckoutRequest,
     RequestCheckoutResponse,
+    ResolveApprovalRequest,
+    ResolveApprovalResponse,
     ShippingAddressGateway,
     StateOrientedContext,
     TerminateSessionRequest,
@@ -76,9 +82,12 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     RazorpayError,
     RazorpayTimeoutError,
 )
+from agent_ready_merchant.models.approval import MerchantApproval
 from agent_ready_merchant.models.audit import AuditEvent
+from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.models.order import Order
 from agent_ready_merchant.models.payment import PaymentAttempt
+from agent_ready_merchant.models.policy import PolicyRule
 from agent_ready_merchant.models.product import Product, ProductVariant
 from agent_ready_merchant.models.quote import PriceQuote, QuoteItem
 from agent_ready_merchant.models.session import BuyerAgentSession
@@ -854,6 +863,20 @@ class CanonicalCommerceGateway:
                 "create_order", "CAPABILITY_DENIED", auth_err or "Unauthorized"
             )
 
+        # Check quote existence and session binding (uniform not-found protection)
+        q_stmt = select(PriceQuote).where(
+            PriceQuote.id == request.quote_id,
+            PriceQuote.merchant_id == context.merchant_id,
+            PriceQuote.session_id == context.session_id,
+        )
+        bound_quote = (await session.execute(q_stmt)).scalar_one_or_none()
+        if not bound_quote:
+            return self._rejected_envelope(
+                "create_order",
+                "QUOTE_NOT_FOUND",
+                f"PriceQuote '{request.quote_id}' not found for active merchant and session.",
+            )
+
         settings = get_settings()
         rzp_client = self.rzp_client or RazorpayClient(
             key_id=settings.RAZORPAY_KEY_ID,
@@ -1183,6 +1206,15 @@ class CanonicalCommerceGateway:
         merchant_id: uuid.UUID,
     ) -> GatewayResponseEnvelope[InitializeSessionResponse]:
         """Initializes a new authoritative BuyerAgentSession for an external AI buyer."""
+        m_stmt = select(Merchant).where(Merchant.id == merchant_id)
+        merchant = (await session.execute(m_stmt)).scalar_one_or_none()
+        if not merchant or merchant.status != "ACTIVE":
+            return self._rejected_envelope(
+                "initialize_session",
+                GatewayErrorCode.AUTH_INVALID_MERCHANT.value,
+                f"Merchant with ID '{merchant_id}' not found or inactive.",
+            )
+
         now = datetime.now(UTC)
         expires_at = now + timedelta(minutes=request.duration_minutes)
         raw_token = request.auth_token_raw or f"token_{uuid.uuid4().hex}"
@@ -1331,6 +1363,129 @@ class CanonicalCommerceGateway:
         )
 
     # -------------------------------------------------------------------------
+    # Helper: Line-Item Discount Distribution
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _distribute_quote_line_discounts(
+        quote: PriceQuote,
+        proposed_goods_paise: int,
+        floors: list[int] | None = None,
+    ) -> tuple[int, int]:
+        """Distributes proposed goods total across quote line items.
+
+        Maintains arithmetic consistency:
+        - per-line: itm.total_price_paise == itm.unit_price_paise * itm.quantity
+        - quote-level: quote.total_paise == quote.subtotal_paise - discount + shipping
+        - floor bounds: each line remains >= its floor price
+        Returns (final_discount_paise, final_total_paise).
+        """
+        if not quote.items:
+            final_discount = max(0, quote.subtotal_paise - proposed_goods_paise)
+            final_total = quote.subtotal_paise - final_discount + quote.shipping_paise
+            return final_discount, final_total
+
+        item_floors = (
+            floors
+            if floors is not None
+            else [
+                itm.variant.product.floor_price_paise
+                if (itm.variant and itm.variant.product)
+                else 1
+                for itm in quote.items
+            ]
+        )
+
+        for itm in quote.items:
+            prop_share = itm.total_price_paise / max(1, quote.subtotal_paise)
+            item_proposed_total = int(proposed_goods_paise * prop_share)
+            item_proposed_unit = item_proposed_total // max(1, itm.quantity)
+            itm.unit_price_paise = item_proposed_unit
+            itm.total_price_paise = item_proposed_unit * itm.quantity
+
+        item_sum = sum(itm.total_price_paise for itm in quote.items)
+        remainder = proposed_goods_paise - item_sum
+
+        def _set_unit(itm: Any, new_unit: int) -> None:
+            itm.unit_price_paise = new_unit
+            itm.total_price_paise = new_unit * itm.quantity
+
+        if remainder != 0 and quote.items:
+            # Pass 1: a quantity-1 line absorbs any residue arithmetically.
+            unit_line = next((i for i in quote.items if i.quantity == 1), None)
+            if unit_line is not None and unit_line.total_price_paise + remainder > 0:
+                unit_line.total_price_paise += remainder
+                unit_line.unit_price_paise = unit_line.total_price_paise
+                remainder = 0
+
+        if remainder != 0 and quote.items:
+            # Pass 2: distribute whole unit-steps across lines (largest quantity first).
+            sign = 1 if remainder > 0 else -1
+            remaining = remainder
+            order_by_qty = sorted(range(len(quote.items)), key=lambda i: -quote.items[i].quantity)
+            for idx in order_by_qty:
+                if remaining == 0:
+                    break
+                itm = quote.items[idx]
+                step_count = abs(remaining) // itm.quantity
+                if step_count == 0:
+                    continue
+                new_unit = itm.unit_price_paise + sign * step_count
+                floor_guard = max(1, item_floors[idx] if idx < len(item_floors) else 1)
+                if sign < 0 and new_unit < floor_guard:
+                    step_count -= floor_guard - new_unit
+                    if step_count <= 0:
+                        continue
+                    new_unit = itm.unit_price_paise - step_count
+                _set_unit(itm, new_unit)
+                remaining -= sign * step_count * itm.quantity
+
+            # Pass 3: exact combination search over +/- whole unit steps across lines.
+            if remaining != 0:
+                limit = 30
+                spread = max(abs(remainder) + limit * 10, limit * 10)
+                plans: dict[int, list[list[tuple[int, int]]]] = {0: [[]]}
+                for idx in range(len(quote.items)):
+                    q = quote.items[idx].quantity
+                    nxt: dict[int, list[list[tuple[int, int]]]] = {}
+                    for val, plist in plans.items():
+                        for s in range(-limit, limit + 1):
+                            nv = val + s * q
+                            if abs(nv) > spread:
+                                continue
+                            bucket = nxt.setdefault(nv, [])
+                            for plan in plist:
+                                if len(bucket) >= 4:
+                                    break
+                                bucket.append(plan + [(idx, s)] if s else plan)
+                    plans = nxt
+
+                def _plan_is_feasible(plan: list[tuple[int, int]]) -> bool:
+                    for p_idx, p_s in plan:
+                        p_itm = quote.items[p_idx]
+                        nu = p_itm.unit_price_paise + p_s
+                        p_floor = max(1, item_floors[p_idx] if p_idx < len(item_floors) else 1)
+                        if nu < p_floor:
+                            return False
+                    return True
+
+                solution = None
+                for plan in plans.get(remaining, []):
+                    if _plan_is_feasible(plan):
+                        solution = plan
+                        break
+                if solution:
+                    for sol_idx, sol_s in solution:
+                        _set_unit(
+                            quote.items[sol_idx],
+                            quote.items[sol_idx].unit_price_paise + sol_s,
+                        )
+
+        final_subtotal = sum(itm.total_price_paise for itm in quote.items)
+        final_discount = max(0, quote.subtotal_paise - final_subtotal)
+        final_total = quote.subtotal_paise - final_discount + quote.shipping_paise
+        return final_discount, final_total
+
+    # -------------------------------------------------------------------------
     # 10. Quote Negotiation & Acceptance
     # -------------------------------------------------------------------------
     async def negotiate_quote(
@@ -1378,6 +1533,14 @@ class CanonicalCommerceGateway:
                 "negotiate_quote",
                 "QUOTE_EXPIRED",
                 f"PriceQuote '{request.quote_id}' expired at {quote_expires.isoformat()}.",
+            )
+
+        # Governance limit: max 3 negotiation rounds per quote (INV-AGY-04 / Phase 4.2)
+        if quote.version >= 7:
+            return self._rejected_envelope(
+                "negotiate_quote",
+                "MAX_NEGOTIATION_ATTEMPTS_EXCEEDED",
+                "Quote negotiation limit reached (maximum 3 negotiation rounds allowed).",
             )
 
         if quote.status not in {"PROPOSED", "NEGOTIATING"}:
@@ -1435,6 +1598,90 @@ class CanonicalCommerceGateway:
                 f"Counter-offer rejected by policy: {eval_res.reason}",
             )
         elif eval_res.verdict == PolicyVerdict.ESCALATE_APPROVAL:
+            # Check for existing active PENDING approval ticket on this quote
+            existing_appr_stmt = select(MerchantApproval).where(
+                MerchantApproval.quote_id == quote.id,
+                MerchantApproval.status == "PENDING",
+            )
+            existing_appr = (await session.execute(existing_appr_stmt)).scalar_one_or_none()
+            if existing_appr:
+                existing_exp = (
+                    existing_appr.expires_at
+                    if existing_appr.expires_at.tzinfo is not None
+                    else existing_appr.expires_at.replace(tzinfo=UTC)
+                )
+                if now <= existing_exp:
+                    # Return existing pending approval without creating duplicate rows or audits
+                    resp_data = NegotiateQuoteGatewayResponse(
+                        quote_id=quote.id,
+                        status="PENDING_APPROVAL",
+                        currency="INR",
+                        subtotal_paise=quote.subtotal_paise,
+                        discount_paise=quote.discount_paise,
+                        shipping_paise=quote.shipping_paise,
+                        total_paise=quote.total_paise,
+                        verdict="ESCALATE_APPROVAL",
+                        rule_code=existing_appr.policy_rule_code,
+                        reason=(
+                            "Counter-offer requires merchant human approval: "
+                            f"{existing_appr.reason}"
+                        ),
+                        expires_at=quote.expires_at,
+                    )
+                    return GatewayResponseEnvelope[NegotiateQuoteGatewayResponse](
+                        status="SUCCESS",
+                        capability="negotiate_quote",
+                        data=resp_data,
+                    )
+                else:
+                    existing_appr.status = "EXPIRED"
+                    existing_appr.resolved_at = now
+                    await session.flush()
+
+            # Advance quote version to track negotiation rounds without prematurely mutating status
+            quote.version += 2
+            await session.flush()
+
+            # Persist authoritative MerchantApproval ticket (Phase 4.2 HITL Gate)
+            approval_exp = min(
+                quote_expires,
+                now + timedelta(minutes=15),
+            )
+            approval = MerchantApproval(
+                merchant_id=context.merchant_id,
+                quote_id=quote.id,
+                session_id=context.session_id,
+                approval_type="QUOTE_DISCOUNT",
+                status="PENDING",
+                requested_amount_paise=request.proposed_total_paise,
+                proposed_discount_paise=calculated_discount,
+                policy_decision_hash=eval_res.policy_hash or "0" * 64,
+                policy_rule_code=eval_res.rule_code,
+                reason=eval_res.reason,
+                expires_at=approval_exp,
+            )
+            session.add(approval)
+            await session.flush()
+
+            audit_event = await AuditEvent.create_event(
+                session=session,
+                merchant_id=context.merchant_id,
+                actor_type="BUYER_AGENT",
+                event_type="MERCHANT_APPROVAL_REQUESTED",
+                payload={
+                    "approval_id": str(approval.id),
+                    "quote_id": str(quote.id),
+                    "request_id": str(context.request_id),
+                    "requested_amount_paise": request.proposed_total_paise,
+                    "proposed_discount_paise": calculated_discount,
+                    "policy_decision_hash": eval_res.policy_hash,
+                    "policy_rule_code": eval_res.rule_code,
+                    "reason": eval_res.reason,
+                    "verdict": "ESCALATE_APPROVAL",
+                },
+                session_id=context.session_id,
+            )
+
             resp_data = NegotiateQuoteGatewayResponse(
                 quote_id=quote.id,
                 status="PENDING_APPROVAL",
@@ -1452,6 +1699,7 @@ class CanonicalCommerceGateway:
                 status="SUCCESS",
                 capability="negotiate_quote",
                 data=resp_data,
+                audit_event_id=audit_event.id,
                 state=StateOrientedContext(
                     entity_type="PriceQuote",
                     entity_id=str(quote.id),
@@ -1465,104 +1713,14 @@ class CanonicalCommerceGateway:
 
         # Policy ALLOW: advance quote state
         # Apply negotiated per-line prices keeping every line feasible under
-        # ck_*_items_total_arithmetic (total_price_paise = unit_price_paise * quantity).
-        for itm, prop in zip(quote.items, item_proposals, strict=False):
-            itm.unit_price_paise = prop.proposed_unit_price_paise
-            itm.total_price_paise = prop.proposed_unit_price_paise * itm.quantity
-
-        item_sum = sum(itm.total_price_paise for itm in quote.items)
-        remainder = proposed_goods_paise - item_sum
+        # ck_*_items_total_arithmetic (total_price_paise = unit_price_paise * quantity)
+        # and ck_price_quotes_total_arithmetic (total = subtotal - discount + shipping).
         floors = [p.unit_floor_price_paise for p in item_proposals]
-
-        def _set_unit(itm: Any, new_unit: int) -> None:
-            itm.unit_price_paise = new_unit
-            itm.total_price_paise = new_unit * itm.quantity
-
-        if remainder != 0 and quote.items:
-            # Pass 1: a quantity-1 line absorbs any residue arithmetically.
-            unit_line = next((i for i in quote.items if i.quantity == 1), None)
-            if unit_line is not None and unit_line.total_price_paise + remainder > 0:
-                unit_line.total_price_paise += remainder
-                unit_line.unit_price_paise = unit_line.total_price_paise
-                remainder = 0
-
-        if remainder != 0 and quote.items:
-            # Pass 2: distribute whole unit-steps across lines (largest quantity
-            # first). Each step shifts exactly `quantity` paise, keeping the
-            # per-line arithmetic valid. Never cross the policy-approved floor.
-            sign = 1 if remainder > 0 else -1
-            remaining = remainder
-            order_by_qty = sorted(range(len(quote.items)), key=lambda i: -quote.items[i].quantity)
-            for idx in order_by_qty:
-                if remaining == 0:
-                    break
-                itm = quote.items[idx]
-                step_count = abs(remaining) // itm.quantity
-                if step_count == 0:
-                    continue
-                new_unit = itm.unit_price_paise + sign * step_count
-                floor_guard = max(1, floors[idx] if idx < len(floors) else 1)
-                if sign < 0 and new_unit < floor_guard:
-                    step_count -= floor_guard - new_unit
-                    if step_count <= 0:
-                        continue
-                    new_unit = itm.unit_price_paise - step_count
-                _set_unit(itm, new_unit)
-                remaining -= sign * step_count * itm.quantity
-
-            # Pass 3: exact combination search over +/- whole unit steps across
-            # lines, so any remainder representable by the line quantities is
-            # fully assigned instead of being dropped (bounded small search).
-            if remaining != 0:
-                limit = 30
-                spread = max(abs(remainder) + limit * 10, limit * 10)
-                plans: dict[int, list[list[tuple[int, int]]]] = {0: [[]]}
-                for idx in range(len(quote.items)):
-                    q = quote.items[idx].quantity
-                    nxt: dict[int, list[list[tuple[int, int]]]] = {}
-                    for val, plist in plans.items():
-                        for s in range(-limit, limit + 1):
-                            nv = val + s * q
-                            if abs(nv) > spread:
-                                continue
-                            bucket = nxt.setdefault(nv, [])
-                            for plan in plist:
-                                if len(bucket) >= 4:
-                                    break
-                                bucket.append(plan + [(idx, s)] if s else plan)
-                    plans = nxt
-
-                def _plan_is_feasible(plan: list[tuple[int, int]]) -> bool:
-                    for p_idx, p_s in plan:
-                        p_itm = quote.items[p_idx]
-                        nu = p_itm.unit_price_paise + p_s
-                        p_floor = max(1, floors[p_idx] if p_idx < len(floors) else 1)
-                        if nu < p_floor:
-                            return False
-                    return True
-
-                solution = None
-                for plan in plans.get(remaining, []):
-                    if _plan_is_feasible(plan):
-                        solution = plan
-                        break
-                if solution:
-                    for sol_idx, sol_s in solution:
-                        _set_unit(
-                            quote.items[sol_idx],
-                            quote.items[sol_idx].unit_price_paise + sol_s,
-                        )
-                    remaining = 0
-
-        # True up quote-level totals against the feasible line sums so
-        # ck_price_quotes_total_arithmetic holds without violating per-line
-        # arithmetic (subtotal_paise itself is FSM-immutable). After exact
-        # distribution above, final_subtotal == proposed_goods_paise and this
-        # is a no-op; deviation only persists when line quantities share a
-        # common divisor that cannot represent the proposal (≤ gcd−1 paise).
-        final_subtotal = sum(itm.total_price_paise for itm in quote.items)
-        final_discount = max(0, quote.subtotal_paise - final_subtotal)
-        final_total = quote.subtotal_paise - final_discount + quote.shipping_paise
+        final_discount, final_total = self._distribute_quote_line_discounts(
+            quote=quote,
+            proposed_goods_paise=proposed_goods_paise,
+            floors=floors,
+        )
 
         if quote.status == "PROPOSED":
             await PriceQuoteStateMachine.transition(
@@ -1595,10 +1753,15 @@ class CanonicalCommerceGateway:
             event_type="PRICE_QUOTE_NEGOTIATED",
             payload={
                 "quote_id": str(quote.id),
+                "request_id": str(context.request_id),
                 "proposed_total_paise": request.proposed_total_paise,
                 "applied_discount_paise": final_discount,
                 "applied_total_paise": final_total,
                 "verdict": "ALLOW",
+                "policy_decision_hash": eval_res.policy_hash,
+                "policy_rule_code": eval_res.rule_code,
+                "reason": eval_res.reason,
+                "policy_version": policy_ctx.policy_version,
             },
             session_id=context.session_id,
         )
@@ -1822,6 +1985,311 @@ class CanonicalCommerceGateway:
         )
 
     # -------------------------------------------------------------------------
+    # 12. resolve_approval (Phase 4.2 HITL Gate)
+    # -------------------------------------------------------------------------
+    async def resolve_approval(
+        self,
+        session: AsyncSession,
+        request: ResolveApprovalRequest,
+        context: GatewayContext,
+    ) -> GatewayResponseEnvelope[ResolveApprovalResponse]:
+        """Authorizes or rejects a pending Human-In-The-Loop approval ticket (Phase 4.2)."""
+        auth_ok, auth_err = CapabilityRegistry.check_authorization("resolve_approval", context)
+        if not auth_ok:
+            return self._rejected_envelope(
+                "resolve_approval", "CAPABILITY_DENIED", auth_err or "Unauthorized"
+            )
+
+        # 1. Cross-tenant & existence check with row-level lock
+        stmt = (
+            select(MerchantApproval)
+            .where(
+                MerchantApproval.id == request.approval_id,
+                MerchantApproval.merchant_id == context.merchant_id,
+            )
+            .with_for_update()
+        )
+        approval = (await session.execute(stmt)).scalar_one_or_none()
+        if not approval:
+            return self._rejected_envelope(
+                "resolve_approval",
+                "APPROVAL_NOT_FOUND",
+                f"Approval ticket '{request.approval_id}' not found for authenticated merchant.",
+            )
+
+        # 2. Status check
+        if approval.status != "PENDING":
+            return self._rejected_envelope(
+                "resolve_approval",
+                "APPROVAL_ALREADY_RESOLVED",
+                (
+                    f"Approval ticket '{request.approval_id}' is "
+                    f"already in status '{approval.status}'."
+                ),
+            )
+
+        # 3. Expiration check
+        now = datetime.now(UTC)
+        appr_exp = (
+            approval.expires_at
+            if approval.expires_at.tzinfo is not None
+            else approval.expires_at.replace(tzinfo=UTC)
+        )
+        if now > appr_exp:
+            approval.status = "EXPIRED"
+            approval.resolved_at = now
+            await session.flush()
+
+            await AuditEvent.create_event(
+                session=session,
+                merchant_id=context.merchant_id,
+                actor_type=context.actor_type,
+                event_type="MERCHANT_APPROVAL_EXPIRED",
+                payload={
+                    "approval_id": str(approval.id),
+                    "quote_id": str(approval.quote_id) if approval.quote_id else None,
+                    "request_id": str(context.request_id),
+                    "policy_decision_hash": approval.policy_decision_hash,
+                    "expired_at": appr_exp.isoformat(),
+                },
+                session_id=approval.session_id,
+            )
+
+            return self._rejected_envelope(
+                "resolve_approval",
+                "APPROVAL_EXPIRED",
+                f"Approval ticket '{request.approval_id}' expired at {appr_exp.isoformat()}.",
+            )
+
+        # 4. Process decision
+        if request.decision == "APPROVE":
+            if approval.quote_id:
+                q_stmt = (
+                    select(PriceQuote)
+                    .options(
+                        selectinload(PriceQuote.items)
+                        .selectinload(QuoteItem.variant)
+                        .selectinload(ProductVariant.product)
+                    )
+                    .where(
+                        PriceQuote.id == approval.quote_id,
+                        PriceQuote.merchant_id == context.merchant_id,
+                    )
+                )
+                quote = (await session.execute(q_stmt)).scalar_one_or_none()
+                if not quote:
+                    return self._rejected_envelope(
+                        "resolve_approval",
+                        "QUOTE_NOT_FOUND",
+                        f"Associated quote '{approval.quote_id}' not found for merchant.",
+                    )
+
+                quote_exp = (
+                    quote.expires_at
+                    if quote.expires_at.tzinfo is not None
+                    else quote.expires_at.replace(tzinfo=UTC)
+                )
+                if now > quote_exp:
+                    return self._rejected_envelope(
+                        "resolve_approval",
+                        "QUOTE_EXPIRED",
+                        (
+                            f"Associated quote '{approval.quote_id}' "
+                            f"expired at {quote_exp.isoformat()}."
+                        ),
+                    )
+
+                if quote.status in {"ACCEPTED", "EXPIRED", "SUPERSEDED", "REJECTED"}:
+                    return self._rejected_envelope(
+                        "resolve_approval",
+                        "INVALID_STATE_TRANSITION",
+                        f"Quote is in terminal state '{quote.status}'.",
+                    )
+
+                proposed_goods = max(0, approval.requested_amount_paise - quote.shipping_paise)
+                applied_discount, applied_total = self._distribute_quote_line_discounts(
+                    quote=quote,
+                    proposed_goods_paise=proposed_goods,
+                )
+
+                if quote.status == "PROPOSED":
+                    await PriceQuoteStateMachine.transition(
+                        session=session,
+                        quote=quote,
+                        target_state="NEGOTIATING",
+                        expected_version=quote.version,
+                        actor_type="MERCHANT_ADMIN",
+                        reason=f"Merchant Admin approval: {request.reason or 'Approved'}",
+                    )
+                await PriceQuoteStateMachine.transition(
+                    session=session,
+                    quote=quote,
+                    target_state="PROPOSED",
+                    expected_version=quote.version,
+                    actor_type="MERCHANT_ADMIN",
+                    reason=f"Merchant Admin approval: {request.reason or 'Approved'}",
+                    additional_updates={
+                        "discount_paise": applied_discount,
+                        "total_paise": applied_total,
+                        "discount_reason": (
+                            f"Merchant Admin approval: {request.reason or 'Approved'}"
+                        ),
+                    },
+                )
+
+            approval.status = "APPROVED"
+            approval.approver_identifier = str(context.merchant_id)
+            approval.resolved_at = now
+            await session.flush()
+
+            audit_ev = await AuditEvent.create_event(
+                session=session,
+                merchant_id=context.merchant_id,
+                actor_type="MERCHANT_ADMIN",
+                event_type="MERCHANT_APPROVAL_GRANTED",
+                payload={
+                    "approval_id": str(approval.id),
+                    "quote_id": str(approval.quote_id) if approval.quote_id else None,
+                    "request_id": str(context.request_id),
+                    "decision": "APPROVE",
+                    "reason": request.reason,
+                    "policy_decision_hash": approval.policy_decision_hash,
+                    "approver": str(context.merchant_id),
+                },
+                session_id=approval.session_id,
+            )
+
+            return GatewayResponseEnvelope[ResolveApprovalResponse](
+                status="SUCCESS",
+                capability="resolve_approval",
+                data=ResolveApprovalResponse(
+                    approval_id=approval.id,
+                    status="APPROVED",
+                    quote_id=approval.quote_id,
+                    decision="APPROVE",
+                    resolved_at=now,
+                ),
+                audit_event_id=audit_ev.id,
+            )
+        else:  # REJECT
+            if approval.quote_id:
+                q_stmt = select(PriceQuote).where(
+                    PriceQuote.id == approval.quote_id,
+                    PriceQuote.merchant_id == context.merchant_id,
+                )
+                quote = (await session.execute(q_stmt)).scalar_one_or_none()
+                if quote and quote.status not in {"ACCEPTED", "EXPIRED", "SUPERSEDED", "REJECTED"}:
+                    await PriceQuoteStateMachine.transition(
+                        session=session,
+                        quote=quote,
+                        target_state="REJECTED",
+                        expected_version=quote.version,
+                        actor_type="MERCHANT_ADMIN",
+                        reason=(
+                            f"Merchant Admin rejected counter-offer: {request.reason or 'Rejected'}"
+                        ),
+                    )
+
+            approval.status = "REJECTED"
+            approval.approver_identifier = str(context.merchant_id)
+            approval.resolved_at = now
+            await session.flush()
+
+            audit_ev = await AuditEvent.create_event(
+                session=session,
+                merchant_id=context.merchant_id,
+                actor_type="MERCHANT_ADMIN",
+                event_type="MERCHANT_APPROVAL_REJECTED",
+                payload={
+                    "approval_id": str(approval.id),
+                    "quote_id": str(approval.quote_id) if approval.quote_id else None,
+                    "request_id": str(context.request_id),
+                    "decision": "REJECT",
+                    "reason": request.reason,
+                    "policy_decision_hash": approval.policy_decision_hash,
+                    "approver": str(context.merchant_id),
+                },
+                session_id=approval.session_id,
+            )
+
+            return GatewayResponseEnvelope[ResolveApprovalResponse](
+                status="SUCCESS",
+                capability="resolve_approval",
+                data=ResolveApprovalResponse(
+                    approval_id=approval.id,
+                    status="REJECTED",
+                    quote_id=approval.quote_id,
+                    decision="REJECT",
+                    resolved_at=now,
+                ),
+                audit_event_id=audit_ev.id,
+            )
+
+    # -------------------------------------------------------------------------
+    # 13. list_approvals (Phase 4.2 HITL Gate Discovery)
+    # -------------------------------------------------------------------------
+    async def list_approvals(
+        self,
+        session: AsyncSession,
+        request: ListApprovalsRequest,
+        context: GatewayContext,
+    ) -> GatewayResponseEnvelope[ListApprovalsResponse]:
+        """Lists pending or historical merchant approval tickets (Phase 4.2)."""
+        auth_ok, auth_err = CapabilityRegistry.check_authorization("list_approvals", context)
+        if not auth_ok:
+            return self._rejected_envelope(
+                "list_approvals", "CAPABILITY_DENIED", auth_err or "Unauthorized"
+            )
+
+        now = datetime.now(UTC)
+        stmt = select(MerchantApproval).where(MerchantApproval.merchant_id == context.merchant_id)
+        if request.status == "PENDING":
+            stmt = stmt.where(
+                MerchantApproval.status == "PENDING",
+                MerchantApproval.expires_at > now,
+            )
+        elif request.status:
+            stmt = stmt.where(MerchantApproval.status == request.status)
+
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total_count = (await session.execute(count_stmt)).scalar_one()
+
+        stmt = (
+            stmt.order_by(MerchantApproval.created_at.desc())
+            .offset(request.offset)
+            .limit(request.limit)
+        )
+        approvals = list((await session.execute(stmt)).scalars().all())
+
+        items = [
+            MerchantApprovalItem(
+                approval_id=a.id,
+                merchant_id=a.merchant_id,
+                quote_id=a.quote_id,
+                order_id=a.order_id,
+                session_id=a.session_id,
+                approval_type=a.approval_type,
+                status=a.status,
+                requested_amount_paise=a.requested_amount_paise,
+                proposed_discount_paise=a.proposed_discount_paise,
+                policy_rule_code=a.policy_rule_code,
+                reason=a.reason,
+                expires_at=a.expires_at,
+                created_at=a.created_at or datetime.now(UTC),
+            )
+            for a in approvals
+        ]
+
+        return GatewayResponseEnvelope[ListApprovalsResponse](
+            status="SUCCESS",
+            capability="list_approvals",
+            data=ListApprovalsResponse(
+                approvals=items,
+                total_count=total_count,
+            ),
+        )
+
+    # -------------------------------------------------------------------------
     # Unified Capability Dispatcher
     # -------------------------------------------------------------------------
     async def execute_capability(
@@ -1836,6 +2304,15 @@ class CanonicalCommerceGateway:
         settings = get_settings()
         request_id = context.request_id or uuid.uuid4()
         idempotency_key = payload.get("idempotency_key") or context.idempotency_key
+
+        # 0. Actor Type Verification (Fail-Closed)
+        if context.actor_type not in {"BUYER_AGENT", "MERCHANT_ADMIN", "SYSTEM"}:
+            return self._rejected_envelope(
+                capability_name,
+                "AUTH_INVALID_ACTOR_TYPE",
+                f"Unknown or untrusted actor type '{context.actor_type}'.",
+                request_id=request_id,
+            )
 
         # 1. Check capability registration
         cap_def = CapabilityRegistry.get_capability(capability_name)
@@ -1869,8 +2346,49 @@ class CanonicalCommerceGateway:
                 request_id=request_id,
             )
 
-        # 1d. Authoritative Session Validation & Capability Derivation
-        if capability_name != "initialize_session" and context.session_id:
+        # 1d. Authoritative Merchant Authentication Gate
+        m_stmt = select(Merchant).where(Merchant.id == context.merchant_id)
+        db_merchant = (await session.execute(m_stmt)).scalar_one_or_none()
+        if not db_merchant or db_merchant.status != "ACTIVE":
+            return self._rejected_envelope(
+                capability_name,
+                GatewayErrorCode.AUTH_INVALID_MERCHANT.value,
+                f"Merchant with ID '{context.merchant_id}' not found or inactive.",
+                request_id=request_id,
+            )
+
+        # 1e. Mandatory Session Boundary Gate
+        session_required_caps = {
+            "get_quote",
+            "negotiate_quote",
+            "accept_quote",
+            "create_order",
+            "request_checkout",
+            "get_payment_status",
+            "get_order_status",
+            "terminate_session",
+        }
+        has_session = context.session_id is not None and context.session_id != uuid.UUID(
+            "00000000-0000-0000-0000-000000000000"
+        )
+
+        if capability_name in session_required_caps and not has_session:
+            return self._rejected_envelope(
+                capability_name,
+                GatewayErrorCode.AUTH_SESSION_NOT_FOUND.value,
+                (
+                    f"Capability '{capability_name}' strictly requires "
+                    f"an active authenticated session."
+                ),
+                request_id=request_id,
+            )
+
+        # 1f. Authoritative Session Validation, Token Verification & Capability Derivation
+        if (
+            capability_name != "initialize_session"
+            and has_session
+            and context.actor_type == "BUYER_AGENT"
+        ):
             sess_stmt = select(BuyerAgentSession).where(
                 BuyerAgentSession.id == context.session_id,
                 BuyerAgentSession.merchant_id == context.merchant_id,
@@ -1906,7 +2424,7 @@ class CanonicalCommerceGateway:
                     request_id=request_id,
                 )
 
-            # Authoritative Token Authentication: fail-closed verification
+            # Authoritative Token Authentication: fail-closed cryptographic verification
             if db_sess.auth_token_hash:
                 if not context.auth_token:
                     return self._rejected_envelope(
@@ -1916,7 +2434,7 @@ class CanonicalCommerceGateway:
                         request_id=request_id,
                     )
                 presented_hash = hashlib.sha256(context.auth_token.encode("utf-8")).hexdigest()
-                if presented_hash != db_sess.auth_token_hash:
+                if not hmac.compare_digest(presented_hash, db_sess.auth_token_hash):
                     return self._rejected_envelope(
                         capability_name,
                         GatewayErrorCode.AUTH_INVALID_CREDENTIAL.value,
@@ -1924,13 +2442,54 @@ class CanonicalCommerceGateway:
                         request_id=request_id,
                     )
 
-            # Server-authoritative capability derivation: narrow request-derived
-            # grants to the persisted session grant. Sessions without a stored
-            # grant (legacy rows) retain the previous default-grant behavior.
+            # Server-authoritative capability derivation:
+            # Overwrite caller-supplied permissions with persisted session grant (fail-closed).
             stored_caps_raw = db_sess.granted_capabilities
             if stored_caps_raw:
                 stored_caps = {c.strip() for c in stored_caps_raw.split(",") if c.strip()}
                 context.capabilities = context.capabilities & stored_caps
+            else:
+                context.capabilities = context.capabilities & _ALLOWED_BUYER_CAPABILITIES
+
+        elif not has_session and context.actor_type == "BUYER_AGENT":
+            # Anonymous public discovery context is strictly bounded to read capabilities
+            context.capabilities = context.capabilities & {"buyer:discover", "buyer:read"}
+
+        elif context.actor_type == "MERCHANT_ADMIN":
+            context.capabilities = context.capabilities & {"merchant:admin"}
+
+        elif context.actor_type == "SYSTEM":
+            context.capabilities = context.capabilities & {"merchant:admin", "system:reconcile"}
+
+        # 1g. Authoritative Capability Authorization Gate
+        auth_ok, auth_err = CapabilityRegistry.check_authorization(capability_name, context)
+        if not auth_ok:
+            return self._rejected_envelope(
+                capability_name,
+                "CAPABILITY_DENIED",
+                auth_err or f"Session unauthorized for capability '{capability_name}'.",
+                request_id=request_id,
+            )
+
+        # 1h. Authoritative Merchant Policy Loading & Anti-Tampering Gate
+        # For non-admin buyers, policy settings (autonomy level, discount cap, margin, tx limit)
+        # must be loaded authoritatively from active merchant DB rules (INV-AGY-05 / Phase 4.2).
+        if context.actor_type != "MERCHANT_ADMIN":
+            policy_stmt = select(PolicyRule).where(
+                PolicyRule.merchant_id == context.merchant_id,
+                PolicyRule.is_active.is_(True),
+            )
+            db_rules = list((await session.execute(policy_stmt)).scalars().all())
+            for rule in db_rules:
+                val = rule.rule_value
+                if rule.rule_type == "MAX_DISCOUNT_PCT" and "max_discount_pct" in val:
+                    context.max_discount_percentage = float(val["max_discount_pct"])
+                elif rule.rule_type == "AUTONOMY_LEVEL" and "autonomy_level" in val:
+                    context.autonomy_level = int(val["autonomy_level"])
+                elif rule.rule_type == "MAX_CART_VALUE" and "max_single_tx_paise" in val:
+                    context.max_single_transaction_paise = int(val["max_single_tx_paise"])
+                elif rule.rule_type == "MIN_MARGIN_PCT" and "min_margin_pct" in val:
+                    context.min_margin_percentage = float(val["min_margin_pct"])
 
         # 2. Bounded Payload Size Validation (Max 64 KB)
         is_payload_valid, payload_size = validate_payload_size(payload)
@@ -2122,6 +2681,14 @@ class CanonicalCommerceGateway:
         elif capability_name == "get_order_status":
             req_ord_stat = GetOrderStatusRequest.model_validate(payload)
             return await self.get_order_status(session, req_ord_stat, context)
+
+        elif capability_name == "resolve_approval":
+            req_appr = ResolveApprovalRequest.model_validate(payload)
+            return await self.resolve_approval(session, req_appr, context)
+
+        elif capability_name == "list_approvals":
+            req_list = ListApprovalsRequest.model_validate(payload)
+            return await self.list_approvals(session, req_list, context)
 
         else:
             return self._rejected_envelope(

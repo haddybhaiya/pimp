@@ -697,3 +697,89 @@ class GetOrderStatusResponse(BaseModel):
     is_settled: bool = Field(
         ..., description="Whether payment for this order is captured and settled"
     )
+
+
+# -----------------------------------------------------------------------------
+# 12. Human-In-The-Loop (HITL) Merchant Approvals (Phase 4.2)
+# -----------------------------------------------------------------------------
+class ResolveApprovalRequest(BaseModel):
+    """Request parameter for resolving a pending human-in-the-loop merchant approval."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approval_id: uuid.UUID = Field(..., description="Approval ticket identifier to resolve")
+    decision: Literal["APPROVE", "REJECT"] = Field(
+        ..., description="Merchant decision (APPROVE or REJECT)"
+    )
+    reason: str | None = Field(
+        default=None, description="Optional merchant explanation for decision"
+    )
+    idempotency_key: str | None = Field(
+        default=None, max_length=128, description="Optional client idempotency key"
+    )
+
+
+class ResolveApprovalResponse(BaseModel):
+    """Response payload for an approval resolution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approval_id: uuid.UUID = Field(..., description="Resolved approval identifier")
+    status: str = Field(..., description="Updated status (APPROVED or REJECTED)")
+    quote_id: uuid.UUID | None = Field(
+        default=None, description="Associated quote ID if applicable"
+    )
+    decision: str = Field(..., description="Decision recorded (APPROVE or REJECT)")
+    resolved_at: datetime = Field(..., description="Timestamp of resolution")
+
+
+class MerchantApprovalItem(BaseModel):
+    """Authoritative snapshot of a merchant approval ticket."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approval_id: uuid.UUID = Field(..., description="Unique approval identifier")
+    merchant_id: uuid.UUID = Field(..., description="Merchant owner identifier")
+    quote_id: uuid.UUID | None = Field(default=None, description="Associated quote ID")
+    order_id: uuid.UUID | None = Field(default=None, description="Associated order ID")
+    session_id: uuid.UUID | None = Field(default=None, description="Originating session ID")
+    approval_type: str = Field(..., description="Type of approval ticket")
+    status: str = Field(..., description="Ticket status (PENDING, APPROVED, REJECTED, EXPIRED)")
+    requested_amount_paise: int = Field(
+        ...,
+        ge=0,
+        le=MAX_64BIT_INT,
+        description="Requested proposal total in paise",
+    )
+    proposed_discount_paise: int = Field(
+        ...,
+        ge=0,
+        le=MAX_64BIT_INT,
+        description="Proposed discount in paise",
+    )
+    policy_rule_code: str = Field(..., description="Policy rule code that triggered escalation")
+    reason: str = Field(..., description="Reason for escalation")
+    expires_at: datetime = Field(..., description="Approval ticket expiration timestamp")
+    created_at: datetime = Field(..., description="Creation timestamp")
+
+
+class ListApprovalsRequest(BaseModel):
+    """Request parameter for querying and listing merchant approval tickets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str | None = Field(
+        default="PENDING",
+        description="Filter by status ('PENDING', 'APPROVED', 'REJECTED', 'EXPIRED') or None",
+    )
+    limit: int = Field(default=20, ge=1, le=100, description="Max items to return")
+    offset: int = Field(default=0, ge=0, description="Pagination offset")
+
+
+class ListApprovalsResponse(BaseModel):
+    """Response payload containing a list of merchant approval tickets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approvals: list[MerchantApprovalItem] = Field(..., description="List of approval tickets")
+    total_count: int = Field(..., description="Total matching approvals count")

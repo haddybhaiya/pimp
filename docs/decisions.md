@@ -150,8 +150,35 @@
   - *Positive:* Fast, 100% deterministic, hermetic verification in CI without external network dependencies or live API key leaks. Completely preserves and exercises all internal domain models, state machines, database constraints, and cryptographic signatures.
   - *Negative:* The fake transport must be maintained in sync with any Razorpay API contract changes.
 
+---
 
+## ADR-013: Server-Authoritative Identity, Session Authentication & Multi-Tenant Capability Boundary Enforcement
 
+- **Status:** ACCEPTED
+- **Context:** External AI buyers, adapters, or adversaries may present forged credentials, forged `X-Capabilities` headers, expired session tokens, or attempt to probe/manipulate quotes and orders across tenant or session boundaries. Allowing client-supplied capability headers to elevate privileges or leaking resource existence through descriptive 403 errors enables credential forging and tenant snooping.
+- **Decision:**
+  1. **Constant-Time Cryptographic Token Verification:** Verify presented `auth_token` against database `BuyerAgentSession.auth_token_hash` using `hmac.compare_digest(sha256(auth_token), db_hash)` to protect against timing analysis attacks. Missing or invalid tokens fail closed with `AUTH_INVALID_CREDENTIAL`.
+  2. **Mandatory Session Gate for Privileged/Stateful Capabilities:** Stateful and privileged financial operations (`get_quote`, `negotiate_quote`, `accept_quote`, `create_order`, `request_checkout`, `get_payment_status`, `get_order_status`, `terminate_session`) strictly require an active, non-expired session (`AUTH_SESSION_NOT_FOUND` / `AUTH_SESSION_EXPIRED`). Anonymous requests are bounded strictly to read capabilities (`discover_products`, `get_product`, `check_inventory`, `calculate_shipping`).
+  3. **Server-Authoritative Capability Derivation:** Gateway capabilities are strictly bounded by `BuyerAgentSession.granted_capabilities` persisted in PostgreSQL. Client-supplied headers (e.g. `X-Capabilities: buyer:checkout`) can never self-grant or elevate permissions beyond the persisted grant (`INV-AGY-05`).
+  4. **Strict Cross-Tenant & Cross-Session Isolation:** All entity queries (`PriceQuote`, `Order`, `InventoryItem`, `BuyerAgentSession`) strictly filter by `merchant_id` and `session_id`. Mismatches return uniform generic not-found errors (`QUOTE_NOT_FOUND`, `ORDER_NOT_FOUND`, `AUTH_SESSION_NOT_FOUND`) without revealing resource existence across merchant or session boundaries.
+- **Consequences:**
+  - *Positive:* Eliminates privilege escalation, cross-tenant resource snooping, replay attacks, and timing attacks. Preserves strict separation of intelligence and authority.
+  - *Negative:* Session creation is required for all quoting and ordering workflows.
 
+---
 
+## ADR-014: Safety, Policy & Governance Kernel
+
+- **Status:** ACCEPTED
+- **Context:** Autonomous and AI-assisted commerce operations require deterministic guardrails, explainable reason codes, tamper-resistant governance records, Human-In-The-Loop (HITL) approval mechanics, and platform safety ceilings that cannot be bypassed by prompt injection, configuration tampering, or LLM non-determinism. Furthermore, audit event logs must maintain cryptographic integrity across time without leaking secrets or buyer PII.
+- **Decision:**
+  1. **Centralized Policy Decision Record & Deterministic Hashing:** Every consequential action evaluated by `DeterministicPolicyEngine` produces a `PolicyDecisionRecord` containing rule codes, verdicts (`ALLOW`, `DENY`, `ESCALATE_APPROVAL`), and a deterministic SHA-256 `policy_hash` derived from the normalized policy configuration (`compute_policy_hash()`). Future policy modifications do not invalidate historical audit records.
+  2. **Platform Safety Boundaries & Governance Ceilings:** The engine enforces hard platform limits: max 20 items per quote (`MAX_ITEMS_PER_QUOTE_EXCEEDED`), absolute 50% discount ceiling (`GOVERNANCE_MAX_DISCOUNT_CEILING_EXCEEDED`), ₹1,00,000 (10,000,000 paise) single transaction limit (`GOVERNANCE_MAX_TRANSACTION_LIMIT_EXCEEDED`), and maximum 3 negotiation rounds per quote (`MAX_NEGOTIATION_ATTEMPTS_EXCEEDED`).
+  3. **Human-In-The-Loop (HITL) Merchant Approval Model:** When a proposal exceeds merchant autonomy or discount limits, the system transitions to `ESCALATE_APPROVAL` and persists a `MerchantApproval` row. Resolving approvals via `resolve_approval` enforces strict merchant ownership, expiration deadlines, state machine validations, and optimistic locking to prevent race conditions.
+  4. **Immutable Audit Linkage & Cryptographic Hash Verification:** Every domain mutation logs an immutable audit event recording `request_id -> session_id -> quote_id -> policy_decision_hash -> order_id`. `AuditEvent.verify_chain()` detects any back-channel database tampering.
+  5. **Zero Secret & Masked PII Redaction:** Audit payloads pass through `sanitize_audit_payload()` to redact sensitive tokens/secrets (`auth_token`, `key_secret`, `password`, `card_number`) to `"[REDACTED_SECRET]"` and mask buyer emails (`a***r@example.com`), ensuring audit logs remain safe for forensic inspection.
+  6. **Anti-Context Tampering Gate:** For non-admin callers, gateway capability execution overrides caller-supplied policy parameters by loading authoritative merchant rules directly from PostgreSQL (`PolicyRule`).
+- **Consequences:**
+  - *Positive:* Physically guarantees explainability, policy boundaries, audit traceability, and zero secret leakage. Protects merchants from runaway agent behavior and external adversarial manipulation.
+  - *Negative:* Escrow/HITL requests require asynchronous merchant resolution, slightly increasing order negotiation latency for high-value counter-offers.
 

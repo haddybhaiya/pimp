@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
@@ -15,6 +16,66 @@ from agent_ready_merchant.db.base import GUID, Base, utc_now
 if TYPE_CHECKING:
     from agent_ready_merchant.models.merchant import Merchant
     from agent_ready_merchant.models.session import BuyerAgentSession
+
+_EMAIL_REGEX = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+
+
+def _mask_email_str(value: str) -> str:
+    def _replace_email(match: re.Match[str]) -> str:
+        full_email = match.group(0)
+        parts = full_email.split("@", 1)
+        user, domain = parts[0], parts[1]
+        masked_user = f"{user[0]}***{user[-1]}" if len(user) > 2 else f"{user[:1]}***"
+        return f"{masked_user}@{domain}"
+
+    return _EMAIL_REGEX.sub(_replace_email, value)
+
+
+def sanitize_audit_payload(payload: Any) -> Any:
+    """Sanitizes an audit payload by redacting credentials, secrets, and masking PII.
+
+    Preserves structural evidence without compromising security (INV-AGY-03).
+    """
+    sensitive_keys = {
+        "token",
+        "id_token",
+        "auth_token",
+        "auth_token_raw",
+        "key_secret",
+        "rzp_key_secret",
+        "secret",
+        "password",
+        "raw_token",
+        "token_raw",
+        "api_key",
+        "card_number",
+        "cvv",
+        "authorization",
+        "bearer",
+        "jwt",
+        "access_token",
+        "refresh_token",
+        "private_key",
+        "signature",
+    }
+    if isinstance(payload, dict):
+        sanitized = {}
+        for k, v in payload.items():
+            k_lower = str(k).lower()
+            if any(s in k_lower for s in sensitive_keys):
+                sanitized[k] = "[REDACTED_SECRET]"
+            elif isinstance(v, str):
+                sanitized[k] = _mask_email_str(v)
+            elif isinstance(v, (dict, list)):
+                sanitized[k] = sanitize_audit_payload(v)
+            else:
+                sanitized[k] = v
+        return sanitized
+    elif isinstance(payload, list):
+        return [sanitize_audit_payload(item) for item in payload]
+    elif isinstance(payload, str):
+        return _mask_email_str(payload)
+    return payload
 
 
 class AuditEvent(Base):
@@ -116,6 +177,9 @@ class AuditEvent(Base):
         session_id: uuid.UUID | None = None,
     ) -> "AuditEvent":
         """Appends a new audit event with deterministic cryptographic hash chaining."""
+        # Sanitize payload: strip credentials, secrets, and mask PII (INV-AGY-03)
+        sanitized = sanitize_audit_payload(payload)
+
         # In PostgreSQL, serialize audit event appends per merchant to guarantee
         # linear chain integrity
         bind = session.get_bind()
@@ -151,7 +215,7 @@ class AuditEvent(Base):
             session_id=session_id,
             actor_type=actor_type,
             event_type=event_type,
-            payload=payload,
+            payload=sanitized,
         )
 
         event = cls(
@@ -159,7 +223,7 @@ class AuditEvent(Base):
             session_id=session_id,
             actor_type=actor_type,
             event_type=event_type,
-            payload=payload,
+            payload=sanitized,
             prev_event_hash=prev_hash,
             event_hash=digest,
         )

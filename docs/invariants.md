@@ -46,3 +46,17 @@
    An expired quote (`now() > expires_at`) cannot be accepted, converted into an order, or paid.
 5. **Immutable Financial Ledger (INV-STA-05):**  
    `transaction_records` and `audit_events` tables are strictly append-only. `UPDATE` and `DELETE` queries are prohibited at the database role level.
+
+---
+
+## 4. Safety, Policy & Governance Invariants
+
+1. **Deterministic Policy Hashing (INV-GOV-01):**  
+   Every policy decision evaluated for a consequential commerce action must generate and record an immutable, deterministic SHA-256 policy hash (`policy_hash`) and policy version (`policy_version`) in the audit log. Future policy modifications must never alter or invalidate historical audit interpretations.
+2. **Platform Safety Ceilings (INV-GOV-02):**  
+   Platform safety bounds are non-negotiable hard ceilings: maximum 20 items per quote, absolute 50% discount ceiling, ₹1,00,000 (10,000,000 paise) single transaction limit, and maximum 3 negotiation rounds per quote.
+3. **Fail-Closed Human-In-The-Loop Approval Gates (INV-GOV-03):**  
+   Any action requiring human approval (e.g. Autonomy Level 2 Supervised HITL or discount escalation) must generate a stateful, expiring `MerchantApproval` record. Expired, forged, or cross-tenant approvals must fail closed deterministically.
+4. **Audit Cryptographic Integrity & Sanitization (INV-GOV-04):**  
+   Every audit event must be linked in an unbroken cryptographic SHA-256 hash chain verified via `AuditEvent.verify_chain()`. All secrets, tokens, credentials, and buyer PII (email addresses) must be sanitized and masked before being committed to the immutable audit ledger.
+
