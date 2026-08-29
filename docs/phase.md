@@ -25,29 +25,23 @@
 | **Phase 3.3** | End-to-End Payment Verification & Deliberate Failure Suite | **COMPLETED** | Deterministic E2E verification suite, fake Razorpay transport, 1 golden-path lifecycle + 16 deliberate failure scenarios (17 total), zero side-effect verification |
 | **Phase 4.1** | Security Boundary & Authorization Hardening | **COMPLETED** | Server-authoritative identity, constant-time token verification, mandatory session boundary on privileged/stateful capabilities, anti-resource existence probing, adversarial verification |
 | **Phase 4.2** | Safety, Policy & Governance Kernel | **COMPLETED** | Centralized policy decision records, immutable audit linkage, deterministic policy hashing, HITL approval gate, platform governance ceilings, zero secret/PII audit sanitization |
+| **Phase 5.1** | Web Foundation & Public Surface | **COMPLETED** | Public landing page, merchant authentication, setup wizard, authenticated SPA shell, responsive component tokens, typed API client, error normalization |
+| **Phase 5.2** | Merchant Admin Portal Views & HITL Operations | **NOT STARTED** | Approvals UI, catalog editor, orders & settlements, policy config, audit viewer |
 
 ---
 
-## Phase 4.1 Deliverables Completed
+## Phase 5.1 Deliverables Completed
 
-- [x] **Server-Authoritative Session Authentication:** Constant-time cryptographic token verification (`hmac.compare_digest`) against persisted SHA-256 token hashes (`auth_token_hash`) to mitigate timing attacks.
-- [x] **Mandatory Session Boundary Gate:** Stateful and privileged capabilities (`get_quote`, `negotiate_quote`, `accept_quote`, `create_order`, `request_checkout`, `get_payment_status`, `get_order_status`, `terminate_session`) strictly require an active authenticated session (`AUTH_SESSION_NOT_FOUND` fail-closed).
-- [x] **Server-Authoritative Capability Derivation:** Gateway strictly derives permissions from database-persisted `BuyerAgentSession.granted_capabilities`, ignoring caller-provided capability elevation (`X-Capabilities`) and failing unauthorized calls closed with `CAPABILITY_DENIED`.
-- [x] **Multi-Tenant & Cross-Session Isolation:** Strict row-level verification ensuring buyers cannot access, negotiate, accept, order, or inspect quotes/orders belonging to different merchants or sessions.
-- [x] **Anti-Resource Existence Probing:** Uniform not-found errors (`QUOTE_NOT_FOUND`, `ORDER_NOT_FOUND`, `AUTH_SESSION_NOT_FOUND`) on mismatched merchant/session lookups to prevent tenant probing and UUID guessing.
-- [x] **Session Expiry & Lifecycle Enforcement:** Real-time expiration enforcement automatically transitioning stale sessions to `EXPIRED` in the database and rejecting replayed credentials.
-- [x] **Adversarial Test Suite (`tests/test_phase4_1_security_and_authorization.py`):** 12 comprehensive adversarial tests covering forged tokens, wrong merchants, wrong sessions, forged capabilities, expired sessions, replayed credentials, cross-tenant quote/order access, unauthorized financial mutations, anonymous caller rejections, and malformed contexts.
+- [x] **Public Landing Page Surface:** Modern, responsive public hero surface highlighting autonomous AI commerce capabilities, ACP protocol support, policy governance, and live interactive protocol visualizer.
+- [x] **Server-Authoritative Merchant Authentication:** Implemented `MerchantAuthService` with HMAC SHA-256 signed bearer tokens, slug-based registration (`/api/v1/merchant/auth/signup`), login (`/api/v1/merchant/auth/login`), profile retrieval (`/api/v1/merchant/auth/me`), and multi-tenant isolation.
+- [x] **Multi-Step Onboarding / Setup Flow:** 4-step guided setup wizard (Store Identity -> Razorpay Settlement Gateway -> Autonomous Policy Bounds -> Review & Activation) with atomic persistence of seeded `PolicyRule` records.
+- [x] **Authenticated Application Shell & Navigation:** Desktop sidebar + mobile collapsible navigation drawer, active merchant context display, environment badge, session expiration detection, and route guards.
+- [x] **Reusable Accessible UI Component System:** Standardized foundational primitives (`Button`, `Input`, `Badge`, `Card`, `Dialog`, `StepIndicator`, `Skeleton`, `EmptyState`) respecting design tokens and zero secret leakage.
+- [x] **Strict Typed API Client Layer:** Frontend `ApiClient` handling standard headers (`X-Merchant-ID`, `X-Auth-Token`, `Authorization`), automatic 401/403 session expiration interception, and `ApiError` normalization.
+- [x] **Dual-Mode Root Endpoint & Static SPA Serving:** FastAPI serves compiled SPA assets (`src/agent_ready_merchant/static`) for browser visits across all web routes while preserving JSON metadata descriptors for API clients.
+- [x] **Test Verification Matrix:**
+  - Frontend: 17 unit and integration tests passing in Vitest (`api-client.test.ts`, `auth-store.test.tsx`, `ui-components.test.tsx`, `onboarding.test.tsx`, `router.test.tsx`).
+  - Backend: 11 integration tests passing in pytest (`tests/test_phase5_1_web_foundation.py`).
+- [x] **Full Quality Gate Compliance:** 100% clean passes on `ruff format`, `ruff check`, `mypy (strict)`, Vitest (17 tests), and Pytest (244 passing tests across all test suites, 2 skipped, 84% coverage).
 
----
-
-## Phase 4.2 Deliverables Completed
-
-- [x] **Centralized Policy Decision Record & Hashing:** Added `PolicyDecisionRecord` and `compute_policy_hash()` generating deterministic SHA-256 hashes over policy rules. Policy versions and hashes are stamped immutably onto audit logs.
-- [x] **Platform Governance Ceilings:** Enforced platform safety boundaries: maximum 20 items per quote (`MAX_ITEMS_PER_QUOTE_EXCEEDED`), absolute 50% discount ceiling (`GOVERNANCE_MAX_DISCOUNT_CEILING_EXCEEDED`), ₹1,00,000 single transaction limit (`GOVERNANCE_MAX_TRANSACTION_LIMIT_EXCEEDED`), and maximum 3 negotiation rounds (`MAX_NEGOTIATION_ATTEMPTS_EXCEEDED`).
-- [x] **Human-In-The-Loop (HITL) Merchant Approval Gate:** Created `MerchantApproval` model and `resolve_approval` capability with strict expiration, optimistic locking, and cross-tenant isolation.
-- [x] **Immutable Audit Linkage & Anti-Tampering:** End-to-end audit trace linking `request_id -> session_id -> quote_id -> policy_decision_hash -> order_id`. Cryptographic SHA-256 chain verification (`AuditEvent.verify_chain`) detects storage mutations.
-- [x] **Audit Secret & PII Sanitization:** Automatic redaction of credentials (`auth_token`, `key_secret`, `password`, `card_number`) and masking of buyer emails (`a***r@example.com`) in immutable audit event payloads.
-- [x] **Anti-Context Tampering Gate:** Gateway authoritatively queries merchant configuration from PostgreSQL for non-admin actors, preventing buyer context injection attacks.
-- [x] **Adversarial Test Suite (`tests/test_phase4_2_safety_policy_governance.py`):** 18 comprehensive adversarial tests verifying floor breach protection, immutable policy hashes, expired approval tickets, forged/cross-tenant approvals, audit tampering detection, secret/PII redaction, race safety, context tampering override, governance bounds, non-authoritative LLM mutations, line-discount distribution, list_approvals capability, escalation deduplication, lazy ticket expiration audit events, and generic token/email masking.
-- [x] **Full Quality Gate Compliance:** 100% clean passes on `ruff format`, `ruff check`, `mypy (strict)`, and `pytest` (233 passing tests across all test suites, 2 skipped).
 

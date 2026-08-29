@@ -178,7 +178,20 @@
   4. **Immutable Audit Linkage & Cryptographic Hash Verification:** Every domain mutation logs an immutable audit event recording `request_id -> session_id -> quote_id -> policy_decision_hash -> order_id`. `AuditEvent.verify_chain()` detects any back-channel database tampering.
   5. **Zero Secret & Masked PII Redaction:** Audit payloads pass through `sanitize_audit_payload()` to redact sensitive tokens/secrets (`auth_token`, `key_secret`, `password`, `card_number`) to `"[REDACTED_SECRET]"` and mask buyer emails (`a***r@example.com`), ensuring audit logs remain safe for forensic inspection.
   6. **Anti-Context Tampering Gate:** For non-admin callers, gateway capability execution overrides caller-supplied policy parameters by loading authoritative merchant rules directly from PostgreSQL (`PolicyRule`).
+---
+
+## ADR-015: Web Foundation, Server-Authoritative Merchant Authentication & SPA Shell
+
+- **Status:** ACCEPTED
+- **Context:** Delivering a production-ready merchant control plane requires a responsive, high-performance web surface, secure server-authoritative authentication for store owners, multi-step onboarding wizard, robust route guards, API client error normalization, and visual component tokens inspired by modern accessible UI systems without compromising domain invariants or exposing backend secrets to the browser.
+- **Decision:**
+  1. **Server-Authoritative Merchant Authentication & Tamper-Evident Tokens:** Built `MerchantAuthService` with HMAC SHA-256 signed bearer tokens encoding merchant ID, slug, and expiration timestamp. Unauthenticated access fails closed (401/403). Cross-tenant queries are strictly rejected.
+  2. **Single-Page Application (SPA) Shell & Dual-Mode Root Surface:** Implemented a modern React 18 + TypeScript + Tailwind CSS application in `frontend/` compiled directly to `src/agent_ready_merchant/static/`. FastAPI serves the SPA bundle for browser requests (`Accept: text/html`) across public and protected client routes (`/`, `/login`, `/signup`, `/onboarding`, `/dashboard`, `/approvals`, `/catalog`, `/orders`, `/policies`, `/audit`) while preserving machine-readable JSON root descriptors for programmatic API clients.
+  3. **Multi-Step Guided Merchant Onboarding Wizard:** Designed a 4-step interactive setup flow (Store Identity -> Razorpay Settlement Gateway -> Autonomous Policy Bounds -> Review & Activation) with real-time validation and atomic database persistence of default `PolicyRule` records.
+  4. **Strict Typed API Client with Fail-Closed Error Interception:** Built `ApiClient` with unified headers (`X-Merchant-ID`, `X-Auth-Token`, `Authorization`), automatic 401/403 session expiration detection, and structured `ApiError` normalization.
+  5. **Accessible Reusable UI Component System:** Created foundational primitives (`Button`, `Input`, `Badge`, `Card`, `Dialog`, `StepIndicator`, `Skeleton`, `EmptyState`) strictly respecting design tokens, keyboard navigation, and zero secret leakage (`INV-AGY-03`).
 - **Consequences:**
-  - *Positive:* Physically guarantees explainability, policy boundaries, audit traceability, and zero secret leakage. Protects merchants from runaway agent behavior and external adversarial manipulation.
-  - *Negative:* Escrow/HITL requests require asynchronous merchant resolution, slightly increasing order negotiation latency for high-value counter-offers.
+  - *Positive:* Delivers a complete, tested, responsive web foundation for the Agent-Ready Merchant control plane that seamlessly interfaces with existing canonical gateway and settlement endpoints.
+  - *Negative:* Frontend assets require compilation with `npm run build` during distribution.
+
 

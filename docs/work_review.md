@@ -579,6 +579,42 @@ P3: Webhook secrets and Razorpay credentials are inlined throughout the file, bu
 - **Verified by:** Typecheck and gateway capability tests.
 
 
+## Review 9 Resolution Status
+> **Status:** **ALL RESOLVED & VERIFIED (Prior to Phase 5.1)**
+> - Stale approval terms resolved with deduplication and quote version increment.
+> - Registry failure states and merchant:admin actor type fully wired.
+> - Deterministic policy hash normalization and immutable deep-copied records in `PolicyDecisionRecord`.
+> - Doc counts reconciled.
+
+---
+
+# Phase 5.1: Web Foundation & Public Surface Review Report
+
+### 1. Scope & Execution Summary
+Phase 5.1 establishes the production web foundation and merchant public surface for the Agent-Ready Merchant platform:
+- **Public Landing Page Surface:** High-conversion responsive surface showcasing ACP agent protocol readiness, policy governance, Razorpay infrastructure, and live interactive protocol visualizer.
+- **Server-Authoritative Merchant Authentication:** Implemented `MerchantAuthService` (`src/agent_ready_merchant/services/merchant_auth_service.py`) and schemas (`src/agent_ready_merchant/schemas/merchant_auth.py`) providing tamper-evident HMAC SHA-256 bearer tokens, slug registration (`POST /api/v1/merchant/auth/signup`), login (`POST /api/v1/merchant/auth/login`), and profile discovery (`GET /api/v1/merchant/auth/me`).
+- **Merchant Onboarding Flow:** 4-step interactive guided setup wizard (Store Identity -> Razorpay Settlement Gateway -> Autonomous Policy Bounds -> Review & Activation) with atomic persistence of seeded `PolicyRule` records.
+- **Authenticated Application Shell:** Responsive sidebar navigation with mobile collapsible drawer, active merchant context display, environment badge, session expiration detection, and protected route guards.
+- **Reusable UI Component System:** Standardized accessible component foundation (`Button`, `Input`, `Badge`, `Card`, `Dialog`, `StepIndicator`, `Skeleton`, `EmptyState`) in `frontend/src/components/ui/` adhering strictly to design tokens.
+- **Strict Typed API Client Layer:** Robust client (`frontend/src/lib/api-client.ts`) with header injection (`X-Merchant-ID`, `X-Auth-Token`, `Authorization`), automatic 401/403 session expiration interception, and normalized error models.
+- **Dual-Mode Root Endpoint & Static SPA Serving:** FastAPI serves compiled SPA assets (`src/agent_ready_merchant/static`) for browser visits across all web routes while preserving JSON metadata descriptors for API clients.
+
+### 2. Quality Gate Verification
+- **Formatting (`ruff format --check .`):** 100% PASS (128 files checked)
+- **Linting (`ruff check .`):** 100% PASS (0 lint errors)
+- **Type Checking (`mypy src tests`):** 100% PASS (122 source files, 0 errors)
+- **Frontend Test Suite (`npm test` in `frontend/`):** 100% PASS (17 tests passing across 5 test files)
+- **Backend Test Suite (`pytest --cov=agent_ready_merchant`):** 100% PASS (244 passed, 2 skipped, 84% coverage)
+
+### 3. Architecture & Invariants Verified
+- `INV-FIN-01`: Integer paise representation maintained in all onboarding policy inputs and currency formatters.
+- `INV-AGY-01`: Separation of intelligence and authority strictly preserved; web UI cannot bypass server-authoritative validations.
+- `INV-AGY-03`: Zero secret leakage — API key secrets and webhook secrets remain in server environment and are never sent to or stored in the browser.
+- Multi-tenant token isolation: Cryptographic tokens verify merchant ID match; cross-tenant profile reads return 401 Unauthorized.
+
+
+
 
 
 
