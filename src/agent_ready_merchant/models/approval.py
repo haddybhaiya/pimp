@@ -30,6 +30,14 @@ class MerchantApproval(Base, TimestampMixin, OptimisticLockMixin):
             "approval_type IN ('QUOTE_DISCOUNT', 'ORDER_LIMIT', 'GENERAL')",
             name="ck_merchant_approvals_type_valid",
         ),
+        CheckConstraint(
+            "requested_amount_paise >= 0",
+            name="ck_merchant_approvals_requested_amount_non_negative",
+        ),
+        CheckConstraint(
+            "proposed_discount_paise >= 0",
+            name="ck_merchant_approvals_proposed_discount_non_negative",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -45,7 +53,7 @@ class MerchantApproval(Base, TimestampMixin, OptimisticLockMixin):
     )
     quote_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(),
-        ForeignKey("price_quotes.id", ondelete="CASCADE"),
+        ForeignKey("price_quotes.id", ondelete="RESTRICT"),
         nullable=True,
         index=True,
     )

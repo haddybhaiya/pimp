@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
@@ -16,6 +17,19 @@ if TYPE_CHECKING:
     from agent_ready_merchant.models.merchant import Merchant
     from agent_ready_merchant.models.session import BuyerAgentSession
 
+_EMAIL_REGEX = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+
+
+def _mask_email_str(value: str) -> str:
+    def _replace_email(match: re.Match[str]) -> str:
+        full_email = match.group(0)
+        parts = full_email.split("@", 1)
+        user, domain = parts[0], parts[1]
+        masked_user = f"{user[0]}***{user[-1]}" if len(user) > 2 else f"{user[:1]}***"
+        return f"{masked_user}@{domain}"
+
+    return _EMAIL_REGEX.sub(_replace_email, value)
+
 
 def sanitize_audit_payload(payload: Any) -> Any:
     """Sanitizes an audit payload by redacting credentials, secrets, and masking PII.
@@ -23,6 +37,8 @@ def sanitize_audit_payload(payload: Any) -> Any:
     Preserves structural evidence without compromising security (INV-AGY-03).
     """
     sensitive_keys = {
+        "token",
+        "id_token",
         "auth_token",
         "auth_token_raw",
         "key_secret",
@@ -48,11 +64,8 @@ def sanitize_audit_payload(payload: Any) -> Any:
             k_lower = str(k).lower()
             if any(s in k_lower for s in sensitive_keys):
                 sanitized[k] = "[REDACTED_SECRET]"
-            elif k_lower in {"buyer_email", "email"} and isinstance(v, str) and "@" in v:
-                parts = v.split("@", 1)
-                user, domain = parts[0], parts[1]
-                masked_user = f"{user[0]}***{user[-1]}" if len(user) > 2 else f"{user[:1]}***"
-                sanitized[k] = f"{masked_user}@{domain}"
+            elif isinstance(v, str):
+                sanitized[k] = _mask_email_str(v)
             elif isinstance(v, (dict, list)):
                 sanitized[k] = sanitize_audit_payload(v)
             else:
@@ -60,6 +73,8 @@ def sanitize_audit_payload(payload: Any) -> Any:
         return sanitized
     elif isinstance(payload, list):
         return [sanitize_audit_payload(item) for item in payload]
+    elif isinstance(payload, str):
+        return _mask_email_str(payload)
     return payload
 
 

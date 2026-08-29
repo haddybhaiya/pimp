@@ -3,8 +3,7 @@
 Adheres strictly to docs/policy-model.md and INV-FIN-01 / INV-FIN-02 / INV-FIN-03 / INV-AGY-02.
 """
 
-from __future__ import annotations
-
+import copy
 import hashlib
 import json
 import uuid
@@ -13,7 +12,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from agent_ready_merchant.gateway.constants import COMMERCE_PROTOCOL_VERSION
+from agent_ready_merchant.constants import COMMERCE_PROTOCOL_VERSION
 
 
 class PolicyVerdict(StrEnum):
@@ -22,6 +21,21 @@ class PolicyVerdict(StrEnum):
     ALLOW = "ALLOW"
     DENY = "DENY"
     ESCALATE_APPROVAL = "ESCALATE_APPROVAL"
+
+
+def _normalize_canonical(val: Any) -> Any:
+    """Recursively normalizes Python data structures for deterministic JSON serialization."""
+    if isinstance(val, dict):
+        return {
+            str(k): _normalize_canonical(v) for k, v in sorted(val.items(), key=lambda x: str(x[0]))
+        }
+    elif isinstance(val, (list, tuple)):
+        return [_normalize_canonical(item) for item in val]
+    elif isinstance(val, (set, frozenset)):
+        return sorted([_normalize_canonical(item) for item in val], key=str)
+    elif isinstance(val, (bool, int, float, str)) or val is None:
+        return val
+    return str(val)
 
 
 def compute_policy_hash(
@@ -46,7 +60,8 @@ def compute_policy_hash(
         "rules": clean_rules,
         "version": str(version),
     }
-    serialized = json.dumps(canonical_dict, sort_keys=True, default=str)
+    normalized = _normalize_canonical(canonical_dict)
+    serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
@@ -63,6 +78,10 @@ class PolicyDecisionRecord:
     evaluated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     context_snapshot: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "context_snapshot", copy.deepcopy(self.context_snapshot))
+        object.__setattr__(self, "metadata", copy.deepcopy(self.metadata))
 
 
 @dataclass(frozen=True)

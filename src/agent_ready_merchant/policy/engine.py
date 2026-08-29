@@ -278,10 +278,10 @@ class DeterministicPolicyEngine:
     def evaluate_rules_pipeline(
         cls,
         rules: list[Callable[[], PolicyEvaluationResult]],
-        context: PolicyContext | None = None,
+        context: PolicyContext,
     ) -> PolicyEvaluationResult:
         """Generic pipeline evaluator enforcing fail-closed resolution."""
-        effective_context = context or PolicyContext()
+        effective_context = context
         try:
             escalation_result: PolicyEvaluationResult | None = None
 

@@ -281,16 +281,32 @@ def evaluate_governance_limits(proposal: QuoteProposal) -> PolicyEvaluationResul
 
     # 2. Platform Absolute Maximum Discount Ceiling (50%)
     if proposal.subtotal_paise > 0:
-        discount_ratio = proposal.discount_paise / proposal.subtotal_paise
+        if any(item.proposed_unit_price_paise <= 0 for item in proposal.items):
+            effective_discount_paise = proposal.discount_paise
+        else:
+            line_items_total = (
+                sum(item.proposed_unit_price_paise * item.quantity for item in proposal.items)
+                if proposal.items
+                else proposal.subtotal_paise - proposal.discount_paise
+            )
+            effective_discount_paise = max(
+                proposal.discount_paise,
+                proposal.subtotal_paise - line_items_total,
+            )
+        discount_ratio = effective_discount_paise / proposal.subtotal_paise
         if discount_ratio > 0.50:
             return PolicyEvaluationResult(
                 verdict=PolicyVerdict.DENY,
                 rule_code="GOVERNANCE_MAX_DISCOUNT_CEILING_EXCEEDED",
                 reason=(
-                    f"Discount ratio {discount_ratio * 100:.1f}% exceeds absolute "
+                    f"Effective discount ratio {discount_ratio * 100:.1f}% exceeds absolute "
                     "platform governance ceiling of 50.0%"
                 ),
-                metadata={"discount_ratio": discount_ratio, "max_ceiling": 0.50},
+                metadata={
+                    "discount_ratio": discount_ratio,
+                    "effective_discount_paise": effective_discount_paise,
+                    "max_ceiling": 0.50,
+                },
             )
 
     # 3. Platform Absolute Maximum Single Transaction Limit (₹1,00,000 / 10,000,000 paise)
