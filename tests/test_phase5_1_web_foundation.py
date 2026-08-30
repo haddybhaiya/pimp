@@ -392,11 +392,11 @@ async def test_spa_fallback_routes_and_html_surface() -> None:
         html_resp = await client.get("/", headers={"Accept": "text/html,application/xhtml+xml"})
         assert html_resp.status_code == 200
         assert "text/html" in html_resp.headers["content-type"]
-        assert "Agent-Ready Merchant" in html_resp.text
+        assert '<div id="root"></div>' in html_resp.text
 
         # SPA protected & public client routes return HTML shell
         for route in ["/login", "/signup", "/onboarding", "/dashboard", "/approvals"]:
             r = await client.get(route)
             assert r.status_code == 200
             assert "text/html" in r.headers["content-type"]
-            assert "root" in r.text or "Agent-Ready Merchant" in r.text
+            assert '<div id="root"></div>' in r.text
