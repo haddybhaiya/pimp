@@ -1,0 +1,306 @@
+"""Phase 5.3 Demo & Integration Hardening Adversarial Test Suite."""
+
+import uuid
+from datetime import UTC, datetime
+
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from agent_ready_merchant.config import get_settings
+from agent_ready_merchant.main import app
+from agent_ready_merchant.models.inventory import InventoryItem
+from agent_ready_merchant.models.merchant import Merchant
+from agent_ready_merchant.models.product import Product, ProductVariant
+from agent_ready_merchant.services.merchant_auth_service import MerchantAuthService
+
+
+@pytest_asyncio.fixture
+async def setup_two_merchants(db_session: AsyncSession):
+    """Creates two distinct merchants with auth tokens for multi-tenant isolation testing."""
+    settings = get_settings()
+    secret = settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
+
+    # Merchant Alpha
+    m1 = Merchant(
+        name="Alpha Athletics",
+        slug=f"alpha-store-{uuid.uuid4().hex[:6]}",
+        rzp_key_id="rzp_test_alpha_key",
+        currency="INR",
+        status="ACTIVE",
+        created_at=datetime.now(UTC),
+    )
+    db_session.add(m1)
+    await db_session.flush()
+
+    token1 = MerchantAuthService.generate_admin_token(m1.id, secret, slug=m1.slug)
+
+    # Merchant Beta
+    m2 = Merchant(
+        name="Beta Boutique",
+        slug=f"beta-store-{uuid.uuid4().hex[:6]}",
+        rzp_key_id="rzp_test_beta_key",
+        currency="INR",
+        status="ACTIVE",
+        created_at=datetime.now(UTC),
+    )
+    db_session.add(m2)
+    await db_session.flush()
+
+    token2 = MerchantAuthService.generate_admin_token(m2.id, secret, slug=m2.slug)
+    await db_session.commit()
+
+    return {
+        "m1": m1,
+        "token1": token1,
+        "m2": m2,
+        "token2": token2,
+        "secret": secret,
+    }
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_and_standard_auto_commerce_flow(
+    setup_two_merchants, db_session: AsyncSession
+):
+    """Verifies complete standard autonomous flow: seed catalog -> quote -> order -> settled."""
+    data = setup_two_merchants
+    m1 = data["m1"]
+    token1 = data["token1"]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # 1. Seed Demo Data
+        seed_res = await client.post(
+            "/api/v1/merchant/demo/seed",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+        )
+        assert seed_res.status_code == 200
+        seed_data = seed_res.json()
+        assert seed_data["products_seeded"] >= 3
+        assert seed_data["policies_configured"] is True
+
+        # 2. Execute Standard Auto Commerce Simulation
+        sim_res = await client.post(
+            "/api/v1/merchant/demo/simulate",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            json={
+                "scenario": "STANDARD_AUTO_COMMERCE",
+                "sku": "RUN-PRO-01",
+                "quantity": 1,
+                "target_discount_pct": 10.0,
+            },
+        )
+        assert sim_res.status_code == 200
+        sim_data = sim_res.json()
+        assert sim_data["status"] == "SETTLED"
+        assert sim_data["policy_verdict"] == "ALLOW"
+        assert sim_data["order_id"] is not None
+        assert sim_data["rzp_order_id"] is not None
+        assert sim_data["rzp_payment_id"] is not None
+        assert sim_data["subtotal_paise"] == 1299900
+        assert sim_data["discount_paise"] == 129990
+        assert sim_data["total_paise"] == 1169910
+        assert len(sim_data["steps"]) >= 5
+
+        # 3. Verify Order in Order Ledger
+        orders_res = await client.get(
+            "/api/v1/merchant/orders",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+        )
+        assert orders_res.status_code == 200
+        orders = orders_res.json()
+        assert len(orders) >= 1
+        assert any(o["id"] == sim_data["order_id"] for o in orders)
+
+        # 4. Verify Cryptographic Audit Chain
+        audit_res = await client.get(
+            "/api/v1/merchant/audit",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+        )
+        assert audit_res.status_code == 200
+        audit_data = audit_res.json()
+        assert audit_data["chain_valid"] is True
+        assert audit_data["total_count"] >= 3
+
+
+@pytest.mark.asyncio
+async def test_demo_hitl_escalation_and_approval_resolution_flow(
+    setup_two_merchants, db_session: AsyncSession
+):
+    """Verifies HITL escalation: 20% discount requested -> approval ticket generated -> approved."""
+    data = setup_two_merchants
+    m1 = data["m1"]
+    token1 = data["token1"]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # 1. Execute HITL Escalation Simulation
+        sim_res = await client.post(
+            "/api/v1/merchant/demo/simulate",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            json={
+                "scenario": "HITL_ESCALATION_COMMERCE",
+                "sku": "RUN-PRO-01",
+                "quantity": 1,
+            },
+        )
+        assert sim_res.status_code == 200
+        sim_data = sim_res.json()
+        assert sim_data["status"] == "PENDING_APPROVAL"
+        assert sim_data["policy_verdict"] == "ESCALATE_APPROVAL"
+        approval_id = sim_data["approval_id"]
+        assert approval_id is not None
+
+        # 2. Check Approvals Queue
+        approvals_res = await client.get(
+            "/api/v1/merchant/approvals?status=PENDING",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+        )
+        assert approvals_res.status_code == 200
+        approvals = approvals_res.json()
+        assert any(a["id"] == approval_id for a in approvals)
+
+        # 3. Resolve Approval as Merchant (Approve)
+        resolve_res = await client.post(
+            f"/api/v1/merchant/approvals/{approval_id}/resolve",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            json={
+                "decision": "APPROVE",
+                "reason_note": "Special demo customer discount approved by merchant.",
+            },
+        )
+        assert resolve_res.status_code == 200
+        resolved = resolve_res.json()
+        assert resolved["status"] == "APPROVED"
+
+
+@pytest.mark.asyncio
+async def test_adversarial_forged_merchant_id_rejection(setup_two_merchants):
+    """Adversarial Test: Tampered X-Merchant-ID with token of another merchant fails closed."""
+    data = setup_two_merchants
+    m2 = data["m2"]
+    token1 = data["token1"]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.get(
+            "/api/v1/merchant/dashboard/summary",
+            headers={"X-Merchant-ID": str(m2.id), "X-Auth-Token": token1},
+        )
+        assert res.status_code == 401
+        detail = res.json().get("detail", "")
+        assert "Invalid" in detail or "expired" in detail
+
+
+@pytest.mark.asyncio
+async def test_adversarial_cross_tenant_inventory_mutation(
+    setup_two_merchants, db_session: AsyncSession
+):
+    """Adversarial Test: Merchant 1 attempts to adjust inventory of Merchant 2's product."""
+    data = setup_two_merchants
+    m1 = data["m1"]
+    token1 = data["token1"]
+    m2 = data["m2"]
+
+    # Seed product for Merchant 2
+    p2 = Product(
+        merchant_id=m2.id,
+        sku=f"BETA-ITEM-{uuid.uuid4().hex[:4]}",
+        title="Beta Exclusive Jacket",
+        category="APPAREL",
+        base_price_paise=1000000,
+        floor_price_paise=800000,
+        is_negotiable=True,
+    )
+    db_session.add(p2)
+    await db_session.flush()
+
+    v2 = ProductVariant(product_id=p2.id, sku=p2.sku, title=p2.title)
+    db_session.add(v2)
+    await db_session.flush()
+
+    inv2 = InventoryItem(
+        variant_id=v2.id, available_quantity=50, reserved_quantity=0, safety_threshold=2
+    )
+    db_session.add(inv2)
+    await db_session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post(
+            "/api/v1/merchant/inventory/adjust",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            json={"sku": p2.sku, "quantity_delta": 10},
+        )
+        assert res.status_code == 400
+        assert "not found" in res.json().get("detail", "").lower()
+
+
+@pytest.mark.asyncio
+async def test_adversarial_floor_price_violation_rejection(setup_two_merchants):
+    """Adversarial Test: Creating product where floor_price > base_price fails closed."""
+    data = setup_two_merchants
+    m1 = data["m1"]
+    token1 = data["token1"]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post(
+            "/api/v1/merchant/products",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            json={
+                "sku": "INVALID-PRICE-01",
+                "title": "Invalid Price Product",
+                "category": "FOOTWEAR",
+                "base_price_paise": 500000,  # 5,000 INR
+                "floor_price_paise": 600000,  # 6,000 INR (violates floor <= base)
+            },
+        )
+        assert res.status_code == 400
+        assert "Floor price cannot exceed base price" in res.json().get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_adversarial_policy_ceiling_enforcement(setup_two_merchants):
+    """Adversarial Test: Attempting to set max discount > 50% platform ceiling is rejected."""
+    data = setup_two_merchants
+    m1 = data["m1"]
+    token1 = data["token1"]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.put(
+            "/api/v1/merchant/policies",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            json={
+                "autonomy_level": 1,
+                "max_discount_percentage": 75.0,  # Violates 50% hard platform ceiling
+                "min_margin_percentage": 20.0,
+                "max_single_transaction_paise": 5000000,
+            },
+        )
+        assert res.status_code in [400, 422]
+
+
+@pytest.mark.asyncio
+async def test_zero_secret_leakage_audit(setup_two_merchants):
+    """Adversarial Audit: Asserts that secrets, API keys, and webhook tokens are never exposed."""
+    data = setup_two_merchants
+    m1 = data["m1"]
+    token1 = data["token1"]
+    settings = get_settings()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for path in [
+            "/api/v1/merchant/auth/me",
+            "/api/v1/merchant/dashboard/summary",
+            "/api/v1/merchant/policies",
+            "/api/v1/merchant/audit",
+        ]:
+            res = await client.get(
+                path,
+                headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            )
+            assert res.status_code == 200
+            body_str = res.text
+            # Assert secret absence
+            assert settings.RAZORPAY_KEY_SECRET.get_secret_value() not in body_str
+            assert settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value() not in body_str
+            assert "DATABASE_URL" not in body_str
+            assert "admin_token" not in body_str

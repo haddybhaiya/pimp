@@ -41,6 +41,20 @@ class MerchantAuthService:
         return f"{payload}:{sig}"
 
     @classmethod
+    def generate_admin_token(
+        cls,
+        merchant_id: uuid.UUID,
+        secret: str,
+        slug: str = "default-slug",
+        expires_in_hours: int = 24,
+    ) -> str:
+        """Generates a signed admin session bearer token for a merchant ID."""
+        expires_at = datetime.now(UTC) + timedelta(hours=expires_in_hours)
+        payload = f"admin:{merchant_id}:{slug}:{int(expires_at.timestamp())}"
+        sig = hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        return f"{payload}:{sig}"
+
+    @classmethod
     def verify_admin_token(
         cls, token: str, secret: str
     ) -> tuple[bool, uuid.UUID | None, str | None]:
