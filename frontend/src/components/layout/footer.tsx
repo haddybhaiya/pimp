@@ -7,7 +7,7 @@ export const Footer: React.FC = () => {
       <div className="container mx-auto flex flex-col sm:flex-row max-w-7xl items-center justify-between gap-4 px-4 sm:px-6">
         <div className="flex items-center gap-2">
           <ShieldCheck className="h-4 w-4 text-primary" />
-          <span>Agent-Ready Merchant Platform © 2026</span>
+          <span>pimp © 2026</span>
         </div>
         <div className="flex items-center gap-6">
           <a href="/docs" className="hover:text-foreground transition-colors">API Docs</a>

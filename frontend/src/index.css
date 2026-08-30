@@ -4,8 +4,8 @@
 
 @layer base {
   :root {
-    --background: 224 50% 5%; /* #070B14 */
-    --foreground: 220 50% 98%; /* #F4F7FF */
+    --background: 204 63% 6%; /* #06111A */
+    --foreground: 210 40% 98%; /* #F8FAFC */
 
     --card: 222 47% 10%; /* #0D1424 */
     --card-foreground: 220 50% 98%;
@@ -13,8 +13,8 @@
     --popover: 222 47% 10%;
     --popover-foreground: 220 50% 98%;
 
-    --primary: 251 100% 68%; /* #7C5CFF */
-    --primary-foreground: 0 0% 100%;
+    --primary: 84 81% 56%; /* #A3E635 */
+    --primary-foreground: 204 63% 6%;
 
     --secondary: 222 42% 14%; /* #141D31 */
     --secondary-foreground: 220 50% 98%;
@@ -30,18 +30,18 @@
 
     --border: 220 34% 22%; /* #24314A */
     --input: 220 34% 22%;
-    --ring: 251 100% 68%;
+    --ring: 188 86% 53%;
 
     --radius: 0.75rem; /* 12px */
   }
 
   body {
-    @apply bg-[#070B14] text-[#F4F7FF] antialiased selection:bg-brand/30 selection:text-white;
+    @apply bg-[#06111A] text-[#F8FAFC] antialiased selection:bg-cyan-300/30 selection:text-white;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
     min-height: 100vh;
     background-image: 
-      radial-gradient(circle at 50% 0%, rgba(124, 92, 255, 0.08) 0%, transparent 60%),
-      radial-gradient(circle at 100% 100%, rgba(56, 189, 248, 0.04) 0%, transparent 40%);
+      radial-gradient(circle at 72% 4%, rgba(34, 211, 238, 0.09) 0%, transparent 43%),
+      radial-gradient(circle at 12% 100%, rgba(163, 230, 53, 0.035) 0%, transparent 40%);
     background-attachment: fixed;
   }
 }
@@ -77,6 +77,21 @@
 
   .glow-brand {
     box-shadow: 0 0 25px -5px rgba(124, 92, 255, 0.35);
+  }
+
+  .hero-grid {
+    background-image:
+      linear-gradient(rgba(125, 211, 252, 0.055) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(125, 211, 252, 0.055) 1px, transparent 1px);
+    background-size: 52px 52px;
+    mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.75), transparent 92%);
+  }
+
+  .hero-proof-card {
+    background: linear-gradient(135deg, rgba(15, 30, 42, 0.86), rgba(10, 20, 29, 0.58));
+    border: 1px solid rgba(125, 211, 252, 0.14);
+    box-shadow: inset 0 1px 0 rgba(248, 250, 252, 0.035), 0 18px 42px rgba(0, 0, 0, 0.14);
+    backdrop-filter: blur(14px);
   }
 }
 

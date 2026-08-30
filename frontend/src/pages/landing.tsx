@@ -5,12 +5,15 @@ import {
   Lock,
   Cpu,
   ArrowRight,
-  Sparkles,
   Scale,
   KeyRound,
   FileCheck,
   Zap,
+  Bot,
+  Orbit,
+  Check,
 } from 'lucide-react';
+import { CommerceOrbit } from '@/components/landing/commerce-orbit';
 
 export interface LandingPageProps {
   onNavigate: (path: string) => void;
@@ -68,40 +71,39 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
   ];
 
   return (
-    <div className="flex flex-col min-h-screen bg-[#070B14] text-[#F4F7FF] selection:bg-brand/30">
-      {/* Cinematic Hero Section */}
-      <section className="relative overflow-hidden pt-20 pb-20 lg:pt-28 lg:pb-32">
-        {/* Background glow meshes */}
-        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[650px] h-[350px] bg-brand/15 blur-[120px] rounded-full pointer-events-none" />
-        <div className="absolute top-1/3 left-1/4 w-[300px] h-[300px] bg-blue-500/10 blur-[100px] rounded-full pointer-events-none" />
+    <div className="flex min-h-screen flex-col overflow-hidden bg-[#06111a] text-[#f8fafc] selection:bg-cyan-300/30">
+      {/* Hero: the scene is decorative only; all commerce authority remains server-side. */}
+      <section className="relative isolate overflow-hidden border-b border-sky-100/10 bg-[#06111a] pb-20 pt-16 lg:pb-28 lg:pt-24">
+        <div className="hero-grid absolute inset-0 -z-20 opacity-70" />
+        <div className="absolute -left-28 top-0 -z-10 h-[34rem] w-[34rem] rounded-full bg-cyan-500/[0.09] blur-[130px]" />
+        <div className="absolute bottom-0 right-[12%] -z-10 h-72 w-72 rounded-full bg-lime-400/[0.08] blur-[110px]" />
+        <CommerceOrbit />
 
-        <div className="container mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 text-center relative z-10">
-          <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#141D31] border border-[#24314A] mb-8 shadow-sm">
-            <span className="h-2 w-2 rounded-full bg-brand-bright animate-pulse" />
-            <span className="text-xs font-mono text-text-secondary tracking-wide uppercase">
-              Autonomous Agent Commerce Protocol v2026-03-01
-            </span>
-          </div>
+        <div className="container relative z-10 mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <div className="max-w-3xl text-left">
+            <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-cyan-300/20 bg-slate-950/50 px-3.5 py-1.5 shadow-[0_0_40px_rgba(34,211,238,0.08)] backdrop-blur">
+              <span className="h-1.5 w-1.5 rounded-full bg-lime-300 shadow-[0_0_10px_#bef264]" />
+              <span className="text-[10px] font-mono uppercase tracking-[0.16em] text-slate-300">
+                Agent commerce, constrained by design
+              </span>
+            </div>
 
-          <h1 className="text-4xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight max-w-5xl mx-auto leading-[1.1] text-text-primary">
-            The Autonomous AI Commerce{' '}
-            <span className="bg-gradient-to-r from-brand-bright via-brand to-brand-deep bg-clip-text text-transparent">
-              Command Centre
-            </span>
-          </h1>
+            <h1 className="max-w-3xl font-display text-5xl font-bold tracking-[-0.065em] text-slate-50 sm:text-6xl lg:text-7xl lg:leading-[0.98]">
+              The Autonomous AI Commerce{' '}
+              <span className="text-cyan-300">control layer</span> for merchants who mean business.
+            </h1>
 
-          <p className="mt-6 text-base sm:text-lg lg:text-xl text-text-secondary max-w-3xl mx-auto font-normal leading-relaxed">
-            Turn your store into an agent-ready merchant on Razorpay infrastructure. Deterministic floor pricing, Human-In-The-Loop approval gates, and cryptographically verified settlement.
-          </p>
+            <p className="mt-7 max-w-2xl text-base leading-relaxed text-slate-300 sm:text-lg">
+              pimp gives AI agents a governed way to buy from your store—with immutable policy, human escalation, and settlement that is verified before it moves a single paise.
+            </p>
 
-          {/* Action CTAs */}
-          <div className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4">
+            <div className="mt-9 flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
             <Button
               onClick={() => onNavigate('/signup')}
               size="lg"
-              className="w-full sm:w-auto bg-brand hover:bg-brand-deep text-white shadow-glow px-8 py-3 text-sm font-semibold rounded-xl"
+              className="w-full rounded-xl bg-lime-300 px-7 py-3 text-sm font-bold text-slate-950 shadow-[0_12px_40px_rgba(163,230,53,0.2)] hover:bg-lime-200 sm:w-auto"
             >
-              Launch Merchant Control Plane
+              Build your control plane
               <ArrowRight className="h-4 w-4 ml-2" />
             </Button>
 
@@ -109,45 +111,54 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
               onClick={() => onNavigate('/demo')}
               variant="outline"
               size="lg"
-              className="w-full sm:w-auto bg-[#141D31]/80 hover:bg-[#141D31] border-[#24314A] text-text-primary px-6 py-3 text-sm font-medium rounded-xl"
+              className="w-full rounded-xl border-slate-600/70 bg-slate-950/30 px-6 py-3 text-sm font-medium text-slate-100 hover:border-cyan-300/60 hover:bg-slate-900/80 sm:w-auto"
             >
-              <Sparkles className="h-4 w-4 mr-2 text-brand-bright" />
-              Interactive Simulation Sandbox
+              <Orbit className="h-4 w-4 mr-2 text-cyan-300" />
+              Explore the sandbox
             </Button>
           </div>
 
-          {/* Proof Strip */}
-          <div className="mt-16 grid grid-cols-2 md:grid-cols-4 gap-3 max-w-4xl mx-auto">
-            <div className="glass-panel p-3.5 rounded-xl text-left border border-[#24314A]/70">
+            <div className="mt-12 flex flex-wrap gap-x-5 gap-y-2 text-xs font-medium text-slate-300">
+              {['No below-floor pricing', 'Human approval when it matters', 'HMAC-verified settlement'].map((item) => (
+                <span key={item} className="inline-flex items-center gap-1.5">
+                  <Check className="h-3.5 w-3.5 text-lime-300" />
+                  {item}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="relative mt-16 grid max-w-5xl grid-cols-2 gap-3 lg:mt-20 lg:grid-cols-4">
+            <div className="hero-proof-card p-3.5 rounded-2xl text-left">
               <div className="flex items-center gap-2 mb-1">
-                <Lock className="h-4 w-4 text-emerald-400" />
-                <span className="text-[11px] font-mono font-bold text-text-primary">INV-FIN-02</span>
+                <Lock className="h-4 w-4 text-lime-300" />
+                <span className="text-[11px] font-mono font-bold text-slate-100">INV-FIN-02</span>
               </div>
-              <p className="text-xs text-text-secondary">Strict floor price margin guarantee</p>
+              <p className="text-xs text-slate-400">Strict floor price margin guarantee</p>
             </div>
 
-            <div className="glass-panel p-3.5 rounded-xl text-left border border-[#24314A]/70">
+            <div className="hero-proof-card p-3.5 rounded-2xl text-left">
               <div className="flex items-center gap-2 mb-1">
-                <Scale className="h-4 w-4 text-brand-bright" />
-                <span className="text-[11px] font-mono font-bold text-text-primary">INV-FIN-01</span>
+                <Scale className="h-4 w-4 text-cyan-300" />
+                <span className="text-[11px] font-mono font-bold text-slate-100">INV-FIN-01</span>
               </div>
-              <p className="text-xs text-text-secondary">64-bit integer paise (Zero floating-point)</p>
+              <p className="text-xs text-slate-400">64-bit integer paise, never float math</p>
             </div>
 
-            <div className="glass-panel p-3.5 rounded-xl text-left border border-[#24314A]/70">
+            <div className="hero-proof-card p-3.5 rounded-2xl text-left">
               <div className="flex items-center gap-2 mb-1">
-                <ShieldCheck className="h-4 w-4 text-amber-400" />
-                <span className="text-[11px] font-mono font-bold text-text-primary">INV-AGY-01</span>
+                <Bot className="h-4 w-4 text-violet-300" />
+                <span className="text-[11px] font-mono font-bold text-slate-100">INV-AGY-01</span>
               </div>
-              <p className="text-xs text-text-secondary">Intelligence != Authority architecture</p>
+              <p className="text-xs text-slate-400">Intelligence is never authority</p>
             </div>
 
-            <div className="glass-panel p-3.5 rounded-xl text-left border border-[#24314A]/70">
+            <div className="hero-proof-card p-3.5 rounded-2xl text-left">
               <div className="flex items-center gap-2 mb-1">
-                <FileCheck className="h-4 w-4 text-purple-400" />
-                <span className="text-[11px] font-mono font-bold text-text-primary">INV-AGY-04</span>
+                <FileCheck className="h-4 w-4 text-cyan-300" />
+                <span className="text-[11px] font-mono font-bold text-slate-100">INV-AGY-04</span>
               </div>
-              <p className="text-xs text-text-secondary">Immutable SHA-256 cryptographic audit</p>
+              <p className="text-xs text-slate-400">Immutable SHA-256 audit chain</p>
             </div>
           </div>
         </div>
@@ -299,7 +310,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
         <div className="container mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-text-muted">
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4 text-brand-bright" />
-            <span className="font-semibold text-text-secondary">Agent-Ready Merchant Platform</span>
+            <span className="font-display text-lg font-bold tracking-[-0.08em] text-cyan-300">pimp</span>
           </div>
           <div className="flex items-center gap-4">
             <span className="font-mono">Protocol v2026-03-01</span>

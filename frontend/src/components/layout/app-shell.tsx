@@ -4,7 +4,6 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Dialog } from '@/components/ui/dialog';
 import {
-  ShieldCheck,
   LayoutDashboard,
   Clock,
   Package,
@@ -66,12 +65,9 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
           className="flex h-16 items-center gap-3 border-b border-[#24314A]/60 px-5 cursor-pointer hover:opacity-90 transition"
           onClick={() => onNavigate('/')}
         >
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-brand to-brand-deep text-white shadow-glow-sm">
-            <ShieldCheck className="h-5 w-5" />
-          </div>
           <div>
-            <span className="font-bold text-sm tracking-tight text-text-primary block">
-              Agent-Ready Merchant
+            <span className="font-display text-xl font-bold tracking-[-0.08em] text-cyan-300 block">
+              pimp
             </span>
             <span className="text-[10px] text-text-muted font-mono tracking-wide">
               CONTROL PLANE

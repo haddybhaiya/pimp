@@ -23,15 +23,15 @@ export default {
         'text-secondary': '#A9B7D0',
         'text-muted': '#72819B',
         brand: {
-          DEFAULT: '#7C5CFF',
-          bright: '#A78BFA',
-          deep: '#4F46E5',
+          DEFAULT: '#06B6D4',
+          bright: '#67E8F9',
+          deep: '#0E7490',
         },
         primary: {
-          DEFAULT: '#7C5CFF',
-          foreground: '#FFFFFF',
-          bright: '#A78BFA',
-          deep: '#4F46E5',
+          DEFAULT: '#A3E635',
+          foreground: '#06111A',
+          bright: '#D9F99D',
+          deep: '#65A30D',
         },
         secondary: {
           DEFAULT: '#141D31',
