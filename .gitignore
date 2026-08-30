@@ -56,3 +56,18 @@ node_modules/
 frontend/node_modules/
 frontend/dist/
 
+
+# InsForge & AI agent skills
+.insforge
+.agent
+.agents
+.augment
+.claude
+.cline
+.github/copilot*
+.kilocode
+.qoder
+.qwen
+.roo
+.trae
+.windsurf

@@ -227,6 +227,23 @@
   - *Positive:* Allows instant, reproducible verification of the complete platform across all quality gates without external network flakiness.
   - *Negative:* Demo catalog and state requires explicit merchant-scoped reset triggers.
 
+---
+
+## ADR-018: InsForge PostgreSQL Integration & Deployment Architecture
+
+- **Status:** ACCEPTED
+- **Context:** Deploying the Agent-Ready Merchant backend to InsForge requires connecting the application and Alembic migrations to InsForge's managed PostgreSQL infrastructure without altering the canonical architecture, state machines, policy engines, or compromising strict security/concurrency invariants (`INV-FIN-01` through `INV-FIN-05`, `INV-AGY-01` through `INV-AGY-05`).
+- **Decision:**
+  1. **Target Managed PostgreSQL via Connection String:** Connected the FastAPI async backend (`asyncpg`) and Alembic synchronous migration runner (`psycopg2`/`asyncpg`) directly to the linked InsForge PostgreSQL cluster (`9mvctuj3.ap-southeast.database.insforge.app:5432/insforge`).
+  2. **Automated Alembic Migration Chain (001 to 005):** Applied the full canonical Alembic migration chain against the target database, initializing all 21 tables, foreign key constraints, unique indexes (`uq_transaction_records_settlement_entry`, `processed_webhooks.payload_hash`, `merchants.slug`), and integer paise columns.
+  3. **Preservation of Authoritative Domain & Gateway Architecture:** The application logic, deterministic policy engine, HMAC verification, cryptographic audit chain, and capability checks remain 100% server-authoritative inside FastAPI; InsForge serves exclusively as the managed PostgreSQL database and deployment platform.
+  4. **Health Check Observability:** Enhanced `/health` endpoint to explicitly report `application_alive`, `database_reachable`, `database_connected`, and `configuration_valid` without exposing database credentials or secrets.
+  5. **Direct Concurrency Verification:** Created and verified `tests/test_insforge_postgresql_integration.py` to confirm that PostgreSQL row-level locks (`SELECT ... FOR UPDATE`), transaction rollback boundaries, and cryptographic hash chain linking execute cleanly on InsForge infrastructure.
+- **Consequences:**
+  - *Positive:* Full feature parity and invariant compliance on production-grade cloud PostgreSQL with zero architectural compromises.
+  - *Negative:* Requires SSL connection parameters (`sslmode=require`) and network accessibility to the InsForge database host.
+
+
 
 
 

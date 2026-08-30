@@ -679,6 +679,27 @@ Phase 5.3 completes the end-to-end integration and demonstration capabilities of
 - `INV-AGY-01`: Separation of intelligence and authority strictly preserved; untrusted simulation inputs are deterministically validated by the policy engine and state machine before applying state changes.
 - `INV-AGY-03`: Zero secret leakage — Razorpay secret keys, webhook secrets, database credentials, and admin tokens are never exposed in API payloads or UI contexts.
 
+---
+
+# InsForge Managed PostgreSQL Deployment & Integration Review Report
+
+### 1. Scope & Execution Summary
+The Agent-Ready Merchant backend and persistence layer were deployed to the linked InsForge PostgreSQL infrastructure (`9mvctuj3.ap-southeast.database.insforge.app:5432/insforge`):
+- **Alembic Database Migrations Applied:** Upgraded all 5 sequential Alembic migration revisions (`001_initial_schema` $\to$ `002_gateway_hardening_tables` $\to$ `003_session_capability_grants` $\to$ `004_payment_reliability_hardening` $\to$ `005_safety_policy_governance`).
+- **All 21 Schema Tables Verified:** `merchants`, `products`, `product_variants`, `inventory_items`, `price_quotes`, `quote_items`, `orders`, `order_items`, `payment_attempts`, `processed_webhooks`, `transaction_records`, `buyer_agent_sessions`, `buyer_intents`, `merchant_approvals`, `policy_rules`, `audit_events`, `agent_runs`, `gateway_hardening_idempotency`, `gateway_hardening_rate_events`, `alembic_version`.
+- **PostgreSQL Row Locking Verified:** Validated `SELECT ... FOR UPDATE` row locks, foreign key cascade rules, and unique constraints (`uq_transaction_records_settlement_entry`, `processed_webhooks.payload_hash`, `merchants.slug`).
+- **Live Concurrency & End-to-End Simulation:** Executed `tests/test_insforge_postgresql_integration.py` verifying real merchant creation, catalog seeding, autonomous commerce simulation, order settlement, and cryptographic SHA-256 audit chain verification (`AuditEvent.verify_chain()`).
+- **Health Check Observability:** Enriched `/health` endpoint distinguishing `application_alive`, `database_reachable`, `database_connected`, and `configuration_valid`.
+
+### 2. Quality Gate Verification
+- **Formatting (`ruff format --check .`):** 100% PASS (135 files checked)
+- **Linting (`ruff check .`):** 100% PASS (0 lint errors)
+- **Type Checking (`mypy src tests`):** 100% PASS (129 source files, 0 errors)
+- **Frontend Test Suite (`npm test` in `frontend/`):** 100% PASS (26 tests passing across 7 test files)
+- **Frontend Production Build (`npm run build` in `frontend/`):** 100% PASS (compiled cleanly to `src/agent_ready_merchant/static/`)
+- **Backend Test Suite (`pytest`):** 100% PASS (258 passed, 2 skipped, 84% coverage)
+
+
 
 
 

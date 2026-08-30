@@ -97,7 +97,10 @@ def create_app() -> FastAPI:
             "service": "agent-ready-merchant",
             "version": agent_ready_merchant.__version__,
             "environment": current_settings.ENVIRONMENT,
+            "application_alive": True,
+            "database_reachable": db_healthy,
             "database_connected": db_healthy,
+            "configuration_valid": True,
         }
 
     static_dir = Path(__file__).parent / "static"

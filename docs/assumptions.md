@@ -114,5 +114,16 @@
 - **FAILURE IF WRONG:** False confidence in product demonstrations, divergence between simulation tools and production pipelines, or vulnerability to forged identity, below-floor discounts, and token tampering attacks.
 - **MITIGATION:** `DemoSimulatorService` coordinates real database models and authoritative domain services. All simulation actions require valid bearer tokens, enforce floor price guarantees, and generate verifiable SHA-256 cryptographic audit hash chains verified via `AuditEvent.verify_chain()`.
 
+---
+
+### 12. InsForge PostgreSQL Semantic Compatibility & Transaction Isolation
+- **ASSUMPTION:** InsForge's managed PostgreSQL infrastructure fully supports standard PostgreSQL 16+ DDL migrations, transactional isolation, row-level locking (`SELECT ... FOR UPDATE`), unique composite constraints, foreign key integrity, and asyncpg connection pooling.
+- **EVIDENCE:** Verified via Alembic migration chain (revisions 001 through 005 applying cleanly) and `tests/test_insforge_postgresql_integration.py` (all live PostgreSQL tests passing deterministically).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Migration failures, broken row-level inventory locks, race conditions during payment settlement, or audit chain forking under concurrent load.
+- **MITIGATION:** Standard SQLAlchemy PostgreSQL dialect with asyncpg, explicit SSL mode (`sslmode=require`), transactional Alembic DDL, and row-level `FOR UPDATE` locks on inventory and merchant audit records.
+
+
 
 
