@@ -210,5 +210,23 @@
   - *Positive:* Full visibility and operational control over autonomous store actions with tamper-evident audit trails and zero secret exposure.
   - *Negative:* All admin actions require active backend network roundtrips to maintain authoritative state.
 
+---
+
+## ADR-017: Interactive Demo Simulation Sandbox & End-to-End Hardening
+
+- **Status:** ACCEPTED
+- **Context:** Demonstrating, evaluating, and stress-testing the Agent-Ready Merchant control plane requires a cohesive, deterministic simulation workbench (`/demo`) that exercises the entire commerce flow (session initiation -> discovery -> quote -> negotiation -> HITL escalation -> order creation -> Razorpay payment capture -> webhook verification -> settlement -> audit hash chaining) without using mocked shortcuts or compromising security invariants.
+- **Decision:**
+  1. **Server-Authoritative Demo Simulation Service:** Implemented `DemoSimulatorService` (`src/agent_ready_merchant/services/demo_simulator_service.py`) exposed via authenticated endpoints `POST /api/v1/merchant/demo/simulate` and `POST /api/v1/merchant/demo/seed`. All simulation steps operate directly on real PostgreSQL domain models, pure Python state machines, deterministic policy engine rules, and cryptographically verified webhook processors.
+  2. **Three Core Demonstration Scenarios:**
+     - *Standard Autonomous Commerce:* Policy-compliant discount evaluated to `ALLOW`, order generated, Razorpay HMAC webhook captured, order settled (`PAID`), stock deducted, audit chain appended.
+     - *Supervised HITL Escalation:* Aggressive discount in Supervised Autonomy Mode evaluates to `ESCALATE_APPROVAL`, creating a stateful `MerchantApproval` ticket that can be reviewed and resolved in `/approvals`.
+     - *Out-of-Band Payment Reconciliation:* Dropped webhook scenario with server-authoritative query against Razorpay client.
+  3. **Adversarial Hardening Defense Matrix:** Comprehensive adversarial tests verify resilience against forged merchant tokens, capability injection, below-floor pricing attacks, cross-tenant resource snooping, replay attacks, duplicate submissions, and secret leakage.
+- **Consequences:**
+  - *Positive:* Allows instant, reproducible verification of the complete platform across all quality gates without external network flakiness.
+  - *Negative:* Demo catalog and state requires explicit merchant-scoped reset triggers.
+
+
 
 

@@ -12,6 +12,9 @@ import {
   ResolveApprovalPayload,
   PolicyGovernance,
   AuditLedger,
+  DemoSimulationStepRequest,
+  DemoSimulationStepResponse,
+  DemoSeedResponse,
 } from '@/types/portal';
 
 export class ApiError extends Error {
@@ -305,6 +308,19 @@ export class ApiClient {
 
   async getAuditLedger(limit = 50): Promise<AuditLedger> {
     return this.request<AuditLedger>(`/api/v1/merchant/audit?limit=${limit}`);
+  }
+
+  async seedDemoState(): Promise<DemoSeedResponse> {
+    return this.request<DemoSeedResponse>('/api/v1/merchant/demo/seed', {
+      method: 'POST',
+    });
+  }
+
+  async simulateDemo(payload: DemoSimulationStepRequest): Promise<DemoSimulationStepResponse> {
+    return this.request<DemoSimulationStepResponse>('/api/v1/merchant/demo/simulate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   }
 
   async executeGateway<T>(capability: string, payload: Record<string, unknown> = {}): Promise<GatewayEnvelope<T>> {

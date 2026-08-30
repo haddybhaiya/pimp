@@ -104,4 +104,15 @@
 - **FAILURE IF WRONG:** Price manipulation, bypassing merchant floor prices or approval gates, stock overselling, or unauthorized cross-tenant data modification.
 - **MITIGATION:** All operations route through authenticated `/api/v1/merchant/...` endpoints backed by `MerchantPortalService`, enforcing server-side HMAC token verification, optimistic concurrency row locking, floor price margin invariant checks (`floor_price <= base_price`), platform policy ceilings, and cryptographic SHA-256 audit hash chain verification.
 
+---
+
+### 11. Deterministic End-to-End Simulation & Adversarial Defense Hardening
+- **ASSUMPTION:** Interactive demo sandboxes and merchant simulation workbenches must execute the full, real domain state machines, deterministic policy engine, Razorpay cryptographic HMAC webhook processors, and tamper-evident audit chains without using mock shortcuts or weakening financial invariants.
+- **EVIDENCE:** Verified via `tests/test_phase5_3_demo_and_security_hardening.py` (all 7 end-to-end and adversarial security tests passing deterministically) and `frontend/tests/demo-view.test.tsx` (all 3 interactive sandbox suites passing).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** False confidence in product demonstrations, divergence between simulation tools and production pipelines, or vulnerability to forged identity, below-floor discounts, and token tampering attacks.
+- **MITIGATION:** `DemoSimulatorService` coordinates real database models and authoritative domain services. All simulation actions require valid bearer tokens, enforce floor price guarantees, and generate verifiable SHA-256 cryptographic audit hash chains verified via `AuditEvent.verify_chain()`.
+
+
 

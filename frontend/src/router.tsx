@@ -15,6 +15,7 @@ import { ApprovalsPage } from '@/pages/approvals';
 import { PoliciesPage } from '@/pages/policies';
 import { AuditPage } from '@/pages/audit';
 import { SettingsPage } from '@/pages/settings';
+import { DemoPage } from '@/pages/demo';
 import { UnauthorizedPage } from '@/pages/unauthorized';
 import { NotFoundPage } from '@/pages/not-found';
 import { Navbar } from '@/components/layout/navbar';
@@ -121,6 +122,7 @@ export const Router: React.FC = () => {
       case '/policies': return <PoliciesPage />;
       case '/audit': return <AuditPage />;
       case '/settings': return <SettingsPage />;
+      case '/demo': return <DemoPage />;
       case '/unauthorized': return <UnauthorizedPage onNavigate={navigate} />;
       default: return <NotFoundPage onNavigate={navigate} />;
     }

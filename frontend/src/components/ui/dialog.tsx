@@ -60,3 +60,15 @@ export const Dialog: React.FC<DialogProps> = ({
     </div>
   );
 };
+
+export interface DialogFooterProps {
+  children: React.ReactNode;
+  className?: string;
+}
+
+export const DialogFooter: React.FC<DialogFooterProps> = ({ children, className }) => (
+  <div className={cn('mt-6 flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2 gap-2', className)}>
+    {children}
+  </div>
+);
+

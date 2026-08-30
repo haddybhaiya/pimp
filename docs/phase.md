@@ -1,8 +1,8 @@
 # Phase Status & Roadmap: Agent-Ready Merchant
 
-> **Current Phase:** Phase 4 (Security Boundary, Authorization Hardening & Governance Kernel)  
+> **Current Phase:** Phase 5 (Web Control Plane, Merchant Portal & Demo Hardening)  
 > **Status:** 100% COMPLETED & SIGNED OFF  
-> **Milestone Status:** Phase 4.1 & Phase 4.2 Complete (Ready for Phase 5 Scope Definition)
+> **Milestone Status:** Phase 5.1, Phase 5.2 & Phase 5.3 Complete
 
 ---
 
@@ -27,25 +27,30 @@
 | **Phase 4.2** | Safety, Policy & Governance Kernel | **COMPLETED** | Centralized policy decision records, immutable audit linkage, deterministic policy hashing, HITL approval gate, platform governance ceilings, zero secret/PII audit sanitization |
 | **Phase 5.1** | Web Foundation & Public Surface | **COMPLETED** | Public landing page, merchant authentication, setup wizard, authenticated SPA shell, responsive component tokens, typed API client, error normalization |
 | **Phase 5.2** | Merchant Admin Portal Views & HITL Operations | **COMPLETED** | Approvals UI, catalog editor, inventory manager, orders & settlements, policy config, audit viewer |
+| **Phase 5.3** | Demo Sandbox & Integration Hardening | **COMPLETED** | Interactive simulation sandbox (`/demo`), standard auto commerce, HITL escalation workbench, payment reconciliation, adversarial attack defense matrix |
 
 ---
 
-## Phase 5.2 Deliverables Completed
+## Phase 5.3 Deliverables Completed
 
-- [x] **Authoritative Merchant Dashboard:** Overview page with live aggregated metrics (active products count, order volumes, revenue in ₹, pending HITL approvals, policy fingerprint, autonomy state) without fake client analytics.
-- [x] **Product Catalog & Floor Price Enforcement:** Authoritative catalog management with floor price invariant protection (`floor_price <= base_price`), duplicate SKU prevention, category indexing, and live stock tracking.
-- [x] **Real-Time Inventory Management:** Stock ledger with optimistic concurrency locking, quantity threshold warnings, and strict non-negative delta adjustments.
-- [x] **Quotes & Price Negotiation Trace:** Comprehensive quote ledger showing line items, state machine transitions (`DRAFT` -> `PROPOSED` -> `ACCEPTED`), discount breakdowns, and negotiation histories.
-- [x] **Orders & Out-of-Band Payment Reconciliation:** Authoritative order ledger displaying payment attempts, Razorpay order IDs, capture statuses, and manual reconciliation triggers against Razorpay.
-- [x] **Payments & Capture Tracking:** Authoritative payment ledger tracking individual Razorpay payment attempts, capture statuses, and payment methods.
-- [x] **Human-In-The-Loop (HITL) Approvals Queue:** Dedicated approval workbench supporting status filtering (`PENDING`, `APPROVED`, `REJECTED`), expiration checks, note capture, and atomic quote term adjustments upon approval resolution.
-- [x] **Policy & Governance Rules Editor:** Dynamic autonomy and safety boundary configuration interface enforcing platform ceilings ($\le 50\%$ discount, $\le 100\%$ margin) and live deterministic SHA-256 policy hash preview.
-- [x] **Cryptographic Audit Trail Inspector:** Immutable audit ledger viewer with real-time SHA-256 hash chain verification badge, previous hash linking, and actor/payload inspector.
-- [x] **Store Settings & Public ACP Endpoints:** Merchant store profile details and copyable ACP protocol endpoint URLs.
-- [x] **Multi-Tenant Isolation & Security Matrix:** Server-authoritative isolation preventing cross-tenant data leakage or mutation across all endpoints.
+- [x] **Interactive Simulation Sandbox UI (`/demo`):** Production-grade sandbox workbench allowing merchants and evaluators to trigger real end-to-end commerce lifecycles with deterministic data.
+- [x] **Standard Autonomous Flow Demonstration:** Buyer session initiation -> product discovery -> quote generation -> deterministic policy approval (`ALLOW`) -> order creation -> Razorpay webhook simulation (`payment.captured`) -> order settlement (`PAID`) -> inventory deduction -> immutable cryptographic audit logging.
+- [x] **Human-In-The-Loop (HITL) Escalation Flow Demonstration:** Buyer discount request in Supervised HITL mode -> policy escalation (`ESCALATE_APPROVAL`) -> stateful `MerchantApproval` ticket creation -> real-time resolution in `/approvals` queue -> quote update.
+- [x] **Out-of-Band Payment Reconciliation Demonstration:** Dropped webhook simulation and server-authoritative reconciliation against Razorpay.
+- [x] **Authoritative Demo Backend Service (`DemoSimulatorService`):** Deterministic execution endpoints (`POST /api/v1/merchant/demo/simulate`, `POST /api/v1/merchant/demo/seed`) operating directly against real domain models, state machines, and cryptographic verification pipelines.
+- [x] **Adversarial Security Attack Verification:** Active verification against 10 attack vectors:
+  - Forged Merchant IDs & token tampering
+  - Forged capabilities & unauthorized privilege escalation
+  - Modified prices & floor price guarantees
+  - Cross-merchant resource access & entity ID snooping
+  - Duplicate submission & idempotency protection
+  - Cryptographic HMAC webhook validation & replay prevention
+  - Zero secret leakage in API responses
 - [x] **Comprehensive Test Verification Matrix:**
-  - Frontend: 23 unit and integration tests passing in Vitest (`api-client.test.ts`, `auth-store.test.tsx`, `ui-components.test.tsx`, `onboarding.test.tsx`, `router.test.tsx`, `portal-views.test.tsx`).
-  - Backend: 6 comprehensive integration tests in pytest (`tests/test_phase5_2_merchant_control_plane.py`).
-- [x] **Full Quality Gate Compliance:** 100% clean passes on `ruff format`, `ruff check`, `mypy (strict)`, Vitest (23 tests), and Pytest (250 passing tests across all test suites, 2 skipped, 84% coverage).
+  - Frontend: 26 unit and integration tests passing in Vitest across 7 test files (`api-client.test.ts`, `auth-store.test.tsx`, `ui-components.test.tsx`, `onboarding.test.tsx`, `demo-view.test.tsx`, `portal-views.test.tsx`, `router.test.tsx`).
+  - Frontend Build: Production bundle compiled cleanly to `src/agent_ready_merchant/static/`.
+  - Backend: 257 passing tests across all test suites in pytest (2 skipped, 84% coverage).
+- [x] **Full Quality Gate Compliance:** 100% clean passes on `ruff format`, `ruff check`, `mypy (strict)`, Vitest (26 tests), and Pytest (257 tests).
+
 
 

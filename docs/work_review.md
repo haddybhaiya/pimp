@@ -645,6 +645,41 @@ Phase 5.2 implements the authenticated merchant control plane around the existin
 - `INV-AGY-03`: Zero secret leakage — API key secrets and webhook secrets are strictly excluded from API responses and frontend views.
 - Multi-Tenant Isolation: Cross-tenant operations strictly rejected fail-closed (401 Unauthorized) across all control plane routes.
 
+---
+
+# Phase 5.3: Demo Sandbox & Integration Hardening Review Report
+
+### 1. Scope & Execution Summary
+Phase 5.3 completes the end-to-end integration and demonstration capabilities of the Agent-Ready Merchant control plane without weakening any security invariant or resorting to mock bypasses:
+- **Interactive Simulation Sandbox UI (`/demo`):** Production-grade simulation workbench with interactive scenario selector, configurable parameters, live execution timeline trace, real-time status badges, direct entity navigation links, and safe demo state resetting.
+- **Three Deterministic Demo Scenarios:**
+  1. *Standard Autonomous Commerce:* Buyer session initiation -> product discovery -> quote generation -> deterministic policy approval (`ALLOW`) -> order creation -> Razorpay webhook simulation (`payment.captured`) -> order settlement (`PAID`) -> inventory deduction -> immutable cryptographic audit logging.
+  2. *Supervised HITL Escalation:* Buyer agent requests a 20% discount in Supervised Autonomy Mode -> policy engine emits `ESCALATE_APPROVAL` (`HITL_DISCOUNT_APPROVAL_REQUIRED`) -> creates stateful `MerchantApproval` ticket -> resolvable in `/approvals` workbench.
+  3. *Out-of-Band Payment Reconciliation:* Dropped webhook simulation and server-authoritative reconciliation against Razorpay.
+- **Authoritative Demo Backend Service (`DemoSimulatorService`):** Endpoints `POST /api/v1/merchant/demo/simulate` and `POST /api/v1/merchant/demo/seed` running on real PostgreSQL tables and domain models with optimistic locking and HMAC SHA-256 webhook processing.
+- **Adversarial Security Attack Verification Suite:** Comprehensive adversarial penetration tests covering:
+  - Forged Merchant IDs & token tampering -> 401 Unauthorized
+  - Cross-tenant inventory mutation & entity snooping -> 400 Bad Request / 404 Not Found
+  - Floor price violation (`floor_price > base_price`) -> 400 Bad Request
+  - Platform policy discount ceiling violation (> 50%) -> 422 Unprocessable Entity
+  - Zero secret leakage in API payloads and browser contexts.
+
+### 2. Quality Gate Verification
+- **Formatting (`ruff format --check .`):** 100% PASS (134 files checked)
+- **Linting (`ruff check .`):** 100% PASS (0 lint errors)
+- **Type Checking (`mypy src tests`):** 100% PASS (128 source files, 0 errors)
+- **Frontend Test Suite (`npm test` in `frontend/`):** 100% PASS (26 tests passing across 7 test files)
+- **Frontend Build (`npm run build` in `frontend/`):** 100% PASS (Vite production bundle compiled cleanly to `src/agent_ready_merchant/static/`)
+- **Backend Test Suite (`pytest`):** 100% PASS (257 passed, 2 skipped, 84% coverage)
+
+### 3. Invariants & Security Matrix Verified
+- `INV-FIN-01`: Integer paise representation maintained across simulation traces, order amounts, and discount calculations.
+- `INV-FIN-02`: Floor price guarantee strictly preserved; attempts to discount below floor price evaluate to `DENY` (`POLICY_VIOLATION_BELOW_FLOOR_PRICE`).
+- `INV-FIN-05`: Server-authoritative settlement via HMAC SHA-256 webhook signatures and Razorpay client reconciliation.
+- `INV-AGY-01`: Separation of intelligence and authority strictly preserved; untrusted simulation inputs are deterministically validated by the policy engine and state machine before applying state changes.
+- `INV-AGY-03`: Zero secret leakage — Razorpay secret keys, webhook secrets, database credentials, and admin tokens are never exposed in API payloads or UI contexts.
+
+
 
 
 

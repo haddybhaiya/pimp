@@ -11,6 +11,7 @@ import {
   ShoppingCart,
   Sliders,
   FileText,
+  Sparkles,
   LogOut,
   Menu,
   X,
@@ -28,6 +29,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
 
   const navItems = [
     { label: 'Overview', path: '/dashboard', icon: LayoutDashboard },
+    { label: 'Simulation Sandbox', path: '/demo', icon: Sparkles },
     { label: 'Approval Queue', path: '/approvals', icon: Clock },
     { label: 'Products & Catalog', path: '/catalog', icon: Package },
     { label: 'Orders & Settlement', path: '/orders', icon: ShoppingCart },
