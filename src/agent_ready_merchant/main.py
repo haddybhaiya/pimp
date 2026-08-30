@@ -143,6 +143,7 @@ def create_app() -> FastAPI:
         "/policies",
         "/audit",
         "/settings",
+        "/demo",
     ]:
 
         def _make_route_handler(route_name: str) -> Callable[[], Awaitable[Any]]:
@@ -1169,6 +1170,52 @@ def create_app() -> FastAPI:
     ) -> AuditLedgerResponse:
         _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
         return await MerchantPortalService.get_audit_ledger(db, x_merchant_id, limit=limit)
+
+    # =========================================================================
+    # Interactive Demo & Sandbox Simulator Endpoints (Phase 5.3)
+    # =========================================================================
+    from agent_ready_merchant.schemas.demo_simulator import (
+        DemoSeedResponse,
+        DemoSimulationStepRequest,
+        DemoSimulationStepResponse,
+    )
+    from agent_ready_merchant.services.demo_simulator_service import DemoSimulatorService
+
+    @app.post(
+        "/api/v1/merchant/demo/seed",
+        summary="Seed Demo Catalog and Baseline Policies",
+        tags=["Demo Simulator"],
+        response_model=DemoSeedResponse,
+    )
+    async def demo_seed_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> DemoSeedResponse:
+        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        return await DemoSimulatorService.seed_demo_catalog_and_policies(db, x_merchant_id)
+
+    @app.post(
+        "/api/v1/merchant/demo/simulate",
+        summary="Execute Interactive Agent Commerce Simulation",
+        tags=["Demo Simulator"],
+        response_model=DemoSimulationStepResponse,
+    )
+    async def demo_simulate_endpoint(
+        req: DemoSimulationStepRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> DemoSimulationStepResponse:
+        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        try:
+            return await DemoSimulatorService.execute_simulation(
+                db, x_merchant_id, req, current_settings
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     return app
 

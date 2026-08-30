@@ -55,6 +55,14 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
             </p>
           </div>
           <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => onNavigate('/demo')}
+              className="text-xs gap-1 border-primary/40 text-primary hover:bg-primary/10"
+            >
+              Launch Sandbox <ArrowRight className="h-3.5 w-3.5" />
+            </Button>
             <Badge variant="default" className="font-mono text-xs">
               Autonomy Level {summary?.autonomy_level ?? merchant?.policies.autonomyLevel ?? 1}
             </Badge>

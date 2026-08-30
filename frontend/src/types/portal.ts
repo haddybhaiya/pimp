@@ -169,3 +169,48 @@ export interface AuditLedger {
   chain_valid: boolean;
   chain_error?: string;
 }
+
+export interface SimulationTraceStep {
+  step_number: number;
+  actor: string;
+  action: string;
+  status: 'SUCCESS' | 'ESCALATED' | 'REJECTED' | 'SETTLED' | 'RECONCILED';
+  summary: string;
+  details: Record<string, unknown>;
+  timestamp: string;
+}
+
+export interface DemoSimulationStepRequest {
+  scenario: 'STANDARD_AUTO_COMMERCE' | 'HITL_ESCALATION_COMMERCE' | 'PAYMENT_RECONCILIATION';
+  sku?: string;
+  quantity?: number;
+  target_discount_pct?: number;
+}
+
+export interface DemoSimulationStepResponse {
+  scenario: string;
+  session_id: string;
+  quote_id?: string;
+  approval_id?: string;
+  order_id?: string;
+  rzp_order_id?: string;
+  rzp_payment_id?: string;
+  status: string;
+  subtotal_paise: number;
+  discount_paise: number;
+  total_paise: number;
+  policy_verdict: string;
+  policy_rule_code?: string;
+  policy_hash: string;
+  audit_event_hash: string;
+  steps: SimulationTraceStep[];
+  message: string;
+}
+
+export interface DemoSeedResponse {
+  merchant_id: string;
+  products_seeded: number;
+  policies_configured: boolean;
+  message: string;
+}
+
