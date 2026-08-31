@@ -68,15 +68,7 @@ export const Router: React.FC = () => {
       navigate('/dashboard');
       return null;
     }
-    return (
-      <div className="min-h-screen flex flex-col">
-        <Navbar onNavigate={navigate} />
-        <main className="flex-1">
-          <LoginPage onNavigate={navigate} />
-        </main>
-        <Footer />
-      </div>
-    );
+    return <LoginPage onNavigate={navigate} />;
   }
 
   if (currentPath === '/signup') {
@@ -84,15 +76,7 @@ export const Router: React.FC = () => {
       navigate('/dashboard');
       return null;
     }
-    return (
-      <div className="min-h-screen flex flex-col">
-        <Navbar onNavigate={navigate} />
-        <main className="flex-1">
-          <SignupPage onNavigate={navigate} />
-        </main>
-        <Footer />
-      </div>
-    );
+    return <SignupPage onNavigate={navigate} />;
   }
 
   // Protected Routes

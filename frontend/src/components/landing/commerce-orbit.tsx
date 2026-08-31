@@ -37,17 +37,17 @@ export const CommerceOrbit = () => {
 
     const core = new THREE.Mesh(
       new THREE.IcosahedronGeometry(1.03, 3),
-      new THREE.MeshBasicMaterial({ color: '#7dd3fc', wireframe: true, transparent: true, opacity: 0.9 }),
+      new THREE.MeshBasicMaterial({ color: '#6ee7b7', wireframe: true, transparent: true, opacity: 0.9 }),
     );
     system.add(core);
 
     const coreHalo = new THREE.Mesh(
       new THREE.IcosahedronGeometry(0.78, 2),
-      new THREE.MeshBasicMaterial({ color: '#a3e635', transparent: true, opacity: 0.1 }),
+      new THREE.MeshBasicMaterial({ color: '#d1fae5', transparent: true, opacity: 0.1 }),
     );
     system.add(coreHalo);
 
-    const orbitMaterial = new THREE.LineBasicMaterial({ color: '#38bdf8', transparent: true, opacity: 0.42 });
+    const orbitMaterial = new THREE.LineBasicMaterial({ color: '#34d399', transparent: true, opacity: 0.42 });
     const orbitDots: THREE.Mesh[] = [];
     [
       { radius: 2.0, tilt: 0.55, phase: 0 },
@@ -63,7 +63,7 @@ export const CommerceOrbit = () => {
 
       const dot = new THREE.Mesh(
         new THREE.SphereGeometry(0.1, 16, 16),
-        new THREE.MeshBasicMaterial({ color: index === 1 ? '#a3e635' : '#f8fafc' }),
+        new THREE.MeshBasicMaterial({ color: index === 1 ? '#6ee7b7' : '#f8fafc' }),
       );
       dot.userData = { radius, tilt, phase, rotationZ: index * 0.72, speed: 0.42 + index * 0.08 };
       system.add(dot);
@@ -80,7 +80,7 @@ export const CommerceOrbit = () => {
     particlesGeometry.setAttribute('position', new THREE.BufferAttribute(particles, 3));
     const particleField = new THREE.Points(
       particlesGeometry,
-      new THREE.PointsMaterial({ color: '#7dd3fc', size: 0.035, transparent: true, opacity: 0.58 }),
+      new THREE.PointsMaterial({ color: '#6ee7b7', size: 0.035, transparent: true, opacity: 0.58 }),
     );
     scene.add(particleField);
 

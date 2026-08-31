@@ -57,16 +57,16 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
   ];
 
   return (
-    <div className="flex min-h-screen bg-[#070B14] text-[#F4F7FF]">
+    <div className="portal-font flex min-h-screen bg-[#101113] text-[#f3f4f6]">
       {/* Desktop Sidebar */}
-      <aside className="hidden lg:flex w-64 flex-col border-r border-[#24314A]/70 bg-[#0D1424]">
+      <aside className="hidden w-64 flex-col border-r border-white/10 bg-[#1b1c1e] lg:flex">
         {/* Brand header */}
         <div
-          className="flex h-16 items-center gap-3 border-b border-[#24314A]/60 px-5 cursor-pointer hover:opacity-90 transition"
+          className="flex h-16 cursor-pointer items-center gap-3 border-b border-white/10 px-5 transition hover:opacity-90"
           onClick={() => onNavigate('/')}
         >
           <div>
-            <span className="font-display text-xl font-bold tracking-[-0.08em] text-cyan-300 block">
+            <span className="block text-xl font-semibold tracking-[-0.08em] text-slate-50">
               pimp
             </span>
             <span className="text-[10px] text-text-muted font-mono tracking-wide">
@@ -76,8 +76,8 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
         </div>
 
         {/* Merchant Context Card */}
-        <div className="p-3 border-b border-[#24314A]/40">
-          <div className="bg-[#141D31]/80 rounded-lg p-3 border border-[#24314A]/60">
+        <div className="border-b border-white/[0.07] p-3">
+          <div className="rounded-md border border-white/10 bg-white/[0.035] p-3">
             <div className="flex items-center justify-between mb-1">
               <span className="text-[10px] uppercase font-mono tracking-wider text-brand-bright">
                 Store Profile
@@ -113,12 +113,12 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
                       onClick={() => onNavigate(item.path)}
                       className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-medium transition-all ${
                         isActive
-                          ? 'bg-brand/15 text-brand-bright border-l-2 border-brand font-semibold shadow-sm'
-                          : 'text-text-secondary hover:bg-[#141D31] hover:text-text-primary'
+                          ? 'bg-white/[0.10] text-white font-semibold'
+                          : 'text-slate-400 hover:bg-white/[0.06] hover:text-slate-100'
                       }`}
                     >
                       <div className="flex items-center gap-2.5">
-                        <Icon className={`h-4 w-4 ${isActive ? 'text-brand-bright' : 'text-text-muted'}`} />
+                        <Icon className={`h-4 w-4 ${isActive ? 'text-emerald-300' : 'text-slate-500'}`} />
                         <span>{item.label}</span>
                       </div>
                       {item.badge && (
@@ -135,7 +135,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
         </nav>
 
         {/* Footer info & Logout */}
-        <div className="border-t border-[#24314A]/60 p-3 space-y-2 bg-[#070B14]/40">
+        <div className="space-y-2 border-t border-white/10 bg-black/10 p-3">
           <div className="flex items-center justify-between text-[10px] text-text-muted px-2 font-mono">
             <span>Autonomy Level</span>
             <span className="text-text-primary font-bold">L{merchant?.policies.autonomyLevel ?? 1}</span>
@@ -155,11 +155,11 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
       {/* Main Content Area */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Command Center Topbar */}
-        <header className="flex h-16 items-center justify-between border-b border-[#24314A]/70 bg-[#0D1424]/80 backdrop-blur-md px-4 sm:px-6">
+        <header className="flex h-16 items-center justify-between border-b border-white/10 bg-[#17181a] px-4 sm:px-6">
           <div className="flex items-center gap-3">
             <button
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="lg:hidden rounded-lg p-2 text-text-muted hover:bg-[#141D31] hover:text-text-primary"
+              className="rounded-lg p-2 text-text-muted hover:bg-white/10 hover:text-text-primary lg:hidden"
             >
               {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
             </button>
@@ -175,12 +175,12 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
 
           <div className="flex items-center gap-3">
             {/* System Engine indicator */}
-            <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#141D31] border border-[#24314A] text-[11px] text-text-secondary">
+            <div className="hidden items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.035] px-2.5 py-1 text-[11px] text-slate-400 md:flex">
               <Database className="h-3 w-3 text-emerald-400" />
               <span>InsForge PostgreSQL</span>
             </div>
 
-            <Badge variant="outline" className="text-[10px] text-brand-bright border-brand/30 bg-brand/5">
+            <Badge variant="outline" className="border-emerald-300/25 bg-emerald-300/[0.06] text-[10px] text-emerald-200">
               TEST MODE
             </Badge>
 
@@ -188,7 +188,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
               onClick={() => onNavigate('/demo')}
               variant="outline"
               size="sm"
-              className="text-xs bg-brand/10 border-brand/40 text-brand-bright hover:bg-brand/20 hidden sm:inline-flex"
+              className="hidden border-white/15 bg-white/[0.06] text-xs text-slate-200 hover:bg-white/[0.1] sm:inline-flex"
             >
               <Sparkles className="h-3 w-3 text-brand-bright" />
               Sandbox
@@ -198,7 +198,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
 
         {/* Mobile menu overlay */}
         {mobileMenuOpen && (
-          <div className="lg:hidden border-b border-[#24314A] bg-[#0D1424] p-4 space-y-4 animate-in slide-in-from-top-2">
+          <div className="animate-in slide-in-from-top-2 space-y-4 border-b border-white/10 bg-[#1b1c1e] p-4 lg:hidden">
             {navGroups.map((group) => (
               <div key={group.title} className="space-y-1">
                 <h4 className="text-[10px] font-mono text-text-muted uppercase px-2">{group.title}</h4>
@@ -213,7 +213,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
                         setMobileMenuOpen(false);
                       }}
                       className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-xs font-medium ${
-                        isActive ? 'bg-brand text-white font-semibold' : 'text-text-secondary hover:bg-[#141D31]'
+                        isActive ? 'bg-emerald-300 text-slate-950 font-semibold' : 'text-text-secondary hover:bg-white/[0.07]'
                       }`}
                     >
                       <Icon className="h-4 w-4" />

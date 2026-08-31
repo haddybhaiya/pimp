@@ -14,7 +14,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onNavigate }) => {
     <header className="sticky top-0 z-40 w-full border-b border-border/60 bg-background/80 backdrop-blur-md">
       <div className="container mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
         <div className="flex items-center gap-3 cursor-pointer" onClick={() => onNavigate('/')}>
-          <span className="font-display text-2xl font-bold tracking-[-0.09em] text-cyan-300">
+          <span className="font-display text-2xl font-semibold tracking-[-0.09em] text-slate-50">
             pimp
           </span>
         </div>
