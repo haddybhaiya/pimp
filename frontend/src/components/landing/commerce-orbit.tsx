@@ -13,6 +13,9 @@ export const CommerceOrbit = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    const desktopMedia = window.matchMedia?.('(min-width: 1024px)');
+    if (desktopMedia && !desktopMedia.matches) return;
+
     // Avoid touching the canvas in environments without a WebGL implementation
     // (for example, server rendering and DOM-only test environments).
     if (!window.WebGLRenderingContext && !window.WebGL2RenderingContext) return;

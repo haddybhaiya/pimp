@@ -50,6 +50,13 @@ export class ApiClient {
     this.onUnauthorizedCallback = cb;
   }
 
+  private createIdempotencyKey(): string {
+    if (typeof crypto?.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    throw new ApiError(0, 'IDEMPOTENCY_UNAVAILABLE', 'This browser cannot create a secure request key.');
+  }
+
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
@@ -103,9 +110,10 @@ export class ApiClient {
     }
   }
 
-  async signup(payload: SignupPayload): Promise<MerchantAuthResponse> {
+  async signup(payload: SignupPayload, insforgeAccessToken?: string): Promise<MerchantAuthResponse> {
     return this.request<MerchantAuthResponse>('/api/v1/merchant/auth/signup', {
       method: 'POST',
+      headers: insforgeAccessToken ? { Authorization: `Bearer ${insforgeAccessToken}` } : undefined,
       body: JSON.stringify({
         name: payload.name,
         slug: payload.slug,
@@ -120,9 +128,10 @@ export class ApiClient {
     });
   }
 
-  async login(credentials: LoginCredentials): Promise<MerchantAuthResponse> {
+  async login(credentials: LoginCredentials, insforgeAccessToken?: string): Promise<MerchantAuthResponse> {
     return this.request<MerchantAuthResponse>('/api/v1/merchant/auth/login', {
       method: 'POST',
+      headers: insforgeAccessToken ? { Authorization: `Bearer ${insforgeAccessToken}` } : undefined,
       body: JSON.stringify({
         slug: credentials.slug,
         rzp_key_id: credentials.rzpKeyId,
@@ -256,6 +265,7 @@ export class ApiClient {
   async adjustInventory(payload: { sku: string; quantity_delta: number; reason?: string }): Promise<InventoryItem> {
     return this.request<InventoryItem>('/api/v1/merchant/inventory/adjust', {
       method: 'POST',
+      headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
       body: JSON.stringify(payload),
     });
   }
@@ -280,7 +290,13 @@ export class ApiClient {
 
   async listApprovals(status?: string): Promise<ApprovalItem[]> {
     const query = status ? `?status=${status}` : '';
-    return this.request<ApprovalItem[]>(`/api/v1/merchant/approvals${query}`);
+    const approvals = await this.request<Array<ApprovalItem & { reason?: string }>>(
+      `/api/v1/merchant/approvals${query}`
+    );
+    return approvals.map(({ reason, reason_note, ...approval }) => ({
+      ...approval,
+      reason_note: reason_note ?? reason,
+    }));
   }
 
   async resolveApproval(approvalId: string, payload: ResolveApprovalPayload): Promise<ApprovalItem> {
@@ -319,6 +335,7 @@ export class ApiClient {
   async simulateDemo(payload: DemoSimulationStepRequest): Promise<DemoSimulationStepResponse> {
     return this.request<DemoSimulationStepResponse>('/api/v1/merchant/demo/simulate', {
       method: 'POST',
+      headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
       body: JSON.stringify(payload),
     });
   }

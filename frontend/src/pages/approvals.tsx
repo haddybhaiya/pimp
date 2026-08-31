@@ -24,12 +24,16 @@ export const ApprovalsPage: React.FC = () => {
   const [reasonNote, setReasonNote] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const fetchApprovals = async () => {
     setIsLoading(true);
     try {
       const data = await api.listApprovals(filter);
       setApprovals(data);
+      setLoadError(null);
+    } catch (err: unknown) {
+      setLoadError(err instanceof Error ? err.message : 'Unable to load approval tickets.');
     } finally {
       setIsLoading(false);
     }
@@ -95,6 +99,11 @@ export const ApprovalsPage: React.FC = () => {
           {[1, 2, 3].map((i) => (
             <Skeleton key={i} className="h-32 w-full rounded-xl bg-[#0D1424]" />
           ))}
+        </div>
+      ) : loadError ? (
+        <div className="glass-panel rounded-2xl p-10 text-center border border-rose-400/30">
+          <EmptyState icon={<AlertTriangle className="h-10 w-10 text-rose-300" />} title="Approval queue unavailable" description={loadError} />
+          <Button onClick={fetchApprovals} variant="outline" size="sm" className="mt-4">Retry</Button>
         </div>
       ) : approvals.length === 0 ? (
         <div className="glass-panel rounded-2xl p-10 text-center border border-[#24314A]">

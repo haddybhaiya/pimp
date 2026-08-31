@@ -7,8 +7,8 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   sessionExpired: boolean;
-  login: (creds: LoginCredentials) => Promise<void>;
-  signup: (payload: SignupPayload) => Promise<void>;
+  login: (creds: LoginCredentials, insforgeAccessToken?: string) => Promise<void>;
+  signup: (payload: SignupPayload, insforgeAccessToken?: string) => Promise<void>;
   logout: () => void;
   updateProfile: (profile: Partial<MerchantProfile>) => void;
   refreshProfile: () => Promise<void>;
@@ -39,16 +39,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     api.onUnauthorized(() => {
       setSessionExpired(true);
-      logout();
     });
 
     setIsLoading(false);
   }, []);
 
-  const login = async (creds: LoginCredentials) => {
+  const login = async (creds: LoginCredentials, insforgeAccessToken?: string) => {
     setIsLoading(true);
     try {
-      const res = await api.login(creds);
+      const res = await api.login(creds, insforgeAccessToken);
       const profile: MerchantProfile = {
         merchantId: res.merchant_id,
         name: res.name,
@@ -77,10 +76,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const signup = async (payload: SignupPayload) => {
+  const signup = async (payload: SignupPayload, insforgeAccessToken?: string) => {
     setIsLoading(true);
     try {
-      const res = await api.signup(payload);
+      const res = await api.signup(payload, insforgeAccessToken);
       const profile: MerchantProfile = {
         merchantId: res.merchant_id,
         name: res.name,
@@ -136,6 +135,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const dismissExpiredDialog = () => {
     setSessionExpired(false);
+    setMerchant(null);
+    api.clearAuth();
+    localStorage.removeItem(STORAGE_KEY_MERCHANT);
   };
 
   return (

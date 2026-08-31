@@ -42,6 +42,22 @@ export const Router: React.FC = () => {
     }
   };
 
+  const replaceNavigate = (path: string) => {
+    window.history.replaceState({}, '', path);
+    setCurrentPath(path);
+    if (typeof window !== 'undefined' && window.scrollTo) {
+      window.scrollTo(0, 0);
+    }
+  };
+
+  const redirectPath =
+    (isAuthenticated && (currentPath === '/login' || currentPath === '/signup') && '/dashboard') ||
+    (!isAuthenticated && !['/', '/login', '/signup'].includes(currentPath) && '/login');
+
+  useEffect(() => {
+    if (redirectPath) replaceNavigate(redirectPath);
+  }, [redirectPath]);
+
   if (isLoading) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-background text-primary">
@@ -64,24 +80,17 @@ export const Router: React.FC = () => {
   }
 
   if (currentPath === '/login') {
-    if (isAuthenticated) {
-      navigate('/dashboard');
-      return null;
-    }
+    if (redirectPath) return null;
     return <LoginPage onNavigate={navigate} />;
   }
 
   if (currentPath === '/signup') {
-    if (isAuthenticated) {
-      navigate('/dashboard');
-      return null;
-    }
+    if (redirectPath) return null;
     return <SignupPage onNavigate={navigate} />;
   }
 
   // Protected Routes
   if (!isAuthenticated) {
-    navigate('/login');
     return null;
   }
 
