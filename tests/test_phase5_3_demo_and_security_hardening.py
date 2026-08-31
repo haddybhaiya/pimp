@@ -129,6 +129,83 @@ async def test_demo_seed_and_standard_auto_commerce_flow(
 
 
 @pytest.mark.asyncio
+async def test_demo_seed_preserves_merchant_catalog_and_active_demo_reservations(
+    setup_two_merchants, db_session: AsyncSession
+):
+    """Demo initialization must not reset merchant stock or active reservations."""
+    data = setup_two_merchants
+    merchant = data["m1"]
+    token = data["token1"]
+
+    merchant_product = Product(
+        merchant_id=merchant.id,
+        sku="MERCHANT-LIVE-01",
+        title="Merchant Live Product",
+        description="A real catalog item outside the demo catalog.",
+        category="MERCHANT",
+        base_price_paise=120000,
+        floor_price_paise=100000,
+        is_active=True,
+        attributes={},
+    )
+    db_session.add(merchant_product)
+    await db_session.flush()
+    merchant_variant = ProductVariant(
+        product_id=merchant_product.id,
+        sku=merchant_product.sku,
+        title=merchant_product.title,
+        is_active=True,
+    )
+    db_session.add(merchant_variant)
+    await db_session.flush()
+    merchant_inventory = InventoryItem(
+        variant_id=merchant_variant.id,
+        available_quantity=7,
+        reserved_quantity=3,
+        safety_threshold=1,
+    )
+    db_session.add(merchant_inventory)
+    await db_session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        headers = {"X-Merchant-ID": str(merchant.id), "X-Auth-Token": token}
+        first_seed = await client.post("/api/v1/merchant/demo/seed", headers=headers)
+        assert first_seed.status_code == 200
+
+        await db_session.refresh(merchant_inventory)
+        assert merchant_inventory.available_quantity == 7
+        assert merchant_inventory.reserved_quantity == 3
+
+        demo_product = (
+            await db_session.execute(
+                select(Product).where(
+                    Product.merchant_id == merchant.id,
+                    Product.sku == "PACE-BAND-03",
+                )
+            )
+        ).scalar_one()
+        demo_variant = (
+            await db_session.execute(
+                select(ProductVariant).where(ProductVariant.product_id == demo_product.id)
+            )
+        ).scalar_one()
+        demo_inventory = (
+            await db_session.execute(
+                select(InventoryItem).where(InventoryItem.variant_id == demo_variant.id)
+            )
+        ).scalar_one()
+        demo_inventory.available_quantity = 9
+        demo_inventory.reserved_quantity = 2
+        await db_session.commit()
+
+        reset_seed = await client.post("/api/v1/merchant/demo/seed", headers=headers)
+        assert reset_seed.status_code == 200
+        await db_session.refresh(demo_inventory)
+        assert demo_inventory.available_quantity == 9
+        assert demo_inventory.reserved_quantity == 2
+
+
+@pytest.mark.asyncio
 async def test_demo_hitl_escalation_and_approval_resolution_flow(
     setup_two_merchants, db_session: AsyncSession
 ):

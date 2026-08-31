@@ -55,7 +55,8 @@ async def test_merchant_signup_creates_store_and_seeds_policies(
         assert data["slug"] == unique_slug
         assert data["status"] == "ACTIVE"
         assert data["currency"] == "INR"
-        assert "token" in data
+        assert data["token"] is None
+        assert "httponly" in resp.headers["set-cookie"].lower()
         assert data["onboarding_completed"] is True
         assert data["policies"]["autonomy_level"] == 1
         assert data["policies"]["max_discount_percentage"] == 15.0
@@ -135,19 +136,19 @@ async def test_merchant_login_with_valid_session_token_returns_refreshed_bearer_
             "rzp_key_id": "rzp_test_login",
         }
         signup_response = await client.post("/api/v1/merchant/auth/signup", json=signup_payload)
-        existing_token = signup_response.json()["token"]
+        assert signup_response.json()["token"] is None
 
-        # Session refresh
+        # Session refresh uses the HttpOnly cookie automatically.
         login_resp = await client.post(
             "/api/v1/merchant/auth/login",
-            json={"slug": unique_slug, "admin_token": existing_token},
+            json={"slug": unique_slug},
         )
         assert login_resp.status_code == 200
         data = login_resp.json()
         assert data["slug"] == unique_slug
         assert data["status"] == "ACTIVE"
-        assert "token" in data
-        assert len(data["token"].split(":")) == 5
+        assert data["token"] is None
+        assert "httponly" in login_resp.headers["set-cookie"].lower()
 
 
 @pytest.mark.asyncio
@@ -166,6 +167,7 @@ async def test_merchant_login_rejects_slug_without_existing_session_token(
                 "rzp_key_id": "rzp_test_missing_token",
             },
         )
+        client.cookies.clear()
 
         response = await client.post("/api/v1/merchant/auth/login", json={"slug": unique_slug})
         assert response.status_code == 401
@@ -202,12 +204,8 @@ async def test_merchant_me_endpoint_returns_profile_with_valid_token(
         )
         auth_data = signup_res.json()
         merchant_id = auth_data["merchant_id"]
-        token = auth_data["token"]
-
-        headers = {
-            "X-Merchant-ID": merchant_id,
-            "X-Auth-Token": token,
-        }
+        assert auth_data["token"] is None
+        headers = {"X-Merchant-ID": merchant_id}
         me_resp = await client.get("/api/v1/merchant/auth/me", headers=headers)
         assert me_resp.status_code == 200
         profile = me_resp.json()
@@ -249,6 +247,7 @@ async def test_merchant_me_endpoint_rejects_forged_token(db_session: AsyncSessio
         )
 
         # Missing token must fail closed with 401
+        client.cookies.clear()
         missing_token_headers = {"X-Merchant-ID": merchant_id}
         missing_resp = await client.get("/api/v1/merchant/auth/me", headers=missing_token_headers)
         assert missing_resp.status_code == 401
@@ -269,7 +268,12 @@ async def test_merchant_cannot_access_other_merchant_profile(db_session: AsyncSe
                 "rzp_key_id": "rzp_test_alpha",
             },
         )
-        token_a = res_a.json()["token"]
+        merchant_a_id = uuid.UUID(res_a.json()["merchant_id"])
+        token_a = MerchantAuthService.generate_admin_token(
+            merchant_a_id,
+            get_settings().RAZORPAY_WEBHOOK_SECRET.get_secret_value(),
+            slug=res_a.json()["slug"],
+        )
 
         # Create Merchant B
         res_b = await client.post(
@@ -310,13 +314,9 @@ async def test_merchant_complete_setup_updates_profile_and_policies(
         )
         data = res.json()
         merchant_id = data["merchant_id"]
-        token = data["token"]
         initial_hash = data["policies"]["policy_hash"]
 
-        headers = {
-            "X-Merchant-ID": merchant_id,
-            "X-Auth-Token": token,
-        }
+        headers = {"X-Merchant-ID": merchant_id}
 
         # Complete setup with updated autonomy level and discount cap
         setup_payload = {
@@ -386,12 +386,10 @@ async def test_merchant_auth_events_in_cryptographic_audit_chain(
             },
         )
         merchant_id = uuid.UUID(res.json()["merchant_id"])
-        token = res.json()["token"]
-
         # Refresh the active session and perform setup updates.
         login_response = await client.post(
             "/api/v1/merchant/auth/login",
-            json={"slug": unique_slug, "admin_token": token},
+            json={"slug": unique_slug},
         )
         assert login_response.status_code == 200
         await client.post(
@@ -403,7 +401,7 @@ async def test_merchant_auth_events_in_cryptographic_audit_chain(
                 "min_margin_percentage": 25.0,
                 "max_single_transaction_paise": 6000000,
             },
-            headers={"X-Merchant-ID": str(merchant_id), "X-Auth-Token": token},
+            headers={"X-Merchant-ID": str(merchant_id)},
         )
 
         # Verify audit chain integrity
