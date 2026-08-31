@@ -9,8 +9,8 @@ describe('ApiClient Unit Tests', () => {
     vi.restoreAllMocks();
   });
 
-  it('injects auth token and merchant ID headers when set', async () => {
-    client.setAuth('merchant-123', 'token-abc');
+  it('uses browser credentials and sends only the non-secret merchant ID header', async () => {
+    client.setAuth('merchant-123');
 
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -24,9 +24,9 @@ describe('ApiClient Unit Tests', () => {
       'http://localhost:8000/api/v1/gateway/execute',
       expect.objectContaining({
         headers: expect.objectContaining({
-          'X-Auth-Token': 'token-abc',
           'X-Merchant-ID': 'merchant-123',
         }),
+        credentials: 'include',
       })
     );
   });

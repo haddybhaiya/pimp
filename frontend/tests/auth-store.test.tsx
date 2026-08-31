@@ -17,17 +17,16 @@ describe('AuthStore & Session Management Unit Tests', () => {
     const { result } = renderHook(() => useAuth(), { wrapper });
     expect(result.current.isAuthenticated).toBe(false);
     expect(result.current.merchant).toBeNull();
-    expect(result.current.token).toBeNull();
   });
 
-  it('successfully logs in merchant and sets session tokens in storage', async () => {
+  it('successfully logs in merchant without persisting the HttpOnly session token', async () => {
     vi.spyOn(api, 'login').mockResolvedValue({
       merchant_id: '11111111-1111-1111-1111-111111111111',
       name: 'Apex Athletic',
       slug: 'apex-athletic',
       status: 'ACTIVE',
       currency: 'INR',
-      token: 'admin:111:apex:1700000:sig123',
+      token: null,
       expires_at: new Date(Date.now() + 86400000).toISOString(),
       onboarding_completed: true,
       policies: {
@@ -48,10 +47,11 @@ describe('AuthStore & Session Management Unit Tests', () => {
 
     expect(result.current.isAuthenticated).toBe(true);
     expect(result.current.merchant?.name).toBe('Apex Athletic');
-    expect(localStorage.getItem('arm_auth_token')).toBe('admin:111:apex:1700000:sig123');
+    expect(localStorage.getItem('arm_auth_token')).toBeNull();
   });
 
   it('clears session on logout', async () => {
+    vi.spyOn(api, 'logout').mockResolvedValue(undefined);
     const { result } = renderHook(() => useAuth(), { wrapper });
 
     act(() => {

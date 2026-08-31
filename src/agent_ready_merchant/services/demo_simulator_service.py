@@ -6,6 +6,7 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import TypedDict
 
 import httpx
 from sqlalchemy import select
@@ -40,6 +41,49 @@ from agent_ready_merchant.services.payment_service import PaymentService
 logger = logging.getLogger("agent_ready_merchant.services.demo_simulator")
 
 
+class DemoProduct(TypedDict):
+    """Canonical product attributes used exclusively by the demo sandbox."""
+
+    sku: str
+    title: str
+    description: str
+    category: str
+    base_price_paise: int
+    floor_price_paise: int
+    stock: int
+
+
+DEMO_PRODUCTS: tuple[DemoProduct, ...] = (
+    {
+        "sku": "RUN-PRO-01",
+        "title": "Apex Carbon Pro Marathon Shoes",
+        "description": "Elite marathon racing shoes with carbon propulsion plate.",
+        "category": "FOOTWEAR",
+        "base_price_paise": 1299900,
+        "floor_price_paise": 999900,
+        "stock": 50,
+    },
+    {
+        "sku": "AIR-VEST-02",
+        "title": "AeroFlow Hydro-Vent Running Vest",
+        "description": "Ultra-breathable 8L hydration vest with dual flask holsters.",
+        "category": "APPAREL",
+        "base_price_paise": 449900,
+        "floor_price_paise": 349900,
+        "stock": 35,
+    },
+    {
+        "sku": "PACE-BAND-03",
+        "title": "TempoPulse GPS Optical HR Sensor",
+        "description": "Sub-millisecond heart rate and cadence tracker with BLE.",
+        "category": "ELECTRONICS",
+        "base_price_paise": 799900,
+        "floor_price_paise": 649900,
+        "stock": 20,
+    },
+)
+
+
 class DemoSimulatorService:
     """Server-authoritative coordinator for deterministic interactive demo simulations."""
 
@@ -48,57 +92,39 @@ class DemoSimulatorService:
         cls, session: AsyncSession, merchant_id: uuid.UUID
     ) -> DemoSeedResponse:
         """Seeds or restores standard catalog products, stock levels, and baseline policy rules."""
-        stock_map = {
-            "RUN-PRO-01": 50,
-            "AIR-VEST-02": 35,
-            "PACE-BAND-03": 20,
-        }
-
-        # 1. Check existing products
+        # 1. Load only the merchant's own records. A demo reset must never
+        # alter an ordinary catalog item or release a live reservation.
         prod_stmt = select(Product).where(Product.merchant_id == merchant_id)
-        existing_prods = list((await session.execute(prod_stmt)).scalars().all())
+        existing_products = list((await session.execute(prod_stmt)).scalars().all())
+        demo_products_by_sku = {
+            product.sku: product
+            for product in existing_products
+            if product.attributes.get("demo_seeded") is True
+        }
+        demo_skus = {product["sku"] for product in DEMO_PRODUCTS}
+        conflicting_skus = sorted(
+            product.sku
+            for product in existing_products
+            if product.sku in demo_skus and product.sku not in demo_products_by_sku
+        )
+        if conflicting_skus:
+            raise ValueError(
+                "Cannot initialize demo catalog because merchant-owned SKU(s) conflict: "
+                + ", ".join(conflicting_skus)
+            )
 
         seeded_count = 0
-        if not existing_prods:
-            demo_products = [
-                {
-                    "sku": "RUN-PRO-01",
-                    "title": "Apex Carbon Pro Marathon Shoes",
-                    "description": "Elite marathon racing shoes with carbon propulsion plate.",
-                    "category": "FOOTWEAR",
-                    "base_price_paise": 1299900,  # ₹12,999.00
-                    "floor_price_paise": 999900,  # ₹9,999.00
-                    "stock": 50,
-                },
-                {
-                    "sku": "AIR-VEST-02",
-                    "title": "AeroFlow Hydro-Vent Running Vest",
-                    "description": "Ultra-breathable 8L hydration vest with dual flask holsters.",
-                    "category": "APPAREL",
-                    "base_price_paise": 449900,  # ₹4,499.00
-                    "floor_price_paise": 349900,  # ₹3,499.00
-                    "stock": 35,
-                },
-                {
-                    "sku": "PACE-BAND-03",
-                    "title": "TempoPulse GPS Optical HR Sensor",
-                    "description": "Sub-millisecond heart rate and cadence tracker with BLE.",
-                    "category": "ELECTRONICS",
-                    "base_price_paise": 799900,  # ₹7,999.00
-                    "floor_price_paise": 649900,  # ₹6,499.00
-                    "stock": 20,
-                },
-            ]
-
-            for dp in demo_products:
+        for demo_product in DEMO_PRODUCTS:
+            product = demo_products_by_sku.get(demo_product["sku"])
+            if product is None:
                 prod = Product(
                     merchant_id=merchant_id,
-                    sku=dp["sku"],
-                    title=dp["title"],
-                    description=dp["description"],
-                    category=dp["category"],
-                    base_price_paise=dp["base_price_paise"],
-                    floor_price_paise=dp["floor_price_paise"],
+                    sku=demo_product["sku"],
+                    title=demo_product["title"],
+                    description=demo_product["description"],
+                    category=demo_product["category"],
+                    base_price_paise=demo_product["base_price_paise"],
+                    floor_price_paise=demo_product["floor_price_paise"],
                     is_negotiable=True,
                     is_active=True,
                     attributes={"brand": "Apex Athletics", "demo_seeded": True},
@@ -108,8 +134,8 @@ class DemoSimulatorService:
 
                 variant = ProductVariant(
                     product_id=prod.id,
-                    sku=dp["sku"],
-                    title=dp["title"],
+                    sku=demo_product["sku"],
+                    title=demo_product["title"],
                     price_override_paise=None,
                     is_active=True,
                 )
@@ -118,32 +144,50 @@ class DemoSimulatorService:
 
                 inv = InventoryItem(
                     variant_id=variant.id,
-                    available_quantity=dp["stock"],
+                    available_quantity=demo_product["stock"],
                     reserved_quantity=0,
                     safety_threshold=2,
                 )
                 session.add(inv)
                 seeded_count += 1
+                continue
 
-            await session.flush()
-        else:
-            # Restore stock levels and activate products
-            for p in existing_prods:
-                p.is_active = True
-                var_stmt = select(ProductVariant).where(ProductVariant.product_id == p.id)
-                exist_variant = (await session.execute(var_stmt)).scalars().first()
-                if exist_variant:
-                    inv_stmt = (
-                        select(InventoryItem)
-                        .where(InventoryItem.variant_id == exist_variant.id)
-                        .with_for_update()
+            product.is_active = True
+            var_stmt = select(ProductVariant).where(ProductVariant.product_id == product.id)
+            existing_variant = (await session.execute(var_stmt)).scalars().first()
+            if not existing_variant:
+                existing_variant = ProductVariant(
+                    product_id=product.id,
+                    sku=demo_product["sku"],
+                    title=demo_product["title"],
+                    price_override_paise=None,
+                    is_active=True,
+                )
+                session.add(existing_variant)
+                await session.flush()
+
+            inv_stmt = (
+                select(InventoryItem)
+                .where(InventoryItem.variant_id == existing_variant.id)
+                .with_for_update()
+            )
+            existing_inventory = (await session.execute(inv_stmt)).scalar_one_or_none()
+            if existing_inventory is None:
+                session.add(
+                    InventoryItem(
+                        variant_id=existing_variant.id,
+                        available_quantity=demo_product["stock"],
+                        reserved_quantity=0,
+                        safety_threshold=2,
                     )
-                    exist_inv = (await session.execute(inv_stmt)).scalar_one_or_none()
-                    if exist_inv:
-                        exist_inv.available_quantity = stock_map.get(p.sku, 50)
-                        exist_inv.reserved_quantity = 0
-                seeded_count += 1
-            await session.flush()
+                )
+            elif existing_inventory.reserved_quantity == 0:
+                existing_inventory.available_quantity = demo_product["stock"]
+            # Active reservations are authoritative live state. Preserve both
+            # counts rather than resetting a partially committed checkout.
+            seeded_count += 1
+
+        await session.flush()
 
         # 2. Reset or seed policy rules to standard baseline
         rules_stmt = select(PolicyRule).where(PolicyRule.merchant_id == merchant_id)

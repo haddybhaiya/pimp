@@ -25,7 +25,7 @@ export interface MerchantAuthResponse {
   slug: string;
   status: 'ACTIVE' | 'PAUSED' | 'SUSPENDED';
   currency: string;
-  token: string;
+  token: null;
   expires_at: string;
   onboarding_completed: boolean;
   policies: {

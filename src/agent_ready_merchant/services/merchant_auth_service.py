@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_ready_merchant.config import Settings, get_settings
@@ -158,7 +159,13 @@ class MerchantAuthService:
             rzp_key_id=request.rzp_key_id,
         )
         session.add(merchant)
-        await session.flush()
+        try:
+            await session.flush()
+        except IntegrityError as exc:
+            # The preflight read is advisory; the database uniqueness
+            # constraint is the authoritative concurrency gate.
+            await session.rollback()
+            raise ValueError(f"Merchant with slug '{request.slug}' already exists.") from exc
 
         # 3. Seed default PolicyRules
         default_rules = [

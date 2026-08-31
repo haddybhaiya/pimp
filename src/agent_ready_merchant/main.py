@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
@@ -34,6 +34,9 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
 from agent_ready_merchant.services.payment_service import PaymentService
 
 logger = logging.getLogger("agent_ready_merchant")
+
+ADMIN_SESSION_COOKIE = "arm_admin_session"
+ADMIN_SESSION_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 class CreateOrderFromQuoteRequest(BaseModel):
@@ -73,6 +76,23 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
         debug=settings.DEBUG,
     )
+
+    @app.middleware("http")
+    async def attach_admin_session_cookie(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        """Use an HttpOnly browser session without exposing it to SPA JavaScript."""
+        if (
+            request.url.path.startswith("/api/v1/merchant/")
+            and "x-auth-token" not in request.headers
+        ):
+            admin_session = request.cookies.get(ADMIN_SESSION_COOKIE)
+            if admin_session:
+                request.scope["headers"] = [
+                    *request.scope["headers"],
+                    (b"x-auth-token", admin_session.encode("latin-1")),
+                ]
+        return await call_next(request)
 
     @app.get(
         "/health",
@@ -829,12 +849,15 @@ def create_app() -> FastAPI:
     )
     async def merchant_signup_endpoint(
         req: MerchantSignupRequest,
+        response: Response,
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> MerchantAuthResponse:
         """Registers a new merchant, seeds initial policy bounds, and issues admin session."""
         try:
-            return await MerchantAuthService.register_merchant(db, req, current_settings)
+            auth_response = await MerchantAuthService.register_merchant(db, req, current_settings)
+            _set_admin_session_cookie(response, auth_response.token, current_settings)
+            return auth_response.model_copy(update={"token": None})
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -847,14 +870,50 @@ def create_app() -> FastAPI:
     )
     async def merchant_login_endpoint(
         req: MerchantLoginRequest,
+        request: Request,
+        response: Response,
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> MerchantAuthResponse:
         """Authenticates merchant by slug and issues active bearer session."""
         try:
-            return await MerchantAuthService.authenticate_merchant(db, req, current_settings)
+            cookie_token = request.cookies.get(ADMIN_SESSION_COOKIE)
+            if req.admin_token is None and cookie_token:
+                req = req.model_copy(update={"admin_token": cookie_token})
+            auth_response = await MerchantAuthService.authenticate_merchant(
+                db, req, current_settings
+            )
+            _set_admin_session_cookie(response, auth_response.token, current_settings)
+            return auth_response.model_copy(update={"token": None})
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/merchant/auth/logout",
+        summary="Merchant Admin Logout",
+        tags=["Merchant Portal"],
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    async def merchant_logout_endpoint(response: Response) -> Response:
+        """Clears the browser-only administrative session cookie."""
+        response.delete_cookie(key=ADMIN_SESSION_COOKIE, path="/api/v1/merchant")
+        response.status_code = status.HTTP_204_NO_CONTENT
+        return response
+
+    def _set_admin_session_cookie(
+        response: Response, token: str | None, current_settings: Settings
+    ) -> None:
+        if token is None:
+            raise RuntimeError("Cannot establish an empty merchant admin session.")
+        response.set_cookie(
+            key=ADMIN_SESSION_COOKIE,
+            value=token,
+            max_age=ADMIN_SESSION_MAX_AGE_SECONDS,
+            httponly=True,
+            secure=current_settings.ENVIRONMENT == "production",
+            samesite="strict",
+            path="/api/v1/merchant",
+        )
 
     def _require_merchant_auth(
         merchant_id: uuid.UUID,

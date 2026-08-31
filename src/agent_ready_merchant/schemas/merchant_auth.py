@@ -96,7 +96,10 @@ class MerchantAuthResponse(BaseModel):
     slug: str = Field(..., description="Store unique slug")
     status: str = Field(..., description="Account status ('ACTIVE', 'PAUSED', 'SUSPENDED')")
     currency: str = Field(default="INR", description="Store currency")
-    token: str = Field(..., description="Cryptographic session bearer token")
+    token: str | None = Field(
+        default=None,
+        description="Omitted from browser responses; stored in an HttpOnly session cookie",
+    )
     expires_at: datetime = Field(..., description="Session expiration timestamp")
     onboarding_completed: bool = Field(..., description="Whether setup wizard is fully completed")
     policies: PolicySummaryItem = Field(..., description="Active policy bounds snapshot")
