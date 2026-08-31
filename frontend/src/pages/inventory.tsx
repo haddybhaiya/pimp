@@ -17,14 +17,16 @@ export const InventoryPage: React.FC = () => {
   const [reason, setReason] = useState<string>('RESTOCK');
   const [isAdjusting, setIsAdjusting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const fetchInventory = async () => {
     setIsLoading(true);
     try {
       const data = await api.listInventory();
       setInventory(data);
-    } catch {
-      // Ignore
+      setLoadError(null);
+    } catch (err: unknown) {
+      setLoadError(err instanceof Error ? err.message : 'Unable to load inventory.');
     } finally {
       setIsLoading(false);
     }
@@ -70,6 +72,8 @@ export const InventoryPage: React.FC = () => {
         <div className="space-y-3">
           {[1, 2, 3].map((i) => <Skeleton key={i} className="h-16 w-full" />)}
         </div>
+      ) : loadError ? (
+        <EmptyState icon={<Boxes className="h-10 w-10" />} title="Inventory unavailable" description={loadError} />
       ) : inventory.length === 0 ? (
         <EmptyState
           icon={<Boxes className="h-10 w-10" />}

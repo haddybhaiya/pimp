@@ -11,12 +11,16 @@ import { FileText, ShieldCheck, ShieldAlert } from 'lucide-react';
 export const AuditPage: React.FC = () => {
   const [ledger, setLedger] = useState<AuditLedger | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchAudit = async () => {
       try {
         const data = await api.getAuditLedger(50);
         setLedger(data);
+        setError(null);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Unable to load the audit ledger.');
       } finally {
         setIsLoading(false);
       }
@@ -53,6 +57,8 @@ export const AuditPage: React.FC = () => {
         <div className="space-y-3">
           {[1, 2, 3].map((i) => <Skeleton key={i} className="h-20 w-full" />)}
         </div>
+      ) : error ? (
+        <EmptyState icon={<ShieldAlert className="h-10 w-10" />} title="Audit ledger unavailable" description={error} />
       ) : !ledger || ledger.events.length === 0 ? (
         <EmptyState
           icon={<FileText className="h-10 w-10" />}
@@ -82,6 +88,11 @@ export const AuditPage: React.FC = () => {
             </Card>
           ))}
         </div>
+      )}
+      {ledger && ledger.total_count > ledger.events.length && (
+        <p className="text-center text-xs text-muted-foreground">
+          Showing the latest {ledger.events.length} of {ledger.total_count} immutable audit events.
+        </p>
       )}
     </div>
   );

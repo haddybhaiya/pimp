@@ -68,7 +68,7 @@ export const PaymentsPage: React.FC = () => {
                       {p.status}
                     </Badge>
                   </td>
-                  <td className="p-3.5 uppercase">{p.payment_method || 'CARD / UPI'}</td>
+                  <td className="p-3.5 uppercase">{p.payment_method || 'N/A'}</td>
                   <td className="p-3.5 text-muted-foreground">{formatRelativeTime(p.created_at)}</td>
                 </tr>
               ))}

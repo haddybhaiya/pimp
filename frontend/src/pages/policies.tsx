@@ -30,6 +30,9 @@ export const PoliciesPage: React.FC = () => {
       setMaxDiscountPct(data.max_discount_percentage);
       setMinMarginPct(data.min_margin_percentage);
       setMaxTxRupees(data.max_single_transaction_paise / 100);
+      setError(null);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Unable to load policy rules.');
     } finally {
       setIsLoading(false);
     }
@@ -95,7 +98,7 @@ export const PoliciesPage: React.FC = () => {
 
       {isLoading ? (
         <Skeleton className="h-96 w-full" />
-      ) : (
+      ) : policyData ? (
         <form onSubmit={handleSave} className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <Card className="lg:col-span-2 border-border bg-card/90">
             <CardHeader>
@@ -193,6 +196,11 @@ export const PoliciesPage: React.FC = () => {
             </Card>
           </div>
         </form>
+      ) : (
+        <div className="rounded-lg border border-rose-400/30 bg-rose-400/10 p-4 text-sm text-rose-100">
+          Policy controls are unavailable until the current server policy can be loaded.
+          <Button onClick={fetchPolicies} variant="outline" size="sm" className="ml-3 border-rose-300/30 text-rose-100">Retry</Button>
+        </div>
       )}
     </div>
   );

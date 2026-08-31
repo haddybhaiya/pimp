@@ -15,6 +15,7 @@ export const OnboardingPage: React.FC<OnboardingPageProps> = ({ onNavigate }) =>
   const { merchant, updateProfile } = useAuth();
   const [step, setStep] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Form State
   const [name, setName] = useState(merchant?.name || '');
@@ -40,7 +41,12 @@ export const OnboardingPage: React.FC<OnboardingPageProps> = ({ onNavigate }) =>
   };
 
   const handleComplete = async () => {
+    if (maxTxRupees > 100000) {
+      setError('The platform ceiling is ₹1,00,000 per transaction.');
+      return;
+    }
     setIsLoading(true);
+    setError(null);
     try {
       const updated = await api.completeSetup({
         name,
@@ -48,10 +54,12 @@ export const OnboardingPage: React.FC<OnboardingPageProps> = ({ onNavigate }) =>
         autonomyLevel,
         maxDiscountPercentage: maxDiscountPct,
         minMarginPercentage: minMarginPct,
-        maxSingleTransactionPaise: maxTxRupees * 100,
+        maxSingleTransactionPaise: Math.round(maxTxRupees * 100),
       });
       updateProfile(updated);
       onNavigate('/dashboard');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Unable to complete merchant setup.');
     } finally {
       setIsLoading(false);
     }
@@ -77,6 +85,7 @@ export const OnboardingPage: React.FC<OnboardingPageProps> = ({ onNavigate }) =>
         </CardHeader>
 
         <CardContent className="space-y-4">
+          {error && <div className="rounded-md border border-rose-400/30 bg-rose-400/10 p-3 text-xs text-rose-100">{error}</div>}
           {step === 1 && (
             <div className="space-y-4">
               <Input
@@ -167,6 +176,7 @@ export const OnboardingPage: React.FC<OnboardingPageProps> = ({ onNavigate }) =>
                 type="number"
                 value={maxTxRupees}
                 onChange={(e) => setMaxTxRupees(parseFloat(e.target.value) || 0)}
+                max={100000}
                 helperText="Platform ceiling: ₹1,00,000"
               />
             </div>

@@ -4,19 +4,26 @@ import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api-client';
-import { QuoteDetail } from '@/types/portal';
+import { ApprovalItem, QuoteDetail } from '@/types/portal';
 import { formatPaiseToINR, formatRelativeTime } from '@/lib/utils';
 import { MessageSquareDiff, ArrowRight } from 'lucide-react';
 
 export const NegotiationsPage: React.FC = () => {
   const [quotes, setQuotes] = useState<QuoteDetail[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchNegotiations = async () => {
       try {
-        const data = await api.listQuotes();
-        setQuotes(data.filter((q: QuoteDetail) => q.discount_paise > 0 || q.status === 'NEGOTIATING'));
+        const [data, approvals] = await Promise.all([api.listQuotes(), api.listApprovals('PENDING')]);
+        const approvalQuoteIds = new Set(
+          approvals.map((approval: ApprovalItem) => approval.quote_id).filter((quoteId): quoteId is string => Boolean(quoteId))
+        );
+        setQuotes(data.filter((q: QuoteDetail) => q.discount_paise > 0 || q.status === 'NEGOTIATING' || approvalQuoteIds.has(q.id)));
+        setError(null);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Unable to load negotiations.');
       } finally {
         setIsLoading(false);
       }
@@ -37,6 +44,8 @@ export const NegotiationsPage: React.FC = () => {
         <div className="space-y-3">
           {[1, 2].map((i) => <Skeleton key={i} className="h-28 w-full" />)}
         </div>
+      ) : error ? (
+        <EmptyState icon={<MessageSquareDiff className="h-10 w-10" />} title="Negotiations unavailable" description={error} />
       ) : quotes.length === 0 ? (
         <EmptyState
           icon={<MessageSquareDiff className="h-10 w-10" />}

@@ -11,12 +11,16 @@ import { FileSpreadsheet, Clock } from 'lucide-react';
 export const QuotesPage: React.FC = () => {
   const [quotes, setQuotes] = useState<QuoteDetail[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchQuotes = async () => {
       try {
         const data = await api.listQuotes();
         setQuotes(data);
+        setError(null);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Unable to load quotes.');
       } finally {
         setIsLoading(false);
       }
@@ -34,6 +38,11 @@ export const QuotesPage: React.FC = () => {
     }
   };
 
+  const displayStatus = (quote: QuoteDetail) =>
+    ['PROPOSED', 'NEGOTIATING'].includes(quote.status) && new Date(quote.expires_at).getTime() <= Date.now()
+      ? 'EXPIRED'
+      : quote.status;
+
   return (
     <div className="space-y-6">
       <div>
@@ -47,6 +56,8 @@ export const QuotesPage: React.FC = () => {
         <div className="space-y-3">
           {[1, 2, 3].map((i) => <Skeleton key={i} className="h-20 w-full" />)}
         </div>
+      ) : error ? (
+        <EmptyState icon={<FileSpreadsheet className="h-10 w-10" />} title="Quotes unavailable" description={error} />
       ) : quotes.length === 0 ? (
         <EmptyState
           icon={<FileSpreadsheet className="h-10 w-10" />}
@@ -61,7 +72,7 @@ export const QuotesPage: React.FC = () => {
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <span className="font-mono text-xs text-muted-foreground">{q.id.slice(0, 8)}...</span>
-                    {getStatusBadge(q.status)}
+                    {getStatusBadge(displayStatus(q))}
                   </div>
                   <div className="flex items-center gap-3 text-xs text-muted-foreground">
                     <span className="flex items-center gap-1">

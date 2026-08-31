@@ -38,11 +38,12 @@ export const DemoPage: React.FC = () => {
     setErrorMessage(null);
     setSimulationResult(null);
 
+    const parsedDiscount = Number.parseFloat(customDiscount);
     const payload: DemoSimulationStepRequest = {
       scenario: selectedScenario,
       sku: selectedSku,
       quantity,
-      target_discount_pct: selectedScenario === 'HITL_ESCALATION_COMMERCE' ? 20 : parseFloat(customDiscount) || 10,
+      target_discount_pct: selectedScenario === 'HITL_ESCALATION_COMMERCE' ? 20 : Number.isFinite(parsedDiscount) ? parsedDiscount : 10,
     };
 
     try {

@@ -13,12 +13,16 @@ export const OrdersPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [reconcilingId, setReconcilingId] = useState<string | null>(null);
   const [reconcileResult, setReconcileResult] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchOrders = async () => {
     setIsLoading(true);
     try {
       const data = await api.listOrders();
       setOrders(data);
+      setError(null);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Unable to load orders.');
     } finally {
       setIsLoading(false);
     }
@@ -33,7 +37,7 @@ export const OrdersPage: React.FC = () => {
     try {
       const res = await api.reconcileOrder(orderId);
       setReconcileResult(`Reconciliation complete for order ${orderId.slice(0, 8)} (Status: ${res.status || 'PROCESSED'})`);
-      fetchOrders();
+      await fetchOrders();
     } catch (err: unknown) {
       setReconcileResult(`Reconciliation error: ${err instanceof Error ? err.message : 'Failed'}`);
     } finally {
@@ -61,6 +65,8 @@ export const OrdersPage: React.FC = () => {
         <div className="space-y-3">
           {[1, 2, 3].map((i) => <Skeleton key={i} className="h-20 w-full" />)}
         </div>
+      ) : error ? (
+        <EmptyState icon={<ShoppingCart className="h-10 w-10" />} title="Orders unavailable" description={error} />
       ) : orders.length === 0 ? (
         <EmptyState
           icon={<ShoppingCart className="h-10 w-10" />}

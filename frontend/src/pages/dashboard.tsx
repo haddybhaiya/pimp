@@ -28,14 +28,15 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
   const { merchant } = useAuth();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchSummary = async () => {
       try {
         const data = await api.getDashboardSummary();
         setSummary(data);
-      } catch {
-        // Fallback
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Unable to load the dashboard summary.');
       } finally {
         setIsLoading(false);
       }
@@ -48,6 +49,12 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
   return (
     <div className="dashboard-page space-y-6">
       {/* Action Required Alert (if pending approvals) */}
+      {error && (
+        <div className="flex items-center justify-between rounded-xl border border-rose-400/30 bg-rose-400/10 p-4 text-xs text-rose-100">
+          <span>{error}</span>
+          <Button onClick={() => window.location.reload()} variant="outline" size="sm" className="border-rose-300/30 text-rose-100">Retry</Button>
+        </div>
+      )}
       {pendingApprovalsCount > 0 && (
         <div className="flex items-center justify-between rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 shadow-glow-warning">
           <div className="flex items-center gap-3">
