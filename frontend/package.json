@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@insforge/sdk": "^1.5.2",
     "@types/three": "^0.185.4",
     "clsx": "^2.1.1",
     "lucide-react": "^0.475.0",

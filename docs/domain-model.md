@@ -228,6 +228,24 @@ Cryptographically tamper-evident event log.
 
 ---
 
+### 2.12 MerchantMutationReceipt (`merchant_mutation_receipts`)
+Durable replay receipt for direct merchant control-plane mutations. The composite
+unique key prevents a retry from applying inventory or simulation effects twice.
+
+| Field | Type | Nullable | Description | Authority |
+|---|---|---|---|---|
+| `id` | `UUID` | No | Primary key | Platform |
+| `merchant_id` | `UUID` | No | Foreign key -> `merchants.id` | Platform |
+| `operation` | `VARCHAR(128)` | No | Mutation capability, e.g. `inventory.adjust` | Platform |
+| `idempotency_key` | `VARCHAR(255)` | No | Caller-provided replay key; unique per merchant/operation | Caller / Platform validates |
+| `payload_hash` | `VARCHAR(64)` | No | SHA-256 of canonical request payload | Platform |
+| `response_body` | `JSONB` | Yes | Completed authoritative response for an identical retry | Platform |
+| `response_status` | `INTEGER` | Yes | Completed HTTP status | Platform |
+| `created_at` | `TIMESTAMPTZ` | No | Claim timestamp | Platform |
+| `updated_at` | `TIMESTAMPTZ` | No | Completion timestamp | Platform |
+
+---
+
 ## 3. Assumptions & Integrity Constraints
 
 | Assumption | Evidence | Confidence | Failure if Wrong | Mitigation | Verification Required |

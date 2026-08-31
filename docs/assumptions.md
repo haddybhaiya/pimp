@@ -102,7 +102,7 @@
 - **STATUS:** **VERIFIED (PASS)**
 - **CONFIDENCE:** 100%
 - **FAILURE IF WRONG:** Price manipulation, bypassing merchant floor prices or approval gates, stock overselling, or unauthorized cross-tenant data modification.
-- **MITIGATION:** All operations route through authenticated `/api/v1/merchant/...` endpoints backed by `MerchantPortalService`, enforcing server-side HMAC token verification, optimistic concurrency row locking, floor price margin invariant checks (`floor_price <= base_price`), platform policy ceilings, and cryptographic SHA-256 audit hash chain verification. Browser sessions are carried in `HttpOnly`, `SameSite=Strict` cookies; the SPA retains only non-secret merchant profile metadata.
+- **MITIGATION:** All operations route through authenticated `/api/v1/merchant/...` endpoints backed by `MerchantPortalService`, enforcing server-side HMAC token verification with the dedicated application `SECRET_KEY`, current-merchant `ACTIVE` status checks, optimistic concurrency row locking, floor price margin invariant checks (`floor_price <= base_price`), platform policy ceilings, and cryptographic SHA-256 audit hash chain verification. Browser sessions are carried in `HttpOnly`, `SameSite=Strict` cookies; the SPA retains only non-secret merchant profile metadata.
 
 ---
 
@@ -118,7 +118,7 @@
 
 ### 12. InsForge PostgreSQL Semantic Compatibility & Transaction Isolation
 - **ASSUMPTION:** InsForge's managed PostgreSQL infrastructure fully supports standard PostgreSQL 16+ DDL migrations, transactional isolation, row-level locking (`SELECT ... FOR UPDATE`), unique composite constraints, foreign key integrity, and asyncpg connection pooling.
-- **EVIDENCE:** Verified via Alembic migration chain (revisions 001 through 005 applying cleanly) and `tests/test_insforge_postgresql_integration.py` (all live PostgreSQL tests passing deterministically).
+- **EVIDENCE:** Verified via Alembic migration chain (revisions 001 through 006 applying cleanly) and `tests/test_insforge_postgresql_integration.py` (all live PostgreSQL tests passing deterministically).
 - **STATUS:** **VERIFIED (PASS)**
 - **CONFIDENCE:** 100%
 - **FAILURE IF WRONG:** Migration failures, broken row-level inventory locks, race conditions during payment settlement, or audit chain forking under concurrent load.
