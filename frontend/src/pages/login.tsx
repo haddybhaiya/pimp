@@ -1,9 +1,8 @@
 import React, { useState } from 'react';
+import { ArrowLeft, ArrowRight, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card';
 import { useAuth } from '@/lib/auth-store';
-import { ShieldCheck, AlertCircle } from 'lucide-react';
 
 export interface LoginPageProps {
   onNavigate: (path: string) => void;
@@ -15,8 +14,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
   const [rzpKeyId, setRzpKeyId] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
     if (!slug) {
       setError('Please enter your merchant slug.');
       return;
@@ -36,60 +35,31 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
   };
 
   return (
-    <div className="flex min-h-[calc(100vh-8rem)] items-center justify-center px-4 py-12">
-      <Card className="w-full max-w-md border-border/80 bg-card/80 backdrop-blur-md shadow-xl">
-        <CardHeader className="text-center">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-primary-foreground mb-2">
-            <ShieldCheck className="h-6 w-6" />
-          </div>
-          <CardTitle className="text-2xl font-bold">Merchant Sign In</CardTitle>
-          <CardDescription>Enter your store slug to access your autonomous control plane.</CardDescription>
-        </CardHeader>
-
-        <form onSubmit={handleSubmit}>
-          <CardContent className="space-y-4">
-            {error && (
-              <div className="flex items-center gap-2 rounded-md bg-destructive/15 p-3 text-xs text-destructive font-medium">
-                <AlertCircle className="h-4 w-4 shrink-0" />
-                <span>{error}</span>
-              </div>
-            )}
-
-            <Input
-              label="Store Slug"
-              placeholder="e.g. acme-shoes"
-              value={slug}
-              onChange={(e) => setSlug(e.target.value)}
-              required
-            />
-
-            <Input
-              label="Razorpay Key ID (Optional)"
-              placeholder="rzp_test_..."
-              value={rzpKeyId}
-              onChange={(e) => setRzpKeyId(e.target.value)}
-            />
-
-            <div className="pt-2">
-              <Button type="button" onClick={handleDemoFill} variant="ghost" size="sm" className="w-full text-xs text-muted-foreground">
-                ⚡ Quick Fill Demo Store (acme-shoes)
-              </Button>
+    <div className="auth-page">
+      <div className="auth-shell">
+        <main className="auth-form-side">
+          <div className="auth-form-wrap auth-reveal">
+            <button type="button" onClick={() => onNavigate('/')} className="auth-back">
+              <ArrowLeft className="h-4 w-4" /> Home
+            </button>
+            <div className="mt-9"><span className="auth-brand">pimp</span></div>
+            <div className="mt-12">
+              <h1 className="text-3xl font-semibold tracking-[-0.055em] text-slate-50">Merchant Sign In</h1>
+              <p className="mt-3 text-sm text-slate-400">Access your governed commerce workspace.</p>
             </div>
-          </CardContent>
 
-          <CardFooter className="flex flex-col gap-3">
-            <Button type="submit" className="w-full" isLoading={isLoading}>
-              Sign In
-            </Button>
-            <p className="text-xs text-center text-muted-foreground">
-              Don't have a store yet?{' '}
-              <button type="button" onClick={() => onNavigate('/signup')} className="text-primary hover:underline font-medium">
-                Register Store
-              </button>
-            </p>
-          </CardFooter>
-        </form>
-      </Card>
+            <form onSubmit={handleSubmit} className="mt-8 space-y-5">
+              {error && <div className="flex items-center gap-2 rounded-md border border-rose-400/25 bg-rose-400/10 p-3 text-xs font-medium text-rose-200"><AlertCircle className="h-4 w-4 shrink-0" />{error}</div>}
+              <Input className="auth-input" label="Store Slug" placeholder="e.g. acme-shoes" value={slug} onChange={(event) => setSlug(event.target.value)} required />
+              <Input className="auth-input" label="Razorpay Key ID (Optional)" placeholder="rzp_test_..." value={rzpKeyId} onChange={(event) => setRzpKeyId(event.target.value)} />
+              <Button type="button" onClick={handleDemoFill} variant="ghost" size="sm" className="w-full text-xs text-slate-400 hover:bg-slate-800 hover:text-slate-100">Quick fill demo store (acme-shoes)</Button>
+              <Button type="submit" className="mt-2 w-full rounded-md bg-emerald-300 font-semibold text-slate-950 hover:bg-emerald-200" isLoading={isLoading}>Sign In <ArrowRight className="h-4 w-4" /></Button>
+            </form>
+            <p className="mt-8 text-center text-sm text-slate-400">Don&apos;t have a store? <button type="button" onClick={() => onNavigate('/signup')} className="font-medium text-slate-100 hover:underline">Sign Up Now</button></p>
+          </div>
+        </main>
+        <aside className="auth-visual-side" aria-hidden="true"><div className="auth-dot-field" /><div className="auth-visual-copy">Operate commerce with <span>certainty.</span></div></aside>
+      </div>
     </div>
   );
 };

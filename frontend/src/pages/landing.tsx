@@ -12,8 +12,13 @@ import {
   Bot,
   Orbit,
   Check,
+  BarChart3,
+  BadgeCheck,
+  Webhook,
+  Network,
 } from 'lucide-react';
 import { CommerceOrbit } from '@/components/landing/commerce-orbit';
+import { Reveal } from '@/components/ui/reveal';
 
 export interface LandingPageProps {
   onNavigate: (path: string) => void;
@@ -30,7 +35,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
       desc: 'Autonomous buyer agents discover products, negotiate quotes, and submit structured commerce intents under strict token constraints.',
       invariant: 'INV-AGY-01: Separation of Intelligence & Authority',
       details: 'All LLM proposals are wrapped in typed schemas and treated as completely untrusted input.',
-      color: 'from-blue-500/20 to-indigo-500/20 border-blue-500/40 text-blue-400',
+      color: 'from-emerald-500/20 to-teal-500/20 border-emerald-500/40 text-emerald-300',
     },
     {
       id: 1,
@@ -39,7 +44,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
       desc: 'Pre-flight mathematical checks verify floor price margin, discount ceilings, max items, and merchant autonomy rules before any mutation.',
       invariant: 'INV-FIN-02: Strict Merchant Floor Price Guarantee',
       details: 'Evaluates ALLOW, ESCALATE_APPROVAL, or DENY with zero possibility of LLM override.',
-      color: 'from-brand/20 to-purple-500/20 border-brand/40 text-brand-bright',
+      color: 'from-brand/20 to-emerald-500/20 border-brand/40 text-brand-bright',
     },
     {
       id: 2,
@@ -66,23 +71,23 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
       desc: 'Every session, quote, policy decision, approval, and settlement is chained with SHA-256 hashes for instant tamper detection.',
       invariant: 'INV-AGY-04: Tamper-Evident Cryptographic Ledger',
       details: 'Any out-of-band database mutation breaks the cryptographic link and alerts operators.',
-      color: 'from-purple-500/20 to-pink-500/20 border-purple-500/40 text-purple-400',
+      color: 'from-emerald-500/20 to-teal-500/20 border-emerald-500/40 text-emerald-300',
     },
   ];
 
   return (
-    <div className="flex min-h-screen flex-col overflow-hidden bg-[#06111a] text-[#f8fafc] selection:bg-cyan-300/30">
+    <div className="landing-theme flex min-h-screen flex-col overflow-hidden bg-[#080c0b] text-[#f8fafc] selection:bg-emerald-300/30">
       {/* Hero: the scene is decorative only; all commerce authority remains server-side. */}
-      <section className="relative isolate overflow-hidden border-b border-sky-100/10 bg-[#06111a] pb-20 pt-16 lg:pb-28 lg:pt-24">
+      <section className="relative isolate overflow-hidden border-b border-white/[0.07] bg-[#080c0b] pb-20 pt-16 lg:pb-28 lg:pt-24">
         <div className="hero-grid absolute inset-0 -z-20 opacity-70" />
-        <div className="absolute -left-28 top-0 -z-10 h-[34rem] w-[34rem] rounded-full bg-cyan-500/[0.09] blur-[130px]" />
-        <div className="absolute bottom-0 right-[12%] -z-10 h-72 w-72 rounded-full bg-lime-400/[0.08] blur-[110px]" />
+        <div className="absolute -left-28 top-0 -z-10 h-[34rem] w-[34rem] rounded-full bg-emerald-400/[0.08] blur-[130px]" />
+        <div className="absolute bottom-0 right-[12%] -z-10 h-72 w-72 rounded-full bg-emerald-300/[0.06] blur-[110px]" />
         <CommerceOrbit />
 
         <div className="container relative z-10 mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="max-w-3xl text-left">
-            <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-cyan-300/20 bg-slate-950/50 px-3.5 py-1.5 shadow-[0_0_40px_rgba(34,211,238,0.08)] backdrop-blur">
-              <span className="h-1.5 w-1.5 rounded-full bg-lime-300 shadow-[0_0_10px_#bef264]" />
+            <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-emerald-300/20 bg-slate-950/50 px-3.5 py-1.5 backdrop-blur">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-300 shadow-[0_0_10px_#6ee7b7]" />
               <span className="text-[10px] font-mono uppercase tracking-[0.16em] text-slate-300">
                 Agent commerce, constrained by design
               </span>
@@ -90,7 +95,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
 
             <h1 className="max-w-3xl font-display text-5xl font-bold tracking-[-0.065em] text-slate-50 sm:text-6xl lg:text-7xl lg:leading-[0.98]">
               The Autonomous AI Commerce{' '}
-              <span className="text-cyan-300">control layer</span> for merchants who mean business.
+              <span className="text-emerald-300">control layer</span> for merchants who mean business.
             </h1>
 
             <p className="mt-7 max-w-2xl text-base leading-relaxed text-slate-300 sm:text-lg">
@@ -101,7 +106,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
             <Button
               onClick={() => onNavigate('/signup')}
               size="lg"
-              className="w-full rounded-xl bg-lime-300 px-7 py-3 text-sm font-bold text-slate-950 shadow-[0_12px_40px_rgba(163,230,53,0.2)] hover:bg-lime-200 sm:w-auto"
+              className="w-full rounded-xl bg-emerald-300 px-7 py-3 text-sm font-bold text-slate-950 shadow-[0_12px_40px_rgba(52,211,153,0.16)] hover:bg-emerald-200 sm:w-auto"
             >
               Build your control plane
               <ArrowRight className="h-4 w-4 ml-2" />
@@ -111,9 +116,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
               onClick={() => onNavigate('/demo')}
               variant="outline"
               size="lg"
-              className="w-full rounded-xl border-slate-600/70 bg-slate-950/30 px-6 py-3 text-sm font-medium text-slate-100 hover:border-cyan-300/60 hover:bg-slate-900/80 sm:w-auto"
+              className="w-full rounded-xl border-slate-600/70 bg-slate-950/30 px-6 py-3 text-sm font-medium text-slate-100 hover:border-emerald-300/60 hover:bg-slate-900/80 sm:w-auto"
             >
-              <Orbit className="h-4 w-4 mr-2 text-cyan-300" />
+              <Orbit className="h-4 w-4 mr-2 text-emerald-300" />
               Explore the sandbox
             </Button>
           </div>
@@ -121,7 +126,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
             <div className="mt-12 flex flex-wrap gap-x-5 gap-y-2 text-xs font-medium text-slate-300">
               {['No below-floor pricing', 'Human approval when it matters', 'HMAC-verified settlement'].map((item) => (
                 <span key={item} className="inline-flex items-center gap-1.5">
-                  <Check className="h-3.5 w-3.5 text-lime-300" />
+                  <Check className="h-3.5 w-3.5 text-emerald-300" />
                   {item}
                 </span>
               ))}
@@ -131,7 +136,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
           <div className="relative mt-16 grid max-w-5xl grid-cols-2 gap-3 lg:mt-20 lg:grid-cols-4">
             <div className="hero-proof-card p-3.5 rounded-2xl text-left">
               <div className="flex items-center gap-2 mb-1">
-                <Lock className="h-4 w-4 text-lime-300" />
+                <Lock className="h-4 w-4 text-emerald-300" />
                 <span className="text-[11px] font-mono font-bold text-slate-100">INV-FIN-02</span>
               </div>
               <p className="text-xs text-slate-400">Strict floor price margin guarantee</p>
@@ -139,7 +144,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
 
             <div className="hero-proof-card p-3.5 rounded-2xl text-left">
               <div className="flex items-center gap-2 mb-1">
-                <Scale className="h-4 w-4 text-cyan-300" />
+                <Scale className="h-4 w-4 text-emerald-300" />
                 <span className="text-[11px] font-mono font-bold text-slate-100">INV-FIN-01</span>
               </div>
               <p className="text-xs text-slate-400">64-bit integer paise, never float math</p>
@@ -155,7 +160,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
 
             <div className="hero-proof-card p-3.5 rounded-2xl text-left">
               <div className="flex items-center gap-2 mb-1">
-                <FileCheck className="h-4 w-4 text-cyan-300" />
+                <FileCheck className="h-4 w-4 text-emerald-300" />
                 <span className="text-[11px] font-mono font-bold text-slate-100">INV-AGY-04</span>
               </div>
               <p className="text-xs text-slate-400">Immutable SHA-256 audit chain</p>
@@ -248,6 +253,52 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
         </div>
       </section>
 
+      {/* Product operations preview */}
+      <section className="border-t border-white/[0.07] bg-[#0a0e11] py-24">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <Reveal className="grid items-center gap-12 lg:grid-cols-[0.82fr_1.18fr]">
+            <div>
+              <span className="text-[10px] font-mono font-semibold uppercase tracking-[0.18em] text-emerald-300">One operating view</span>
+              <h2 className="mt-4 max-w-lg font-display text-3xl font-semibold tracking-[-0.045em] text-slate-50 sm:text-4xl">
+                See the decision before it becomes a transaction.
+              </h2>
+              <p className="mt-5 max-w-lg text-sm leading-7 text-slate-400">
+                Follow buyer intent from discovery through policy evaluation, merchant approval, and verified settlement—without giving the agent authority it should not have.
+              </p>
+              <div className="mt-8 grid grid-cols-2 gap-5 border-t border-white/10 pt-6">
+                <div><p className="font-display text-2xl font-semibold text-slate-100">5</p><p className="mt-1 text-xs text-slate-500">bounded tool steps</p></div>
+                <div><p className="font-display text-2xl font-semibold text-slate-100">15s</p><p className="mt-1 text-xs text-slate-500">maximum agent turn</p></div>
+              </div>
+            </div>
+
+            <div className="operations-preview">
+              <div className="flex items-center justify-between border-b border-white/10 px-5 py-3.5">
+                <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-emerald-300" /><span className="text-xs font-medium text-slate-200">Live commerce trace</span></div>
+                <span className="rounded border border-white/10 px-2 py-1 font-mono text-[9px] text-slate-500">REQ_8F21</span>
+              </div>
+              <div className="divide-y divide-white/[0.07]">
+                {[
+                  ['01', 'Buyer intent received', 'UNTRUSTED', Network],
+                  ['02', 'Floor and discount policy checked', 'ALLOWED', BadgeCheck],
+                  ['03', 'Inventory version locked', 'RESERVED', BarChart3],
+                  ['04', 'Settlement webhook verified', 'CAPTURED', Webhook],
+                ].map(([step, title, status, Icon]) => {
+                  const RowIcon = Icon as typeof Network;
+                  return (
+                    <div key={step as string} className="group flex items-center gap-4 px-5 py-4 transition-colors hover:bg-white/[0.025]">
+                      <span className="font-mono text-[10px] text-slate-600">{step as string}</span>
+                      <span className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 bg-white/[0.025] text-slate-400"><RowIcon className="h-4 w-4" /></span>
+                      <span className="min-w-0 flex-1 text-sm text-slate-300">{title as string}</span>
+                      <span className="font-mono text-[9px] font-semibold tracking-[0.1em] text-emerald-300">{status as string}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </Reveal>
+        </div>
+      </section>
+
       {/* Feature Grid Section */}
       <section className="py-20 border-t border-[#24314A]/60">
         <div className="container mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -293,7 +344,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
             </div>
 
             <div className="glass-card p-5 rounded-xl border border-[#24314A] card-hover">
-              <div className="h-10 w-10 rounded-xl bg-indigo-500/10 text-indigo-400 flex items-center justify-center mb-4">
+              <div className="h-10 w-10 rounded-xl bg-emerald-500/10 text-emerald-300 flex items-center justify-center mb-4">
                 <Zap className="h-5 w-5" />
               </div>
               <h3 className="text-sm font-bold text-text-primary mb-1">Razorpay Settlement</h3>
@@ -305,20 +356,31 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
         </div>
       </section>
 
-      {/* Footer */}
-      <footer className="border-t border-[#24314A]/60 py-8 bg-[#070B14]">
-        <div className="container mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-text-muted">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="h-4 w-4 text-brand-bright" />
-            <span className="font-display text-lg font-bold tracking-[-0.08em] text-cyan-300">pimp</span>
-          </div>
-          <div className="flex items-center gap-4">
-            <span className="font-mono">Protocol v2026-03-01</span>
-            <span>•</span>
-            <span className="font-mono">Integer Paise Settlement</span>
-          </div>
+      <section className="border-t border-white/[0.07] bg-[#080b0d] py-24">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <Reveal>
+            <div className="grid gap-px overflow-hidden rounded-2xl border border-white/10 bg-white/10 sm:grid-cols-3">
+              {[
+                ['Integer paise', 'Precise money by default', 'No floating-point pricing anywhere in the transaction path.'],
+                ['Fail closed', 'Ambiguity never ships', 'Invalid state, policy, or capability checks stop before mutation.'],
+                ['Audit chained', 'Every decision has a history', 'SHA-256 links policy decisions, approvals, and settlement events.'],
+              ].map(([eyebrow, title, description]) => (
+                <div key={eyebrow} className="bg-[#0c1114] p-7 sm:p-8">
+                  <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.16em] text-emerald-300">{eyebrow}</p>
+                  <h3 className="mt-4 text-lg font-semibold tracking-[-0.025em] text-slate-100">{title}</h3>
+                  <p className="mt-3 text-sm leading-6 text-slate-500">{description}</p>
+                </div>
+              ))}
+            </div>
+          </Reveal>
+
+          <Reveal className="mt-20 flex flex-col items-start justify-between gap-8 border-t border-white/10 pt-12 sm:flex-row sm:items-end">
+            <div><p className="text-[10px] font-mono uppercase tracking-[0.18em] text-emerald-300">Ready when you are</p><h2 className="mt-3 max-w-2xl font-display text-3xl font-semibold tracking-[-0.045em] text-slate-50 sm:text-4xl">Give agents access to commerce. Keep authority with the merchant.</h2></div>
+            <Button onClick={() => onNavigate('/signup')} size="lg" className="shrink-0 bg-emerald-300 font-semibold text-slate-950 hover:bg-emerald-200">Create your store <ArrowRight className="h-4 w-4" /></Button>
+          </Reveal>
         </div>
-      </footer>
+      </section>
+
     </div>
   );
 };

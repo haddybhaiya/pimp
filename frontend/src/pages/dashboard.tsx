@@ -46,7 +46,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
   const pendingApprovalsCount = summary?.pending_approvals_count ?? 0;
 
   return (
-    <div className="space-y-6">
+    <div className="dashboard-page space-y-6">
       {/* Action Required Alert (if pending approvals) */}
       {pendingApprovalsCount > 0 && (
         <div className="flex items-center justify-between rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 shadow-glow-warning">
@@ -210,7 +210,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
           className="glass-card p-5 rounded-xl border border-[#24314A] card-hover cursor-pointer"
         >
           <div className="flex items-center gap-3 mb-2">
-            <div className="p-2 rounded-lg bg-purple-500/10 text-purple-400">
+            <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-300">
               <FileText className="h-4 w-4" />
             </div>
             <h4 className="text-xs font-bold text-text-primary">Cryptographic Audit Chain</h4>

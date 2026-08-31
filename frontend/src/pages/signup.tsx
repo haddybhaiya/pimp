@@ -1,9 +1,8 @@
 import React, { useState } from 'react';
+import { ArrowLeft, ArrowRight, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card';
 import { useAuth } from '@/lib/auth-store';
-import { ShieldCheck, AlertCircle } from 'lucide-react';
 
 export interface SignupPageProps {
   onNavigate: (path: string) => void;
@@ -17,28 +16,23 @@ export const SignupPage: React.FC<SignupPageProps> = ({ onNavigate }) => {
   const [rzpKeyId, setRzpKeyId] = useState('rzp_test_key_123');
   const [error, setError] = useState<string | null>(null);
 
-  const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value;
-    setName(val);
+  const handleNameChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const value = event.target.value;
+    setName(value);
     if (!slug || slug === name.toLowerCase().replace(/[^a-z0-9]+/g, '-')) {
-      setSlug(val.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
+      setSlug(value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
     if (!name || !slug || !email) {
       setError('Please fill in all required fields.');
       return;
     }
     setError(null);
     try {
-      await signup({
-        name: name.trim(),
-        slug: slug.trim().toLowerCase(),
-        email: email.trim(),
-        rzpKeyId: rzpKeyId.trim() || 'rzp_test_placeholder',
-      });
+      await signup({ name: name.trim(), slug: slug.trim().toLowerCase(), email: email.trim(), rzpKeyId: rzpKeyId.trim() || 'rzp_test_placeholder' });
       onNavigate('/onboarding');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Registration failed.');
@@ -46,73 +40,27 @@ export const SignupPage: React.FC<SignupPageProps> = ({ onNavigate }) => {
   };
 
   return (
-    <div className="flex min-h-[calc(100vh-8rem)] items-center justify-center px-4 py-12">
-      <Card className="w-full max-w-md border-border/80 bg-card/80 backdrop-blur-md shadow-xl">
-        <CardHeader className="text-center">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-primary-foreground mb-2">
-            <ShieldCheck className="h-6 w-6" />
+    <div className="auth-page">
+      <div className="auth-shell">
+        <main className="auth-form-side">
+          <div className="auth-form-wrap auth-reveal">
+            <button type="button" onClick={() => onNavigate('/')} className="auth-back"><ArrowLeft className="h-4 w-4" /> Home</button>
+            <div className="mt-9"><span className="auth-brand">pimp</span></div>
+            <div className="mt-10"><h1 className="text-3xl font-semibold tracking-[-0.055em] text-slate-50">Register Merchant</h1><p className="mt-3 text-sm text-slate-400">Create a governed workspace for your store.</p></div>
+
+            <form onSubmit={handleSubmit} className="mt-7 space-y-4">
+              {error && <div className="flex items-center gap-2 rounded-md border border-rose-400/25 bg-rose-400/10 p-3 text-xs font-medium text-rose-200"><AlertCircle className="h-4 w-4 shrink-0" />{error}</div>}
+              <Input className="auth-input" label="Store / Business Name" placeholder="Apex Athletic" value={name} onChange={handleNameChange} required />
+              <Input className="auth-input" label="Store Slug" placeholder="apex-athletic" value={slug} onChange={(event) => setSlug(event.target.value.toLowerCase())} helperText="Unique identifier for AI buyers" required />
+              <Input className="auth-input" label="Admin Email" type="email" placeholder="admin@apex-athletic.com" value={email} onChange={(event) => setEmail(event.target.value)} required />
+              <Input className="auth-input" label="Razorpay Test Key ID" placeholder="rzp_test_..." value={rzpKeyId} onChange={(event) => setRzpKeyId(event.target.value)} helperText="Test mode API key" />
+              <Button type="submit" className="mt-2 w-full rounded-md bg-emerald-300 font-semibold text-slate-950 hover:bg-emerald-200" isLoading={isLoading}>Create Store & Continue <ArrowRight className="h-4 w-4" /></Button>
+            </form>
+            <p className="mt-7 text-center text-sm text-slate-400">Already registered? <button type="button" onClick={() => onNavigate('/login')} className="font-medium text-slate-100 hover:underline">Sign In</button></p>
           </div>
-          <CardTitle className="text-2xl font-bold">Register Merchant</CardTitle>
-          <CardDescription>Set up your autonomous commerce store on Razorpay in seconds.</CardDescription>
-        </CardHeader>
-
-        <form onSubmit={handleSubmit}>
-          <CardContent className="space-y-4">
-            {error && (
-              <div className="flex items-center gap-2 rounded-md bg-destructive/15 p-3 text-xs text-destructive font-medium">
-                <AlertCircle className="h-4 w-4 shrink-0" />
-                <span>{error}</span>
-              </div>
-            )}
-
-            <Input
-              label="Store / Business Name"
-              placeholder="Apex Athletic"
-              value={name}
-              onChange={handleNameChange}
-              required
-            />
-
-            <Input
-              label="Store Slug"
-              placeholder="apex-athletic"
-              value={slug}
-              onChange={(e) => setSlug(e.target.value.toLowerCase())}
-              helperText="Unique identifier for AI buyers"
-              required
-            />
-
-            <Input
-              label="Admin Email"
-              type="email"
-              placeholder="admin@apex-athletic.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-            />
-
-            <Input
-              label="Razorpay Test Key ID"
-              placeholder="rzp_test_..."
-              value={rzpKeyId}
-              onChange={(e) => setRzpKeyId(e.target.value)}
-              helperText="Test mode API key"
-            />
-          </CardContent>
-
-          <CardFooter className="flex flex-col gap-3">
-            <Button type="submit" className="w-full" isLoading={isLoading}>
-              Create Store & Continue
-            </Button>
-            <p className="text-xs text-center text-muted-foreground">
-              Already registered?{' '}
-              <button type="button" onClick={() => onNavigate('/login')} className="text-primary hover:underline font-medium">
-                Sign In
-              </button>
-            </p>
-          </CardFooter>
-        </form>
-      </Card>
+        </main>
+        <aside className="auth-visual-side" aria-hidden="true"><div className="auth-dot-field" /><div className="auth-visual-copy">Set your rules. <span>Keep control.</span></div></aside>
+      </div>
     </div>
   );
 };
