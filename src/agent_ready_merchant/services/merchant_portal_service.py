@@ -527,6 +527,8 @@ class MerchantPortalService:
             approval.status = "REJECTED"
         elif req.decision == "COUNTER_OFFER":
             approval.status = "APPROVED"
+            if req.counter_amount_paise is not None:
+                approval.requested_amount_paise = req.counter_amount_paise
 
         approval.approver_identifier = "MERCHANT_ADMIN"
         approval.resolved_at = datetime.now(UTC)
@@ -537,13 +539,26 @@ class MerchantPortalService:
             q_stmt = select(PriceQuote).where(PriceQuote.id == approval.quote_id).with_for_update()
             quote = (await session.execute(q_stmt)).scalar_one_or_none()
             if quote:
-                if req.decision in ["APPROVE", "COUNTER_OFFER"]:
+                if req.decision == "APPROVE":
                     quote.status = "PROPOSED"
                     quote.discount_paise = approval.proposed_discount_paise
                     quote.total_paise = (
                         quote.subtotal_paise - quote.discount_paise + quote.shipping_paise
                     )
                     quote.discount_reason = f"Merchant Approved: {req.reason_note}"
+                elif req.decision == "COUNTER_OFFER":
+                    quote.status = "PROPOSED"
+                    counter_amt = (
+                        req.counter_amount_paise
+                        if req.counter_amount_paise is not None
+                        else approval.requested_amount_paise
+                    )
+                    quote.total_paise = counter_amt
+                    quote.discount_paise = max(
+                        0, quote.subtotal_paise + quote.shipping_paise - counter_amt
+                    )
+                    approval.proposed_discount_paise = quote.discount_paise
+                    quote.discount_reason = f"Merchant Counter-Offer: {req.reason_note}"
                 else:
                     quote.status = "REJECTED"
                     quote.discount_reason = f"Merchant Rejected: {req.reason_note}"
@@ -560,6 +575,7 @@ class MerchantPortalService:
                 "quote_id": str(approval.quote_id) if approval.quote_id else None,
                 "decision": req.decision,
                 "reason_note": req.reason_note,
+                "counter_amount_paise": req.counter_amount_paise,
                 "status": approval.status,
             },
         )
