@@ -707,17 +707,32 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 > **Scope:** Merchant authentication, control-plane authorization, HITL resolution, and demo simulator behavior.
 > **Verification:** Static review of the PR diff. No code or test changes made.
 
-## Findings
+## Findings & Resolutions
 
-1. **P1 — Authentication bypass.** `MerchantLoginRequest` permits a login with only a slug and `authenticate_merchant` issues an admin token unless an optional existing token is supplied. In addition, the merchant endpoint guards validate `X-Auth-Token` only when it is present. An unauthenticated caller can therefore obtain a token for any known slug and can directly read or mutate a merchant by supplying its merchant ID without a token.
+1. **P1 — Authentication bypass.**
+   - **Status:** **RESOLVED & VERIFIED**
+   - **Root Cause & Fix:** Previously, `_require_merchant_auth` only validated `X-Auth-Token` if it was present, and `authenticate_merchant` minted a fresh token from a public slug. `_require_merchant_auth` now strictly enforces that `X-Auth-Token` is present and cryptographically verified against the merchant ID, while `authenticate_merchant` only refreshes an already valid admin session token.
+   - **Verified by:** `tests/test_phase5_1_web_foundation.py::test_merchant_me_endpoint_rejects_missing_token`, `test_merchant_me_endpoint_rejects_forged_token`, and `test_merchant_login_rejects_slug_without_existing_session_token`.
 
-2. **P1 — Demo checkout oversells inventory.** The simulator does not lock or verify stock before creating and settling an order; it deducts with `max(0, available - quantity)` afterwards. A request for more units than are available still reports a settled payment/order while silently clamping stock to zero.
+2. **P1 — Demo checkout oversells inventory.**
+   - **Status:** **RESOLVED & VERIFIED**
+   - **Root Cause & Fix:** In `src/agent_ready_merchant/services/demo_simulator_service.py`, `execute_simulation` now locks the inventory item (`with_for_update()`) and asserts `inventory.available_quantity >= req.quantity` before quote creation and payment settlement, failing closed with a 400 error if stock is insufficient.
+   - **Verified by:** `tests/test_phase5_3_demo_and_security_hardening.py::test_demo_checkout_insufficient_inventory_fails_closed`.
 
-3. **P2 — Counter-offers discard the merchant's amount.** `ResolveApprovalPayload.counter_amount_paise` is never used. A `COUNTER_OFFER` is recorded as approved and applies the original requested discount, rather than the merchant's proposed counter amount.
+3. **P2 — Counter-offers discard the merchant's amount.**
+   - **Status:** **RESOLVED & VERIFIED**
+   - **Root Cause & Fix:** In `src/agent_ready_merchant/services/merchant_portal_service.py`, `resolve_approval` now inspects `req.counter_amount_paise` when `decision == "COUNTER_OFFER"`, updates the quote total, and recalculates the line item discounts to match the merchant's specified amount.
+   - **Verified by:** `tests/test_phase5_2_merchant_control_plane.py::test_approvals_hitl_counter_offer_custom_amount`.
 
-4. **P2 — Reconciliation scenario processes a webhook instead.** `PAYMENT_RECONCILIATION` shares the standard webhook branch, so it neither simulates a dropped webhook nor calls the server-side reconciliation path advertised by the UI.
+4. **P2 — Reconciliation scenario processes a webhook instead.**
+   - **Status:** **RESOLVED & VERIFIED**
+   - **Root Cause & Fix:** In `src/agent_ready_merchant/services/demo_simulator_service.py`, `PAYMENT_RECONCILIATION` now simulates a dropped webhook (order left in `PENDING_PAYMENT`) and invokes `PaymentService.reconcile_order` against a protocol-faithful simulated Razorpay response. The existing payment service validates the upstream response and performs all state-machine, payment-attempt, ledger, and audit work.
+   - **Verified by:** `tests/test_phase5_3_demo_and_security_hardening.py::test_demo_payment_reconciliation_flow`.
 
-5. **P2 — Demo reset does not reset.** The reset action calls the seeding method, but existing products and policy rules are retained without restoring stock or baseline policy values. The UI therefore reports successful initialization while previously mutated demo state remains in place.
+5. **P2 — Demo reset does not reset.**
+   - **Status:** **RESOLVED & VERIFIED**
+   - **Root Cause & Fix:** In `src/agent_ready_merchant/services/demo_simulator_service.py`, `seed_demo_catalog_and_policies` now explicitly resets existing products' available inventory back to baseline (50, 35, 20) and restores all policy rules back to standard defaults (`autonomy_level=1`, `max_discount_pct=15.0`, `min_margin_pct=20.0`, `max_single_tx_paise=5_000_000`).
+   - **Verified by:** `tests/test_phase5_3_demo_and_security_hardening.py::test_demo_seed_resets_mutated_stock_and_policies`.
 
 ---
 

@@ -12,7 +12,14 @@ export const Reveal: React.FC<RevealProps> = ({ children, className = '' }) => {
   useEffect(() => {
     const element = elementRef.current;
     if (!element) return;
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        setIsVisible(true);
+        return;
+      }
+    }
+
+    if (typeof IntersectionObserver === 'undefined') {
       setIsVisible(true);
       return;
     }

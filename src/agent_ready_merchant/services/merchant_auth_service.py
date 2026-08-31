@@ -251,11 +251,14 @@ class MerchantAuthService:
         if merchant.status != "ACTIVE":
             raise ValueError(f"Merchant account is {merchant.status}. Access denied.")
 
-        # 2. If admin_token is provided, verify it
-        if request.admin_token:
-            is_valid, tok_merchant_id, err = cls.verify_admin_token(request.admin_token, secret)
-            if not is_valid or tok_merchant_id != merchant.id:
-                raise ValueError(err or "Invalid or mismatched admin session token.")
+        # 2. A known slug is an identifier, never authentication.  Only a
+        # cryptographically verified existing admin session may be refreshed.
+        if not request.admin_token:
+            raise ValueError("An existing admin session token is required to resume a session.")
+
+        is_valid, tok_merchant_id, err = cls.verify_admin_token(request.admin_token, secret)
+        if not is_valid or tok_merchant_id != merchant.id:
+            raise ValueError(err or "Invalid or mismatched admin session token.")
 
         # 3. Generate fresh token
         expires_at = datetime.now(UTC) + timedelta(hours=24)

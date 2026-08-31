@@ -7,10 +7,12 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_ready_merchant.config import Settings
+from agent_ready_merchant.integrations.razorpay.client import RazorpayClient
 from agent_ready_merchant.models.approval import MerchantApproval
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.inventory import InventoryItem
@@ -45,7 +47,13 @@ class DemoSimulatorService:
     async def seed_demo_catalog_and_policies(
         cls, session: AsyncSession, merchant_id: uuid.UUID
     ) -> DemoSeedResponse:
-        """Seeds standard catalog products and policy rules for repeatable demo workflows."""
+        """Seeds or restores standard catalog products, stock levels, and baseline policy rules."""
+        stock_map = {
+            "RUN-PRO-01": 50,
+            "AIR-VEST-02": 35,
+            "PACE-BAND-03": 20,
+        }
+
         # 1. Check existing products
         prod_stmt = select(Product).where(Product.merchant_id == merchant_id)
         existing_prods = list((await session.execute(prod_stmt)).scalars().all())
@@ -100,8 +108,8 @@ class DemoSimulatorService:
 
                 variant = ProductVariant(
                     product_id=prod.id,
-                    sku=prod.sku,
-                    title=prod.title,
+                    sku=dp["sku"],
+                    title=dp["title"],
                     price_override_paise=None,
                     is_active=True,
                 )
@@ -118,8 +126,26 @@ class DemoSimulatorService:
                 seeded_count += 1
 
             await session.flush()
+        else:
+            # Restore stock levels and activate products
+            for p in existing_prods:
+                p.is_active = True
+                var_stmt = select(ProductVariant).where(ProductVariant.product_id == p.id)
+                exist_variant = (await session.execute(var_stmt)).scalars().first()
+                if exist_variant:
+                    inv_stmt = (
+                        select(InventoryItem)
+                        .where(InventoryItem.variant_id == exist_variant.id)
+                        .with_for_update()
+                    )
+                    exist_inv = (await session.execute(inv_stmt)).scalar_one_or_none()
+                    if exist_inv:
+                        exist_inv.available_quantity = stock_map.get(p.sku, 50)
+                        exist_inv.reserved_quantity = 0
+                seeded_count += 1
+            await session.flush()
 
-        # 2. Check and seed policies if absent
+        # 2. Reset or seed policy rules to standard baseline
         rules_stmt = select(PolicyRule).where(PolicyRule.merchant_id == merchant_id)
         existing_rules = {
             r.rule_type: r for r in (await session.execute(rules_stmt)).scalars().all()
@@ -135,6 +161,10 @@ class DemoSimulatorService:
                     is_active=True,
                 )
             )
+        else:
+            existing_rules["AUTONOMY_LEVEL"].rule_value = {"autonomy_level": 1}
+            existing_rules["AUTONOMY_LEVEL"].is_active = True
+
         if "MAX_DISCOUNT_PCT" not in existing_rules:
             session.add(
                 PolicyRule(
@@ -145,6 +175,10 @@ class DemoSimulatorService:
                     is_active=True,
                 )
             )
+        else:
+            existing_rules["MAX_DISCOUNT_PCT"].rule_value = {"max_discount_pct": 15.0}
+            existing_rules["MAX_DISCOUNT_PCT"].is_active = True
+
         if "MIN_MARGIN_PCT" not in existing_rules:
             session.add(
                 PolicyRule(
@@ -155,6 +189,10 @@ class DemoSimulatorService:
                     is_active=True,
                 )
             )
+        else:
+            existing_rules["MIN_MARGIN_PCT"].rule_value = {"min_margin_pct": 20.0}
+            existing_rules["MIN_MARGIN_PCT"].is_active = True
+
         if "MAX_CART_VALUE" not in existing_rules:
             session.add(
                 PolicyRule(
@@ -165,6 +203,10 @@ class DemoSimulatorService:
                     is_active=True,
                 )
             )
+        else:
+            existing_rules["MAX_CART_VALUE"].rule_value = {"max_single_tx_paise": 5_000_000}
+            existing_rules["MAX_CART_VALUE"].is_active = True
+
         await session.flush()
 
         # 3. Log Audit Event
@@ -175,6 +217,7 @@ class DemoSimulatorService:
             event_type="DEMO_STATE_INITIALIZED",
             payload={
                 "seeded_products_count": seeded_count,
+                "restored_baseline": True,
                 "timestamp": datetime.now(UTC).isoformat(),
             },
         )
@@ -221,15 +264,22 @@ class DemoSimulatorService:
                     target_product = p
                     break
 
-        # Fetch purchasable variant and inventory
+        # Fetch purchasable variant and lock inventory row to prevent overselling
         var_stmt = select(ProductVariant).where(ProductVariant.product_id == target_product.id)
         variant = (await session.execute(var_stmt)).scalars().first()
         if not variant:
             raise ValueError(f"No variant found for product {target_product.sku}")
 
-        # Fetch inventory
-        inv_stmt = select(InventoryItem).where(InventoryItem.variant_id == variant.id)
+        inv_stmt = (
+            select(InventoryItem).where(InventoryItem.variant_id == variant.id).with_for_update()
+        )
         inventory = (await session.execute(inv_stmt)).scalar_one_or_none()
+        if not inventory or inventory.available_quantity < req.quantity:
+            avail = inventory.available_quantity if inventory else 0
+            raise ValueError(
+                f"Insufficient inventory stock for SKU '{target_product.sku}'. "
+                f"Available: {avail}, Requested: {req.quantity}."
+            )
 
         # Step 1: Buyer Agent Session Initiation
         buyer_agent_id = f"ai-buyer-{uuid.uuid4().hex[:6]}"
@@ -427,8 +477,8 @@ class DemoSimulatorService:
                 )
             )
 
-            # Step 6: Simulate Razorpay Payment & Webhook Settlement
-            if req.scenario in ["STANDARD_AUTO_COMMERCE", "PAYMENT_RECONCILIATION"]:
+            # Step 6: Simulate Razorpay Payment & Webhook Settlement or Out-of-Band Reconciliation
+            if req.scenario == "STANDARD_AUTO_COMMERCE":
                 rzp_payment_id = f"pay_demo_{uuid.uuid4().hex[:12]}"
                 webhook_payload = {
                     "entity": "event",
@@ -475,9 +525,7 @@ class DemoSimulatorService:
 
                 # Deduct inventory
                 if inventory:
-                    inventory.available_quantity = max(
-                        0, inventory.available_quantity - req.quantity
-                    )
+                    inventory.available_quantity -= req.quantity
                     await session.flush()
 
                 steps.append(
@@ -491,6 +539,96 @@ class DemoSimulatorService:
                             "payment_id": rzp_payment_id,
                             "order_id": str(order.id),
                             "hmac_verified": True,
+                            "amount_paise": quote.total_paise,
+                        },
+                        timestamp=datetime.now(UTC),
+                    )
+                )
+
+            elif req.scenario == "PAYMENT_RECONCILIATION":
+                # Simulate dropped webhook: the webhook was never received;
+                # order remained in PENDING_PAYMENT.
+                # The demo transport stands in for Razorpay's authoritative
+                # server response; settlement still goes through PaymentService.
+                rzp_payment_id = f"pay_recon_{uuid.uuid4().hex[:12]}"
+
+                async def demo_reconciliation_response(request: httpx.Request) -> httpx.Response:
+                    expected_path = f"/v1/orders/{rzp_order_id}/payments"
+                    if request.method != "GET" or request.url.path != expected_path:
+                        return httpx.Response(status_code=404)
+                    return httpx.Response(
+                        status_code=200,
+                        json={
+                            "entity": "collection",
+                            "count": 1,
+                            "items": [
+                                {
+                                    "id": rzp_payment_id,
+                                    "entity": "payment",
+                                    "amount": quote.total_paise,
+                                    "currency": order.currency,
+                                    "status": "captured",
+                                    "order_id": rzp_order_id,
+                                    "method": "upi",
+                                    "created_at": int(now.timestamp()),
+                                }
+                            ],
+                        },
+                    )
+
+                async with httpx.AsyncClient(
+                    transport=httpx.MockTransport(demo_reconciliation_response)
+                ) as http_client:
+                    reconciliation_client = RazorpayClient(
+                        key_id=settings.RAZORPAY_KEY_ID,
+                        key_secret=settings.RAZORPAY_KEY_SECRET,
+                        base_url=settings.RAZORPAY_API_BASE_URL,
+                        http_client=http_client,
+                    )
+                    reconciliation_result = await PaymentService.reconcile_order(
+                        session=session,
+                        order_id=order.id,
+                        rzp_client=reconciliation_client,
+                        merchant_id=merchant_id,
+                    )
+
+                if reconciliation_result.get("status") != "PROCESSED":
+                    raise ValueError("Demo payment reconciliation did not settle the order.")
+
+                if inventory:
+                    inventory.available_quantity -= req.quantity
+                    await session.flush()
+
+                await AuditEvent.create_event(
+                    session=session,
+                    merchant_id=merchant_id,
+                    actor_type="SYSTEM",
+                    event_type="PAYMENT_RECONCILED",
+                    payload={
+                        "order_id": str(order.id),
+                        "rzp_order_id": rzp_order_id,
+                        "rzp_payment_id": rzp_payment_id,
+                        "amount_paise": quote.total_paise,
+                        "reconciliation_trigger": "OUT_OF_BAND_POLL",
+                        "reconciliation_status": reconciliation_result["status"],
+                    },
+                )
+                await session.flush()
+
+                steps.append(
+                    SimulationTraceStep(
+                        step_number=5,
+                        actor="Server Payment Reconciler",
+                        action="reconcile_payment",
+                        status="SETTLED",
+                        summary=(
+                            f"Webhook dropped/missed. Server-side reconciliation "
+                            f"fetched Razorpay order status and settled Order #{str(order.id)[:8]}."
+                        ),
+                        details={
+                            "payment_id": rzp_payment_id,
+                            "order_id": str(order.id),
+                            "reconciliation_method": "out_of_band_server_query",
                             "amount_paise": quote.total_paise,
                         },
                         timestamp=datetime.now(UTC),

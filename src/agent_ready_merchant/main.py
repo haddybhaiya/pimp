@@ -856,6 +856,25 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
+    def _require_merchant_auth(
+        merchant_id: uuid.UUID,
+        auth_token: str | None,
+        settings: Settings,
+    ) -> None:
+        """Helper to enforce valid admin session token on protected merchant operations."""
+        if not auth_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Admin session token is required (X-Auth-Token header missing).",
+            )
+        secret = settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
+        is_valid, tok_m_id, err = MerchantAuthService.verify_admin_token(auth_token, secret)
+        if not is_valid or tok_m_id != merchant_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=err or "Invalid or expired admin session token.",
+            )
+
     @app.get(
         "/api/v1/merchant/auth/me",
         summary="Get Authenticated Merchant Profile",
@@ -869,14 +888,7 @@ def create_app() -> FastAPI:
         current_settings: Settings = Depends(get_settings),
     ) -> MerchantProfileResponse:
         """Fetches active merchant profile and policy configuration."""
-        if x_auth_token:
-            secret = current_settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
-            is_valid, tok_m_id, err = MerchantAuthService.verify_admin_token(x_auth_token, secret)
-            if not is_valid or tok_m_id != x_merchant_id:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=err or "Invalid or expired admin session token.",
-                )
+        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
 
         try:
             return await MerchantAuthService.get_merchant_profile(db, x_merchant_id)
@@ -897,14 +909,7 @@ def create_app() -> FastAPI:
         current_settings: Settings = Depends(get_settings),
     ) -> MerchantProfileResponse:
         """Updates merchant profile and policy bounds upon setup wizard completion."""
-        if x_auth_token:
-            secret = current_settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
-            is_valid, tok_m_id, err = MerchantAuthService.verify_admin_token(x_auth_token, secret)
-            if not is_valid or tok_m_id != x_merchant_id:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=err or "Invalid or expired admin session token.",
-                )
+        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
 
         try:
             return await MerchantAuthService.complete_merchant_setup(db, x_merchant_id, req)
@@ -930,21 +935,6 @@ def create_app() -> FastAPI:
         UpdatePoliciesPayload,
     )
     from agent_ready_merchant.services.merchant_portal_service import MerchantPortalService
-
-    def _require_merchant_auth(
-        merchant_id: uuid.UUID,
-        auth_token: str | None,
-        settings: Settings,
-    ) -> None:
-        """Helper to enforce valid admin session token on protected merchant operations."""
-        if auth_token:
-            secret = settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
-            is_valid, tok_m_id, err = MerchantAuthService.verify_admin_token(auth_token, secret)
-            if not is_valid or tok_m_id != merchant_id:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=err or "Invalid or expired admin session token.",
-                )
 
     @app.get(
         "/api/v1/merchant/dashboard/summary",

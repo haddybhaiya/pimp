@@ -69,7 +69,7 @@ class MerchantLoginRequest(BaseModel):
     admin_token: str | None = Field(
         default=None,
         max_length=256,
-        description="Optional pre-existing admin token for session resume",
+        description="Required pre-existing admin token for a session refresh",
     )
 
 
