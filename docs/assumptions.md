@@ -102,7 +102,7 @@
 - **STATUS:** **VERIFIED (PASS)**
 - **CONFIDENCE:** 100%
 - **FAILURE IF WRONG:** Price manipulation, bypassing merchant floor prices or approval gates, stock overselling, or unauthorized cross-tenant data modification.
-- **MITIGATION:** All operations route through authenticated `/api/v1/merchant/...` endpoints backed by `MerchantPortalService`, enforcing server-side HMAC token verification, optimistic concurrency row locking, floor price margin invariant checks (`floor_price <= base_price`), platform policy ceilings, and cryptographic SHA-256 audit hash chain verification.
+- **MITIGATION:** All operations route through authenticated `/api/v1/merchant/...` endpoints backed by `MerchantPortalService`, enforcing server-side HMAC token verification, optimistic concurrency row locking, floor price margin invariant checks (`floor_price <= base_price`), platform policy ceilings, and cryptographic SHA-256 audit hash chain verification. Browser sessions are carried in `HttpOnly`, `SameSite=Strict` cookies; the SPA retains only non-secret merchant profile metadata.
 
 ---
 

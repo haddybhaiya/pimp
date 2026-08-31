@@ -4,7 +4,6 @@ import { api } from '@/lib/api-client';
 
 interface AuthContextType {
   merchant: MerchantProfile | null;
-  token: string | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   sessionExpired: boolean;
@@ -18,9 +17,7 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const STORAGE_KEY_TOKEN = 'arm_auth_token';
 const STORAGE_KEY_MERCHANT = 'arm_merchant_data';
-const STORAGE_KEY_EXPIRY = 'arm_auth_expiry';
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [merchant, setMerchant] = useState<MerchantProfile | null>(() => {
@@ -32,21 +29,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   });
 
-  const [token, setToken] = useState<string | null>(() => {
-    return localStorage.getItem(STORAGE_KEY_TOKEN);
-  });
-
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [sessionExpired, setSessionExpired] = useState<boolean>(false);
 
   useEffect(() => {
-    if (token && merchant) {
-      api.setAuth(merchant.merchantId, token);
-      const exp = localStorage.getItem(STORAGE_KEY_EXPIRY);
-      if (exp && new Date(exp).getTime() < Date.now()) {
-        setSessionExpired(true);
-        logout();
-      }
+    if (merchant) {
+      api.setAuth(merchant.merchantId);
     }
 
     api.onUnauthorized(() => {
@@ -80,13 +68,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
 
       setMerchant(profile);
-      setToken(res.token);
       setSessionExpired(false);
 
-      api.setAuth(profile.merchantId, res.token);
-      localStorage.setItem(STORAGE_KEY_TOKEN, res.token);
+      api.setAuth(profile.merchantId);
       localStorage.setItem(STORAGE_KEY_MERCHANT, JSON.stringify(profile));
-      localStorage.setItem(STORAGE_KEY_EXPIRY, res.expires_at);
     } finally {
       setIsLoading(false);
     }
@@ -115,25 +100,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
 
       setMerchant(profile);
-      setToken(res.token);
       setSessionExpired(false);
 
-      api.setAuth(profile.merchantId, res.token);
-      localStorage.setItem(STORAGE_KEY_TOKEN, res.token);
+      api.setAuth(profile.merchantId);
       localStorage.setItem(STORAGE_KEY_MERCHANT, JSON.stringify(profile));
-      localStorage.setItem(STORAGE_KEY_EXPIRY, res.expires_at);
     } finally {
       setIsLoading(false);
     }
   };
 
   const logout = () => {
+    void api.logout().catch(() => undefined);
     setMerchant(null);
-    setToken(null);
     api.clearAuth();
-    localStorage.removeItem(STORAGE_KEY_TOKEN);
     localStorage.removeItem(STORAGE_KEY_MERCHANT);
-    localStorage.removeItem(STORAGE_KEY_EXPIRY);
   };
 
   const updateProfile = (partial: Partial<MerchantProfile>) => {
@@ -144,7 +124,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const refreshProfile = async () => {
-    if (!token || !merchant) return;
+    if (!merchant) return;
     try {
       const updated = await api.getProfile();
       setMerchant(updated);
@@ -162,8 +142,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <AuthContext.Provider
       value={{
         merchant,
-        token,
-        isAuthenticated: !!merchant && !!token,
+        isAuthenticated: !!merchant,
         isLoading,
         sessionExpired,
         login,

@@ -31,7 +31,6 @@ export class ApiError extends Error {
 
 export class ApiClient {
   private baseUrl: string;
-  private token: string | null = null;
   private merchantId: string | null = null;
   private onUnauthorizedCallback: (() => void) | null = null;
 
@@ -39,14 +38,12 @@ export class ApiClient {
     this.baseUrl = baseUrl;
   }
 
-  setAuth(merchantId: string, token: string) {
+  setAuth(merchantId: string) {
     this.merchantId = merchantId;
-    this.token = token;
   }
 
   clearAuth() {
     this.merchantId = null;
-    this.token = null;
   }
 
   onUnauthorized(cb: () => void) {
@@ -64,10 +61,6 @@ export class ApiClient {
       ...(options.headers as Record<string, string>),
     };
 
-    if (this.token) {
-      headers['X-Auth-Token'] = this.token;
-      headers['Authorization'] = `Bearer ${this.token}`;
-    }
     if (this.merchantId) {
       headers['X-Merchant-ID'] = this.merchantId;
     }
@@ -76,6 +69,7 @@ export class ApiClient {
       const response = await fetch(url, {
         ...options,
         headers,
+        credentials: 'include',
       });
 
       if (response.status === 401 || response.status === 403) {
@@ -134,6 +128,12 @@ export class ApiClient {
         rzp_key_id: credentials.rzpKeyId,
         admin_token: credentials.adminToken,
       }),
+    });
+  }
+
+  async logout(): Promise<void> {
+    await this.request<Record<string, never>>('/api/v1/merchant/auth/logout', {
+      method: 'POST',
     });
   }
 

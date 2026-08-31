@@ -711,7 +711,7 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 
 1. **P1 — Authentication bypass.**
    - **Status:** **RESOLVED & VERIFIED**
-   - **Root Cause & Fix:** Previously, `_require_merchant_auth` only validated `X-Auth-Token` if it was present, and `authenticate_merchant` minted a fresh token from a public slug. `_require_merchant_auth` now strictly enforces that `X-Auth-Token` is present and cryptographically verified against the merchant ID, while `authenticate_merchant` only refreshes an already valid admin session token.
+   - **Root Cause & Fix:** Previously, `_require_merchant_auth` only validated `X-Auth-Token` if it was present, and `authenticate_merchant` minted a fresh token from a public slug. `_require_merchant_auth` now strictly enforces that `X-Auth-Token` is present and cryptographically verified against the merchant ID, while `authenticate_merchant` only refreshes an already valid admin session token. Browser responses store this token exclusively in an `HttpOnly`, `SameSite=Strict` cookie and omit it from JSON.
    - **Verified by:** `tests/test_phase5_1_web_foundation.py::test_merchant_me_endpoint_rejects_missing_token`, `test_merchant_me_endpoint_rejects_forged_token`, and `test_merchant_login_rejects_slug_without_existing_session_token`.
 
 2. **P1 — Demo checkout oversells inventory.**
@@ -731,7 +731,7 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 
 5. **P2 — Demo reset does not reset.**
    - **Status:** **RESOLVED & VERIFIED**
-   - **Root Cause & Fix:** In `src/agent_ready_merchant/services/demo_simulator_service.py`, `seed_demo_catalog_and_policies` now explicitly resets existing products' available inventory back to baseline (50, 35, 20) and restores all policy rules back to standard defaults (`autonomy_level=1`, `max_discount_pct=15.0`, `min_margin_pct=20.0`, `max_single_tx_paise=5_000_000`).
+   - **Root Cause & Fix:** In `src/agent_ready_merchant/services/demo_simulator_service.py`, `seed_demo_catalog_and_policies` now restores only products carrying the explicit `demo_seeded` marker. It never changes ordinary merchant inventory and leaves any active demo reservation intact; unreserved demo inventory returns to its baseline (50, 35, 20). Policy rules restore to the standard defaults (`autonomy_level=1`, `max_discount_pct=15.0`, `min_margin_pct=20.0`, `max_single_tx_paise=5_000_000`).
    - **Verified by:** `tests/test_phase5_3_demo_and_security_hardening.py::test_demo_seed_resets_mutated_stock_and_policies`.
 
 ---
