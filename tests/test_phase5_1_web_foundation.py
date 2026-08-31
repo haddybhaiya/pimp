@@ -271,7 +271,7 @@ async def test_merchant_cannot_access_other_merchant_profile(db_session: AsyncSe
         merchant_a_id = uuid.UUID(res_a.json()["merchant_id"])
         token_a = MerchantAuthService.generate_admin_token(
             merchant_a_id,
-            get_settings().RAZORPAY_WEBHOOK_SECRET.get_secret_value(),
+            get_settings().SECRET_KEY.get_secret_value(),
             slug=res_a.json()["slug"],
         )
 
@@ -348,7 +348,7 @@ async def test_merchant_complete_setup_updates_profile_and_policies(
 async def test_admin_token_expiration_fails_closed(db_session: AsyncSession) -> None:
     """Test 9: Expired admin token is rejected deterministically with 401."""
     settings = get_settings()
-    secret = settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
+    secret = settings.SECRET_KEY.get_secret_value()
 
     merchant = Merchant(
         name="Expired Store",
@@ -367,6 +367,66 @@ async def test_admin_token_expiration_fails_closed(db_session: AsyncSession) -> 
     assert is_valid is False
     assert m_id is None
     assert "expired" in (err or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_suspended_merchant_session_is_rejected_immediately(
+    db_session: AsyncSession,
+) -> None:
+    """A valid pre-suspension session cannot access the control plane."""
+    settings = get_settings()
+    merchant = Merchant(
+        name="Suspended Store",
+        slug=f"suspended-{uuid.uuid4().hex[:8]}",
+        status="ACTIVE",
+        rzp_key_id="rzp_test_suspended",
+    )
+    db_session.add(merchant)
+    await db_session.flush()
+    token = MerchantAuthService.generate_admin_token(
+        merchant.id, settings.SECRET_KEY.get_secret_value(), slug=merchant.slug
+    )
+    merchant.status = "SUSPENDED"
+    await db_session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/merchant/dashboard/summary",
+            headers={"X-Merchant-ID": str(merchant.id), "X-Auth-Token": token},
+        )
+
+    assert response.status_code == 401
+    assert "not active" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_webhook_secret_cannot_authorize_merchant_session(
+    db_session: AsyncSession,
+) -> None:
+    """Webhook and control-plane signing keys remain separate trust domains."""
+    settings = get_settings()
+    merchant = Merchant(
+        name="Key Separation Store",
+        slug=f"key-separation-{uuid.uuid4().hex[:8]}",
+        status="ACTIVE",
+        rzp_key_id="rzp_test_key_separation",
+    )
+    db_session.add(merchant)
+    await db_session.flush()
+    webhook_signed_token = MerchantAuthService.generate_admin_token(
+        merchant.id,
+        settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value(),
+        slug=merchant.slug,
+    )
+    await db_session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/merchant/auth/me",
+            headers={"X-Merchant-ID": str(merchant.id), "X-Auth-Token": webhook_signed_token},
+        )
+
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio

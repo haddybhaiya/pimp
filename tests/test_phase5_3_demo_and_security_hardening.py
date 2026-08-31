@@ -24,7 +24,7 @@ from agent_ready_merchant.services.merchant_auth_service import MerchantAuthServ
 async def setup_two_merchants(db_session: AsyncSession):
     """Creates two distinct merchants with auth tokens for multi-tenant isolation testing."""
     settings = get_settings()
-    secret = settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
+    secret = settings.SECRET_KEY.get_secret_value()
 
     # Merchant Alpha
     m1 = Merchant(
@@ -77,7 +77,11 @@ async def test_demo_seed_and_standard_auto_commerce_flow(
         # 1. Seed Demo Data
         seed_res = await client.post(
             "/api/v1/merchant/demo/seed",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
         )
         assert seed_res.status_code == 200
         seed_data = seed_res.json()
@@ -87,7 +91,11 @@ async def test_demo_seed_and_standard_auto_commerce_flow(
         # 2. Execute Standard Auto Commerce Simulation
         sim_res = await client.post(
             "/api/v1/merchant/demo/simulate",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={
                 "scenario": "STANDARD_AUTO_COMMERCE",
                 "sku": "RUN-PRO-01",
@@ -110,7 +118,11 @@ async def test_demo_seed_and_standard_auto_commerce_flow(
         # 3. Verify Order in Order Ledger
         orders_res = await client.get(
             "/api/v1/merchant/orders",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
         )
         assert orders_res.status_code == 200
         orders = orders_res.json()
@@ -120,7 +132,11 @@ async def test_demo_seed_and_standard_auto_commerce_flow(
         # 4. Verify Cryptographic Audit Chain
         audit_res = await client.get(
             "/api/v1/merchant/audit",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
         )
         assert audit_res.status_code == 200
         audit_data = audit_res.json()
@@ -215,10 +231,29 @@ async def test_demo_hitl_escalation_and_approval_resolution_flow(
     token1 = data["token1"]
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        seed_headers = {"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1}
+        seed_res = await client.post("/api/v1/merchant/demo/seed", headers=seed_headers)
+        assert seed_res.status_code == 200
+        policy_res = await client.put(
+            "/api/v1/merchant/policies",
+            headers=seed_headers,
+            json={
+                "autonomy_level": 2,
+                "max_discount_percentage": 30.0,
+                "min_margin_percentage": 20.0,
+                "max_single_transaction_paise": 5_000_000,
+            },
+        )
+        assert policy_res.status_code == 200
+
         # 1. Execute HITL Escalation Simulation
         sim_res = await client.post(
             "/api/v1/merchant/demo/simulate",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={
                 "scenario": "HITL_ESCALATION_COMMERCE",
                 "sku": "RUN-PRO-01",
@@ -235,7 +270,11 @@ async def test_demo_hitl_escalation_and_approval_resolution_flow(
         # 2. Check Approvals Queue
         approvals_res = await client.get(
             "/api/v1/merchant/approvals?status=PENDING",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
         )
         assert approvals_res.status_code == 200
         approvals = approvals_res.json()
@@ -244,7 +283,11 @@ async def test_demo_hitl_escalation_and_approval_resolution_flow(
         # 3. Resolve Approval as Merchant (Approve)
         resolve_res = await client.post(
             f"/api/v1/merchant/approvals/{approval_id}/resolve",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={
                 "decision": "APPROVE",
                 "reason_note": "Special demo customer discount approved by merchant.",
@@ -308,7 +351,11 @@ async def test_adversarial_cross_tenant_inventory_mutation(
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         res = await client.post(
             "/api/v1/merchant/inventory/adjust",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={"sku": p2.sku, "quantity_delta": 10},
         )
         assert res.status_code == 400
@@ -325,7 +372,11 @@ async def test_adversarial_floor_price_violation_rejection(setup_two_merchants):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         res = await client.post(
             "/api/v1/merchant/products",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={
                 "sku": "INVALID-PRICE-01",
                 "title": "Invalid Price Product",
@@ -404,7 +455,11 @@ async def test_demo_checkout_insufficient_inventory_fails_closed(setup_two_merch
         # Adjust inventory down to 1
         adj_res = await client.post(
             "/api/v1/merchant/inventory/adjust",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={"sku": "RUN-PRO-01", "quantity_delta": -49},
         )
         assert adj_res.status_code == 200
@@ -413,7 +468,11 @@ async def test_demo_checkout_insufficient_inventory_fails_closed(setup_two_merch
         # Attempt to buy 5 units (exceeding stock of 1)
         res = await client.post(
             "/api/v1/merchant/demo/simulate",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={
                 "scenario": "STANDARD_AUTO_COMMERCE",
                 "sku": "RUN-PRO-01",
@@ -440,7 +499,11 @@ async def test_demo_payment_reconciliation_flow(setup_two_merchants, db_session:
 
         res = await client.post(
             "/api/v1/merchant/demo/simulate",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={
                 "scenario": "PAYMENT_RECONCILIATION",
                 "sku": "PACE-BAND-03",

@@ -14,7 +14,8 @@ from agent_ready_merchant.models.approval import MerchantApproval
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.models.policy import PolicyRule
-from agent_ready_merchant.models.quote import PriceQuote
+from agent_ready_merchant.models.product import Product, ProductVariant
+from agent_ready_merchant.models.quote import PriceQuote, QuoteItem
 from agent_ready_merchant.models.session import BuyerAgentSession
 from agent_ready_merchant.services.merchant_auth_service import MerchantAuthService
 
@@ -23,7 +24,7 @@ from agent_ready_merchant.services.merchant_auth_service import MerchantAuthServ
 async def setup_test_merchants(db_session: AsyncSession):
     """Fixture providing two distinct merchants with auth tokens for isolation tests."""
     settings = get_settings()
-    secret = settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
+    secret = settings.SECRET_KEY.get_secret_value()
 
     # Merchant 1
     m1 = Merchant(
@@ -140,7 +141,11 @@ async def test_catalog_and_inventory_lifecycle(setup_test_merchants):
         # 1. Invalid product (floor price > base price) rejected
         invalid_resp = await client.post(
             "/api/v1/merchant/products",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={
                 "sku": "RUN-01",
                 "title": "Invalid Shoe",
@@ -156,7 +161,11 @@ async def test_catalog_and_inventory_lifecycle(setup_test_merchants):
         # 2. Valid product creation
         create_resp = await client.post(
             "/api/v1/merchant/products",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={
                 "sku": "RUN-01",
                 "title": "Pro Runner 1",
@@ -202,7 +211,11 @@ async def test_catalog_and_inventory_lifecycle(setup_test_merchants):
         # 5. Adjust inventory stock
         adj_resp = await client.post(
             "/api/v1/merchant/inventory/adjust",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={
                 "sku": "RUN-01",
                 "quantity_delta": 5,
@@ -215,7 +228,11 @@ async def test_catalog_and_inventory_lifecycle(setup_test_merchants):
         # 6. Adjust inventory below zero rejected
         adj_fail = await client.post(
             "/api/v1/merchant/inventory/adjust",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={
                 "sku": "RUN-01",
                 "quantity_delta": -50,
@@ -352,6 +369,30 @@ async def test_approvals_hitl_counter_offer_custom_amount(
     db_session.add(quote)
     await db_session.flush()
 
+    product = Product(
+        merchant_id=m1.id,
+        sku="COUNTER-ITEM-01",
+        title="Counter-offer test item",
+        category="TEST",
+        base_price_paise=500000,
+        floor_price_paise=400000,
+        is_negotiable=True,
+    )
+    db_session.add(product)
+    await db_session.flush()
+    variant = ProductVariant(product_id=product.id, sku=product.sku, title=product.title)
+    db_session.add(variant)
+    await db_session.flush()
+    db_session.add(
+        QuoteItem(
+            quote_id=quote.id,
+            variant_id=variant.id,
+            quantity=1,
+            unit_price_paise=500000,
+            total_price_paise=500000,
+        )
+    )
+
     ticket = MerchantApproval(
         merchant_id=m1.id,
         quote_id=quote.id,
@@ -392,6 +433,91 @@ async def test_approvals_hitl_counter_offer_custom_amount(
 
 
 @pytest.mark.asyncio
+async def test_counter_offer_rejects_price_below_line_item_floor(
+    db_session: AsyncSession, setup_test_merchants
+):
+    """A manual counter-offer remains subject to the product-floor invariant."""
+    m1 = setup_test_merchants["m1"]
+    token1 = setup_test_merchants["token1"]
+
+    buyer_session = BuyerAgentSession(
+        merchant_id=m1.id,
+        buyer_agent_identifier="counter-floor-buyer",
+        auth_token_hash="c" * 64,
+        status="ACTIVE",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    db_session.add(buyer_session)
+    await db_session.flush()
+    quote = PriceQuote(
+        session_id=buyer_session.id,
+        merchant_id=m1.id,
+        status="NEGOTIATING",
+        subtotal_paise=500000,
+        discount_paise=0,
+        shipping_paise=0,
+        total_paise=500000,
+        idempotency_key=f"counter-floor-{uuid.uuid4()}",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    product = Product(
+        merchant_id=m1.id,
+        sku="COUNTER-FLOOR-01",
+        title="Floor-protected item",
+        category="TEST",
+        base_price_paise=500000,
+        floor_price_paise=400000,
+        is_negotiable=True,
+    )
+    db_session.add_all([quote, product])
+    await db_session.flush()
+    variant = ProductVariant(product_id=product.id, sku=product.sku, title=product.title)
+    db_session.add(variant)
+    await db_session.flush()
+    db_session.add(
+        QuoteItem(
+            quote_id=quote.id,
+            variant_id=variant.id,
+            quantity=1,
+            unit_price_paise=500000,
+            total_price_paise=500000,
+        )
+    )
+    ticket = MerchantApproval(
+        merchant_id=m1.id,
+        quote_id=quote.id,
+        session_id=buyer_session.id,
+        approval_type="QUOTE_DISCOUNT",
+        status="PENDING",
+        requested_amount_paise=450000,
+        proposed_discount_paise=50000,
+        policy_decision_hash="2" * 64,
+        policy_rule_code="HITL_DISCOUNT_APPROVAL_REQUIRED",
+        reason="Needs manual review",
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+    )
+    db_session.add(ticket)
+    await db_session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/merchant/approvals/{ticket.id}/resolve",
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
+            json={
+                "decision": "COUNTER_OFFER",
+                "counter_amount_paise": 390000,
+                "reason_note": "Below-floor amount must be rejected",
+            },
+        )
+    assert response.status_code == 400
+    assert "floor" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
 async def test_policy_governance_update_and_bounds(setup_test_merchants):
     """Verifies fetching and updating policy governance with safety ceilings."""
     m1 = setup_test_merchants["m1"]
@@ -401,7 +527,11 @@ async def test_policy_governance_update_and_bounds(setup_test_merchants):
         # 1. Fetch current policy
         get_resp = await client.get(
             "/api/v1/merchant/policies",
-            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
         )
         assert get_resp.status_code == 200
         assert get_resp.json()["max_discount_percentage"] == 15.0
@@ -466,21 +596,33 @@ async def test_multi_tenant_isolation_at_api_boundary(setup_test_merchants):
         # 1. Attempting to query Merchant 2's dashboard with Merchant 1's token is rejected
         cross_dash = await client.get(
             "/api/v1/merchant/dashboard/summary",
-            headers={"X-Merchant-ID": str(m2.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m2.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
         )
         assert cross_dash.status_code == 401
 
         # 2. Attempting to query Merchant 2's catalog with Merchant 1's token is rejected
         cross_cat = await client.get(
             "/api/v1/merchant/products",
-            headers={"X-Merchant-ID": str(m2.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m2.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
         )
         assert cross_cat.status_code == 401
 
         # 3. Attempting to adjust Merchant 2's inventory with Merchant 1's token is rejected
         cross_inv = await client.post(
             "/api/v1/merchant/inventory/adjust",
-            headers={"X-Merchant-ID": str(m2.id), "X-Auth-Token": token1},
+            headers={
+                "X-Merchant-ID": str(m2.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
             json={"sku": "RUN-01", "quantity_delta": 5},
         )
         assert cross_inv.status_code == 401
