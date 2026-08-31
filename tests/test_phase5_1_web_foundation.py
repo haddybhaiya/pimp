@@ -122,10 +122,10 @@ async def test_merchant_signup_rejects_duplicate_slug(db_session: AsyncSession) 
 
 
 @pytest.mark.asyncio
-async def test_merchant_login_with_valid_slug_returns_bearer_token(
+async def test_merchant_login_with_valid_session_token_returns_refreshed_bearer_token(
     db_session: AsyncSession,
 ) -> None:
-    """Test 3: Merchant login with valid slug returns active admin bearer session."""
+    """Test 3: Login refresh requires an existing, valid admin session token."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         unique_slug = f"login-store-{uuid.uuid4().hex[:8]}"
         signup_payload = {
@@ -134,12 +134,13 @@ async def test_merchant_login_with_valid_slug_returns_bearer_token(
             "email": "login@store.com",
             "rzp_key_id": "rzp_test_login",
         }
-        await client.post("/api/v1/merchant/auth/signup", json=signup_payload)
+        signup_response = await client.post("/api/v1/merchant/auth/signup", json=signup_payload)
+        existing_token = signup_response.json()["token"]
 
-        # Login
+        # Session refresh
         login_resp = await client.post(
             "/api/v1/merchant/auth/login",
-            json={"slug": unique_slug},
+            json={"slug": unique_slug, "admin_token": existing_token},
         )
         assert login_resp.status_code == 200
         data = login_resp.json()
@@ -147,6 +148,28 @@ async def test_merchant_login_with_valid_slug_returns_bearer_token(
         assert data["status"] == "ACTIVE"
         assert "token" in data
         assert len(data["token"].split(":")) == 5
+
+
+@pytest.mark.asyncio
+async def test_merchant_login_rejects_slug_without_existing_session_token(
+    db_session: AsyncSession,
+) -> None:
+    """A public merchant slug must never be sufficient to mint an admin session."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        unique_slug = f"missing-token-{uuid.uuid4().hex[:8]}"
+        await client.post(
+            "/api/v1/merchant/auth/signup",
+            json={
+                "name": "No Token Store",
+                "slug": unique_slug,
+                "email": "missing-token@store.com",
+                "rzp_key_id": "rzp_test_missing_token",
+            },
+        )
+
+        response = await client.post("/api/v1/merchant/auth/login", json={"slug": unique_slug})
+        assert response.status_code == 401
+        assert "session token is required" in response.json()["detail"].lower()
 
 
 @pytest.mark.asyncio
@@ -224,6 +247,12 @@ async def test_merchant_me_endpoint_rejects_forged_token(db_session: AsyncSessio
             "invalid" in me_resp.json()["detail"].lower()
             or "signature" in me_resp.json()["detail"].lower()
         )
+
+        # Missing token must fail closed with 401
+        missing_token_headers = {"X-Merchant-ID": merchant_id}
+        missing_resp = await client.get("/api/v1/merchant/auth/me", headers=missing_token_headers)
+        assert missing_resp.status_code == 401
+        assert "token is required" in missing_resp.json()["detail"].lower()
 
 
 @pytest.mark.asyncio
@@ -359,8 +388,12 @@ async def test_merchant_auth_events_in_cryptographic_audit_chain(
         merchant_id = uuid.UUID(res.json()["merchant_id"])
         token = res.json()["token"]
 
-        # Perform login and setup updates
-        await client.post("/api/v1/merchant/auth/login", json={"slug": unique_slug})
+        # Refresh the active session and perform setup updates.
+        login_response = await client.post(
+            "/api/v1/merchant/auth/login",
+            json={"slug": unique_slug, "admin_token": token},
+        )
+        assert login_response.status_code == 200
         await client.post(
             "/api/v1/merchant/setup/complete",
             json={

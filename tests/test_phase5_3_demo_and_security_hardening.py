@@ -6,13 +6,17 @@ from datetime import UTC, datetime
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_ready_merchant.config import get_settings
 from agent_ready_merchant.main import app
 from agent_ready_merchant.models.inventory import InventoryItem
 from agent_ready_merchant.models.merchant import Merchant
+from agent_ready_merchant.models.order import Order
+from agent_ready_merchant.models.payment import PaymentAttempt
 from agent_ready_merchant.models.product import Product, ProductVariant
+from agent_ready_merchant.models.transaction import TransactionRecord
 from agent_ready_merchant.services.merchant_auth_service import MerchantAuthService
 
 
@@ -304,3 +308,139 @@ async def test_zero_secret_leakage_audit(setup_two_merchants):
             assert settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value() not in body_str
             assert "DATABASE_URL" not in body_str
             assert "admin_token" not in body_str
+
+
+@pytest.mark.asyncio
+async def test_demo_checkout_insufficient_inventory_fails_closed(setup_two_merchants):
+    """Verifies that attempting simulation with quantity exceeding available stock fails closed."""
+    data = setup_two_merchants
+    m1 = data["m1"]
+    token1 = data["token1"]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # Seed
+        await client.post(
+            "/api/v1/merchant/demo/seed",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+        )
+
+        # Adjust inventory down to 1
+        adj_res = await client.post(
+            "/api/v1/merchant/inventory/adjust",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            json={"sku": "RUN-PRO-01", "quantity_delta": -49},
+        )
+        assert adj_res.status_code == 200
+        assert adj_res.json()["available_quantity"] == 1
+
+        # Attempt to buy 5 units (exceeding stock of 1)
+        res = await client.post(
+            "/api/v1/merchant/demo/simulate",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            json={
+                "scenario": "STANDARD_AUTO_COMMERCE",
+                "sku": "RUN-PRO-01",
+                "quantity": 5,
+                "target_discount_pct": 10.0,
+            },
+        )
+        assert res.status_code == 400
+        assert "insufficient inventory stock" in res.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_demo_payment_reconciliation_flow(setup_two_merchants, db_session: AsyncSession):
+    """Verifies PAYMENT_RECONCILIATION scenario uses out-of-band server query instead of webhook."""
+    data = setup_two_merchants
+    m1 = data["m1"]
+    token1 = data["token1"]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post(
+            "/api/v1/merchant/demo/seed",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+        )
+
+        res = await client.post(
+            "/api/v1/merchant/demo/simulate",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            json={
+                "scenario": "PAYMENT_RECONCILIATION",
+                "sku": "PACE-BAND-03",
+                "quantity": 1,
+            },
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "SETTLED"
+        recon_step = next(s for s in data["steps"] if s["action"] == "reconcile_payment")
+        assert recon_step["actor"] == "Server Payment Reconciler"
+        assert recon_step["status"] == "SETTLED"
+        assert (
+            "out-of-band" in recon_step["summary"].lower()
+            or "server-side" in recon_step["summary"].lower()
+        )
+
+        order = await db_session.get(Order, uuid.UUID(data["order_id"]))
+        assert order is not None and order.status == "PAID"
+        payment_attempt = (
+            await db_session.execute(
+                select(PaymentAttempt).where(PaymentAttempt.order_id == order.id)
+            )
+        ).scalar_one()
+        assert payment_attempt.status == "CAPTURED"
+        assert payment_attempt.webhook_payload is not None
+        assert payment_attempt.webhook_payload["order_id"] == data["rzp_order_id"]
+        transaction = (
+            await db_session.execute(
+                select(TransactionRecord).where(
+                    TransactionRecord.payment_attempt_id == payment_attempt.id
+                )
+            )
+        ).scalar_one()
+        assert transaction.status == "COMMITTED"
+        assert transaction.amount_paise == data["total_paise"]
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_resets_mutated_stock_and_policies(setup_two_merchants):
+    """Verifies that seeding demo state resets depleted inventory stock and modified policies."""
+    data = setup_two_merchants
+    m1 = data["m1"]
+    token1 = data["token1"]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # 1. Initial seed
+        await client.post(
+            "/api/v1/merchant/demo/seed",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+        )
+
+        # 2. Mutate policy
+        await client.put(
+            "/api/v1/merchant/policies",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            json={
+                "autonomy_level": 2,
+                "max_discount_percentage": 30.0,
+                "min_margin_percentage": 25.0,
+                "max_single_transaction_paise": 1000000,
+            },
+        )
+
+        # 3. Re-seed / reset
+        reset_res = await client.post(
+            "/api/v1/merchant/demo/seed",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+        )
+        assert reset_res.status_code == 200
+
+        # 4. Check policy reset to default baseline
+        pol_res = await client.get(
+            "/api/v1/merchant/policies",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+        )
+        assert pol_res.status_code == 200
+        pol_data = pol_res.json()
+        assert pol_data["autonomy_level"] == 1
+        assert pol_data["max_discount_percentage"] == 15.0

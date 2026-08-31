@@ -321,6 +321,77 @@ async def test_approvals_hitl_resolution_flow(db_session: AsyncSession, setup_te
 
 
 @pytest.mark.asyncio
+async def test_approvals_hitl_counter_offer_custom_amount(
+    db_session: AsyncSession, setup_test_merchants
+):
+    """Verifies that COUNTER_OFFER applies the merchant's custom counter_amount_paise."""
+    m1 = setup_test_merchants["m1"]
+    token1 = setup_test_merchants["token1"]
+
+    session = BuyerAgentSession(
+        merchant_id=m1.id,
+        buyer_agent_identifier="test-buyer-agent-counter",
+        auth_token_hash="b" * 64,
+        status="ACTIVE",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    db_session.add(session)
+    await db_session.flush()
+
+    quote = PriceQuote(
+        session_id=session.id,
+        merchant_id=m1.id,
+        status="NEGOTIATING",
+        subtotal_paise=500000,
+        discount_paise=0,
+        shipping_paise=0,
+        total_paise=500000,
+        idempotency_key=f"quote-test-counter-{uuid.uuid4()}",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    db_session.add(quote)
+    await db_session.flush()
+
+    ticket = MerchantApproval(
+        merchant_id=m1.id,
+        quote_id=quote.id,
+        session_id=session.id,
+        approval_type="QUOTE_DISCOUNT",
+        status="PENDING",
+        requested_amount_paise=400000,
+        proposed_discount_paise=100000,
+        policy_decision_hash="1" * 64,
+        policy_rule_code="MAX_DISCOUNT_PCT",
+        reason="Requested 20% discount",
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+    )
+    db_session.add(ticket)
+    await db_session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # Resolve with custom counter amount of 450,000 (10% discount counter)
+        res_resp = await client.post(
+            f"/api/v1/merchant/approvals/{ticket.id}/resolve",
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+            json={
+                "decision": "COUNTER_OFFER",
+                "counter_amount_paise": 450000,
+                "reason_note": "Counter-offer at 10% discount",
+            },
+        )
+        assert res_resp.status_code == 200
+        resolved_data = res_resp.json()
+        assert resolved_data["status"] == "APPROVED"
+        assert resolved_data["requested_amount_paise"] == 450000
+
+        await db_session.refresh(quote)
+        assert quote.status == "PROPOSED"
+        assert quote.total_paise == 450000
+        assert quote.discount_paise == 50000
+        assert quote.discount_reason is not None and "Counter-Offer" in quote.discount_reason
+
+
+@pytest.mark.asyncio
 async def test_policy_governance_update_and_bounds(setup_test_merchants):
     """Verifies fetching and updating policy governance with safety ceilings."""
     m1 = setup_test_merchants["m1"]
