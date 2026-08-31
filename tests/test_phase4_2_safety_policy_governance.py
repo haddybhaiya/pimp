@@ -1029,6 +1029,25 @@ async def test_duplicate_negotiation_escalation_deduplicated(db_session: AsyncSe
     approvals = list((await db_session.execute(appr_stmt)).scalars().all())
     assert len(approvals) == 1
     assert approvals[0].status == "PENDING"
+    assert approvals[0].requested_amount_paise == 450000
+
+    # 4. Now submit a DIFFERENT counter-offer (460000 instead of 450000)
+    # The existing pending ticket must be updated to the new terms rather than keeping stale terms
+    neg3 = await gw.execute_capability(
+        session=db_session,
+        capability_name="negotiate_quote",
+        payload={"quote_id": str(quote_id), "proposed_total_paise": 460000},
+        context=context,
+    )
+    assert neg3.status == "SUCCESS"
+    assert neg3.data is not None
+    assert neg3.data.verdict == "ESCALATE_APPROVAL"
+
+    # Verify still exactly 1 ticket, but requested_amount_paise has been updated to 460000
+    approvals_after = list((await db_session.execute(appr_stmt)).scalars().all())
+    assert len(approvals_after) == 1
+    assert approvals_after[0].status == "PENDING"
+    assert approvals_after[0].requested_amount_paise == 460000
 
 
 @pytest.mark.asyncio

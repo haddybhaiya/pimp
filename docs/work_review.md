@@ -699,10 +699,35 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 - **Frontend Production Build (`npm run build` in `frontend/`):** 100% PASS (compiled cleanly to `src/agent_ready_merchant/static/`)
 - **Backend Test Suite (`pytest`):** 100% PASS (258 passed, 2 skipped, 84% coverage)
 
+---
 
+# Review 10: Phase 5 PR (`main...phs5`)
 
+> **Reviewed on:** 2026-08-30
+> **Scope:** Merchant authentication, control-plane authorization, HITL resolution, and demo simulator behavior.
+> **Verification:** Static review of the PR diff. No code or test changes made.
 
+## Findings
 
+1. **P1 — Authentication bypass.** `MerchantLoginRequest` permits a login with only a slug and `authenticate_merchant` issues an admin token unless an optional existing token is supplied. In addition, the merchant endpoint guards validate `X-Auth-Token` only when it is present. An unauthenticated caller can therefore obtain a token for any known slug and can directly read or mutate a merchant by supplying its merchant ID without a token.
+
+2. **P1 — Demo checkout oversells inventory.** The simulator does not lock or verify stock before creating and settling an order; it deducts with `max(0, available - quantity)` afterwards. A request for more units than are available still reports a settled payment/order while silently clamping stock to zero.
+
+3. **P2 — Counter-offers discard the merchant's amount.** `ResolveApprovalPayload.counter_amount_paise` is never used. A `COUNTER_OFFER` is recorded as approved and applies the original requested discount, rather than the merchant's proposed counter amount.
+
+4. **P2 — Reconciliation scenario processes a webhook instead.** `PAYMENT_RECONCILIATION` shares the standard webhook branch, so it neither simulates a dropped webhook nor calls the server-side reconciliation path advertised by the UI.
+
+5. **P2 — Demo reset does not reset.** The reset action calls the seeding method, but existing products and policy rules are retained without restoring stock or baseline policy values. The UI therefore reports successful initialization while previously mutated demo state remains in place.
+
+---
+
+## 6. Phase 4 Governance Remediation
+
+### Issue: Stale Approval Terms Reused
+- **Location:** `src/agent_ready_merchant/gateway/canonical.py:1613-1675` (`negotiate_quote`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Root Cause & Fix:** Previously, when a buyer submitted a revised counter-offer while an earlier approval ticket remained `PENDING`, the branch returned the existing ticket without updating its terms. The gateway now distinguishes identical retries (which return the existing pending ticket idempotently) from revised counter-offers (which update `existing_appr.requested_amount_paise`, `existing_appr.proposed_discount_paise`, `existing_appr.policy_decision_hash`, `existing_appr.policy_rule_code`, `existing_appr.reason`, advance `quote.version += 2`, and emit a `MERCHANT_APPROVAL_TERMS_UPDATED` `AuditEvent`).
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_duplicate_negotiation_escalation_deduplicated` (adversarial verification of updated proposal terms on active pending tickets).
 
 
 

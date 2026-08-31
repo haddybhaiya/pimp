@@ -1611,28 +1611,83 @@ class CanonicalCommerceGateway:
                     else existing_appr.expires_at.replace(tzinfo=UTC)
                 )
                 if now <= existing_exp:
-                    # Return existing pending approval without creating duplicate rows or audits
-                    resp_data = NegotiateQuoteGatewayResponse(
-                        quote_id=quote.id,
-                        status="PENDING_APPROVAL",
-                        currency="INR",
-                        subtotal_paise=quote.subtotal_paise,
-                        discount_paise=quote.discount_paise,
-                        shipping_paise=quote.shipping_paise,
-                        total_paise=quote.total_paise,
-                        verdict="ESCALATE_APPROVAL",
-                        rule_code=existing_appr.policy_rule_code,
-                        reason=(
-                            "Counter-offer requires merchant human approval: "
-                            f"{existing_appr.reason}"
-                        ),
-                        expires_at=quote.expires_at,
-                    )
-                    return GatewayResponseEnvelope[NegotiateQuoteGatewayResponse](
-                        status="SUCCESS",
-                        capability="negotiate_quote",
-                        data=resp_data,
-                    )
+                    # Deduplicate identical terms vs update ticket if terms changed
+                    if (
+                        existing_appr.requested_amount_paise == request.proposed_total_paise
+                        and existing_appr.proposed_discount_paise == calculated_discount
+                    ):
+                        # Return existing pending approval without creating duplicate rows or audits
+                        resp_data = NegotiateQuoteGatewayResponse(
+                            quote_id=quote.id,
+                            status="PENDING_APPROVAL",
+                            currency="INR",
+                            subtotal_paise=quote.subtotal_paise,
+                            discount_paise=quote.discount_paise,
+                            shipping_paise=quote.shipping_paise,
+                            total_paise=quote.total_paise,
+                            verdict="ESCALATE_APPROVAL",
+                            rule_code=existing_appr.policy_rule_code,
+                            reason=(
+                                "Counter-offer requires merchant human approval: "
+                                f"{existing_appr.reason}"
+                            ),
+                            expires_at=quote.expires_at,
+                        )
+                        return GatewayResponseEnvelope[NegotiateQuoteGatewayResponse](
+                            status="SUCCESS",
+                            capability="negotiate_quote",
+                            data=resp_data,
+                        )
+                    else:
+                        # Buyer submitted a different counter-offer: update ticket terms & hash
+                        existing_appr.requested_amount_paise = request.proposed_total_paise
+                        existing_appr.proposed_discount_paise = calculated_discount
+                        existing_appr.policy_decision_hash = eval_res.policy_hash or "0" * 64
+                        existing_appr.policy_rule_code = eval_res.rule_code
+                        existing_appr.reason = eval_res.reason
+                        existing_appr.expires_at = min(quote_expires, now + timedelta(minutes=15))
+                        quote.version += 2
+                        await session.flush()
+
+                        await AuditEvent.create_event(
+                            session=session,
+                            merchant_id=context.merchant_id,
+                            actor_type=context.actor_type,
+                            event_type="MERCHANT_APPROVAL_TERMS_UPDATED",
+                            payload={
+                                "approval_id": str(existing_appr.id),
+                                "quote_id": str(quote.id),
+                                "request_id": str(context.request_id),
+                                "requested_amount_paise": request.proposed_total_paise,
+                                "proposed_discount_paise": calculated_discount,
+                                "policy_decision_hash": existing_appr.policy_decision_hash,
+                                "policy_rule_code": existing_appr.policy_rule_code,
+                                "quote_version": quote.version,
+                            },
+                            session_id=context.session_id,
+                        )
+
+                        resp_data = NegotiateQuoteGatewayResponse(
+                            quote_id=quote.id,
+                            status="PENDING_APPROVAL",
+                            currency="INR",
+                            subtotal_paise=quote.subtotal_paise,
+                            discount_paise=quote.discount_paise,
+                            shipping_paise=quote.shipping_paise,
+                            total_paise=quote.total_paise,
+                            verdict="ESCALATE_APPROVAL",
+                            rule_code=existing_appr.policy_rule_code,
+                            reason=(
+                                "Counter-offer requires merchant human approval: "
+                                f"{existing_appr.reason}"
+                            ),
+                            expires_at=quote.expires_at,
+                        )
+                        return GatewayResponseEnvelope[NegotiateQuoteGatewayResponse](
+                            status="SUCCESS",
+                            capability="negotiate_quote",
+                            data=resp_data,
+                        )
                 else:
                     existing_appr.status = "EXPIRED"
                     existing_appr.resolved_at = now
