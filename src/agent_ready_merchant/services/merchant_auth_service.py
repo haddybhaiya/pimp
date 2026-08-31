@@ -140,6 +140,7 @@ class MerchantAuthService:
         session: AsyncSession,
         request: MerchantSignupRequest,
         settings: Settings | None = None,
+        auth_user_id: uuid.UUID | None = None,
     ) -> MerchantAuthResponse:
         """Registers a new merchant, seeds initial policy rules, and issues admin session."""
         effective_settings = settings or get_settings()
@@ -157,6 +158,7 @@ class MerchantAuthService:
             status="ACTIVE",
             currency=request.currency,
             rzp_key_id=request.rzp_key_id,
+            auth_user_id=auth_user_id,
         )
         session.add(merchant)
         try:
@@ -203,7 +205,7 @@ class MerchantAuthService:
 
         # 4. Generate Auth token & expiry
         expires_at = datetime.now(UTC) + timedelta(hours=24)
-        secret = effective_settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
+        secret = effective_settings.SECRET_KEY.get_secret_value()
         token = cls._generate_admin_token(merchant, expires_at, secret)
 
         # 5. Build policy summary
@@ -247,7 +249,10 @@ class MerchantAuthService:
     ) -> MerchantAuthResponse:
         """Authenticates merchant by slug or token and issues active bearer session."""
         effective_settings = settings or get_settings()
-        secret = effective_settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
+        secret = effective_settings.SECRET_KEY.get_secret_value()
+
+        if request.slug is None:
+            raise ValueError("Merchant slug is required for legacy session refresh.")
 
         # 1. Look up merchant by slug
         stmt = select(Merchant).where(Merchant.slug == request.slug)
@@ -288,6 +293,52 @@ class MerchantAuthService:
             },
         )
 
+        return MerchantAuthResponse(
+            merchant_id=merchant.id,
+            name=merchant.name,
+            slug=merchant.slug,
+            status=merchant.status,
+            currency=merchant.currency,
+            token=token,
+            expires_at=expires_at,
+            onboarding_completed=True,
+            policies=policies,
+        )
+
+    @classmethod
+    async def authenticate_insforge_merchant(
+        cls,
+        session: AsyncSession,
+        auth_user_id: uuid.UUID,
+        settings: Settings | None = None,
+    ) -> MerchantAuthResponse:
+        """Creates a merchant session for a verified InsForge account owner."""
+        effective_settings = settings or get_settings()
+        merchant = (
+            await session.execute(select(Merchant).where(Merchant.auth_user_id == auth_user_id))
+        ).scalar_one_or_none()
+        if merchant is None:
+            raise ValueError("No merchant workspace is linked to this account.")
+        if merchant.status != "ACTIVE":
+            raise ValueError(f"Merchant account is {merchant.status}. Access denied.")
+
+        expires_at = datetime.now(UTC) + timedelta(hours=24)
+        token = cls._generate_admin_token(
+            merchant, expires_at, effective_settings.SECRET_KEY.get_secret_value()
+        )
+        policies = await cls._build_policy_summary(session, merchant.id)
+        await AuditEvent.create_event(
+            session=session,
+            merchant_id=merchant.id,
+            actor_type="MERCHANT_ADMIN",
+            event_type="MERCHANT_LOGIN",
+            payload={
+                "merchant_id": str(merchant.id),
+                "slug": merchant.slug,
+                "auth_provider": "INSFORGE",
+                "policy_hash": policies.policy_hash,
+            },
+        )
         return MerchantAuthResponse(
             merchant_id=merchant.id,
             name=merchant.name,

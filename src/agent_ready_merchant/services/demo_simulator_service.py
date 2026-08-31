@@ -18,7 +18,7 @@ from agent_ready_merchant.models.approval import MerchantApproval
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.inventory import InventoryItem
 from agent_ready_merchant.models.merchant import Merchant
-from agent_ready_merchant.models.order import Order
+from agent_ready_merchant.models.order import Order, OrderItem
 from agent_ready_merchant.models.policy import PolicyRule
 from agent_ready_merchant.models.product import Product, ProductVariant
 from agent_ready_merchant.models.quote import PriceQuote, QuoteItem
@@ -86,6 +86,48 @@ DEMO_PRODUCTS: tuple[DemoProduct, ...] = (
 
 class DemoSimulatorService:
     """Server-authoritative coordinator for deterministic interactive demo simulations."""
+
+    @staticmethod
+    async def _load_active_policy_context(
+        session: AsyncSession, merchant_id: uuid.UUID
+    ) -> PolicyContext:
+        """Builds a policy context from the merchant's active server-side rules."""
+        rules_stmt = select(PolicyRule).where(
+            PolicyRule.merchant_id == merchant_id,
+            PolicyRule.is_active.is_(True),
+        )
+        rules = list((await session.execute(rules_stmt)).scalars().all())
+
+        autonomy_level = 1
+        max_discount_pct = 15.0
+        min_margin_pct = 20.0
+        max_single_tx_paise = 5_000_000
+        for rule in rules:
+            value = rule.rule_value or {}
+            if rule.rule_type == "AUTONOMY_LEVEL" and "autonomy_level" in value:
+                autonomy_level = int(value["autonomy_level"])
+            elif rule.rule_type == "MAX_DISCOUNT_PCT" and "max_discount_pct" in value:
+                max_discount_pct = float(value["max_discount_pct"])
+            elif rule.rule_type == "MIN_MARGIN_PCT" and "min_margin_pct" in value:
+                min_margin_pct = float(value["min_margin_pct"])
+            elif rule.rule_type == "MAX_CART_VALUE" and "max_single_tx_paise" in value:
+                max_single_tx_paise = int(value["max_single_tx_paise"])
+
+        if autonomy_level not in (0, 1, 2):
+            raise ValueError("Merchant policy has an invalid autonomy level.")
+        if not 0.0 <= max_discount_pct <= 50.0:
+            raise ValueError("Merchant policy has an invalid discount ceiling.")
+        if not 0.0 <= min_margin_pct <= 100.0:
+            raise ValueError("Merchant policy has an invalid margin requirement.")
+        if not 0 < max_single_tx_paise <= 10_000_000:
+            raise ValueError("Merchant policy has an invalid transaction limit.")
+
+        return PolicyContext(
+            merchant_autonomy_level=autonomy_level,
+            max_discount_percentage=max_discount_pct,
+            min_margin_percentage=min_margin_pct,
+            max_single_transaction_paise=max_single_tx_paise,
+        )
 
     @classmethod
     async def seed_demo_catalog_and_policies(
@@ -303,10 +345,10 @@ class DemoSimulatorService:
 
         target_product = products[0]
         if req.sku:
-            for p in products:
-                if p.sku == req.sku:
-                    target_product = p
-                    break
+            selected_product = next((p for p in products if p.sku == req.sku), None)
+            if selected_product is None:
+                raise ValueError(f"Active SKU '{req.sku}' was not found for this merchant.")
+            target_product = selected_product
 
         # Fetch purchasable variant and lock inventory row to prevent overselling
         var_stmt = select(ProductVariant).where(ProductVariant.product_id == target_product.id)
@@ -370,7 +412,7 @@ class DemoSimulatorService:
         )
 
         # Step 2: Catalog Discovery & Product Selection
-        unit_price = target_product.base_price_paise
+        unit_price = variant.price_override_paise or target_product.base_price_paise
         subtotal_paise = unit_price * req.quantity
 
         steps.append(
@@ -417,31 +459,29 @@ class DemoSimulatorService:
 
         # Step 4: Policy Engine Evaluation
         discount_pct = 10.0
-        autonomy_level = 1
         if req.scenario == "HITL_ESCALATION_COMMERCE":
             discount_pct = 20.0
-            autonomy_level = 2  # Supervised HITL mode triggers approval escalation
         elif req.target_discount_pct is not None:
             discount_pct = req.target_discount_pct
 
-        proposed_discount_paise = int(round(subtotal_paise * (discount_pct / 100.0)))
-        proposed_total_paise = subtotal_paise - proposed_discount_paise
+        requested_discount_paise = int(round(subtotal_paise * (discount_pct / 100.0)))
+        requested_total_paise = subtotal_paise - requested_discount_paise
+        # QuoteItem enforces a single integer unit price for this single-SKU
+        # simulation. Round the total upward to an exactly representable line
+        # total, which never grants a larger discount than was requested.
+        proposed_unit_price = (requested_total_paise + req.quantity - 1) // req.quantity
+        proposed_total_paise = proposed_unit_price * req.quantity
+        proposed_discount_paise = subtotal_paise - proposed_total_paise
 
-        policy_ctx = PolicyContext(
-            merchant_autonomy_level=autonomy_level,
-            max_discount_percentage=30.0 if autonomy_level == 2 else 15.0,
-            min_margin_percentage=20.0,
-            max_single_transaction_paise=5_000_000,
-        )
-        unit_discount_paise = int(proposed_discount_paise / req.quantity)
+        policy_ctx = await cls._load_active_policy_context(session, merchant_id)
         proposal = QuoteProposal(
             items=[
                 QuoteItemProposal(
                     sku=target_product.sku,
                     quantity=req.quantity,
-                    unit_base_price_paise=target_product.base_price_paise,
+                    unit_base_price_paise=unit_price,
                     unit_floor_price_paise=target_product.floor_price_paise,
-                    proposed_unit_price_paise=unit_price - unit_discount_paise,
+                    proposed_unit_price_paise=proposed_unit_price,
                     is_negotiable=target_product.is_negotiable,
                 )
             ],
@@ -463,6 +503,8 @@ class DemoSimulatorService:
             quote.status = "ACCEPTED"
             quote.discount_paise = proposed_discount_paise
             quote.total_paise = proposed_total_paise
+            quote_item.unit_price_paise = proposed_unit_price
+            quote_item.total_price_paise = proposed_total_paise
             quote.discount_reason = (
                 f"Autonomous Policy Approval (Rule: {decision.rule_code or 'AUTONOMY_LEVEL'})"
             )
@@ -504,6 +546,17 @@ class DemoSimulatorService:
             session.add(order)
             await session.flush()
             order_id = order.id
+
+            session.add(
+                OrderItem(
+                    order_id=order.id,
+                    variant_id=quote_item.variant_id,
+                    quantity=quote_item.quantity,
+                    unit_price_paise=quote_item.unit_price_paise,
+                    total_price_paise=quote_item.total_price_paise,
+                )
+            )
+            await session.flush()
 
             steps.append(
                 SimulationTraceStep(
@@ -732,6 +785,24 @@ class DemoSimulatorService:
                 )
             )
 
+        else:
+            steps.append(
+                SimulationTraceStep(
+                    step_number=3,
+                    actor="Deterministic Policy Engine",
+                    action="policy_evaluate",
+                    status="REJECTED",
+                    summary="Proposal rejected by the active merchant policy.",
+                    details={
+                        "verdict": decision.verdict.value,
+                        "rule_code": decision.rule_code,
+                        "reason": decision.reason,
+                        "policy_hash": policy_hash_str,
+                    },
+                    timestamp=datetime.now(UTC),
+                )
+            )
+
         # Step 7: Cryptographic Hash Chain Audit Confirmation
         audit_res = await AuditEvent.create_event(
             session=session,
@@ -762,11 +833,15 @@ class DemoSimulatorService:
             )
         )
 
-        msg = (
-            "Standard Autonomous Commerce completed and settled successfully."
-            if decision.verdict == PolicyVerdict.ALLOW
-            else "Proposal escalated to Human Approval queue."
-        )
+        if decision.verdict == PolicyVerdict.ALLOW:
+            msg = "Standard Autonomous Commerce completed and settled successfully."
+            simulation_status = "SETTLED"
+        elif decision.verdict == PolicyVerdict.ESCALATE_APPROVAL:
+            msg = "Proposal escalated to Human Approval queue."
+            simulation_status = "PENDING_APPROVAL"
+        else:
+            msg = f"Proposal rejected by policy: {decision.reason}"
+            simulation_status = "REJECTED"
 
         return DemoSimulationStepResponse(
             scenario=req.scenario,
@@ -776,7 +851,7 @@ class DemoSimulatorService:
             order_id=order_id,
             rzp_order_id=rzp_order_id,
             rzp_payment_id=rzp_payment_id,
-            status="SETTLED" if decision.verdict == PolicyVerdict.ALLOW else "PENDING_APPROVAL",
+            status=simulation_status,
             subtotal_paise=subtotal_paise,
             discount_paise=(
                 proposed_discount_paise if decision.verdict == PolicyVerdict.ALLOW else 0

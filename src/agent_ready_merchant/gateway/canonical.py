@@ -1599,11 +1599,20 @@ class CanonicalCommerceGateway:
             )
         elif eval_res.verdict == PolicyVerdict.ESCALATE_APPROVAL:
             # Check for existing active PENDING approval ticket on this quote
-            existing_appr_stmt = select(MerchantApproval).where(
-                MerchantApproval.quote_id == quote.id,
-                MerchantApproval.status == "PENDING",
+            existing_appr_stmt = (
+                select(MerchantApproval)
+                .where(
+                    MerchantApproval.quote_id == quote.id,
+                    MerchantApproval.status == "PENDING",
+                )
+                .with_for_update()
             )
             existing_appr = (await session.execute(existing_appr_stmt)).scalar_one_or_none()
+            # A concurrent merchant resolution uses the same row lock. Recheck
+            # after acquiring it so a revised buyer offer can never overwrite
+            # the terms already applied by an approval resolution.
+            if existing_appr is not None and existing_appr.status != "PENDING":
+                existing_appr = None
             if existing_appr:
                 existing_exp = (
                     existing_appr.expires_at

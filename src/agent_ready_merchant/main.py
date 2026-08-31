@@ -31,6 +31,7 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     WebhookReplayError,
     WebhookTimestampError,
 )
+from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.services.payment_service import PaymentService
 
 logger = logging.getLogger("agent_ready_merchant")
@@ -167,6 +168,7 @@ def create_app() -> FastAPI:
         "/audit",
         "/settings",
         "/demo",
+        "/unauthorized",
     ]:
 
         def _make_route_handler(route_name: str) -> Callable[[], Awaitable[Any]]:
@@ -838,7 +840,14 @@ def create_app() -> FastAPI:
         MerchantSetupRequest,
         MerchantSignupRequest,
     )
+    from agent_ready_merchant.services.insforge_auth_service import InsforgeAuthService
     from agent_ready_merchant.services.merchant_auth_service import MerchantAuthService
+
+    def _extract_bearer_token(authorization: str | None) -> str | None:
+        if not authorization:
+            return None
+        scheme, _, token = authorization.partition(" ")
+        return token if scheme.lower() == "bearer" and token else None
 
     @app.post(
         "/api/v1/merchant/auth/signup",
@@ -850,12 +859,26 @@ def create_app() -> FastAPI:
     async def merchant_signup_endpoint(
         req: MerchantSignupRequest,
         response: Response,
+        authorization: str | None = Header(default=None, alias="Authorization"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> MerchantAuthResponse:
         """Registers a new merchant, seeds initial policy bounds, and issues admin session."""
         try:
-            auth_response = await MerchantAuthService.register_merchant(db, req, current_settings)
+            bearer_token = _extract_bearer_token(authorization)
+            identity = (
+                await InsforgeAuthService.verify_access_token(bearer_token, current_settings)
+                if bearer_token
+                else None
+            )
+            if identity and identity.email != req.email.lower():
+                raise ValueError("Merchant email must match the verified InsForge account.")
+            auth_response = await MerchantAuthService.register_merchant(
+                db,
+                req,
+                current_settings,
+                auth_user_id=identity.user_id if identity else None,
+            )
             _set_admin_session_cookie(response, auth_response.token, current_settings)
             return auth_response.model_copy(update={"token": None})
         except ValueError as exc:
@@ -872,17 +895,27 @@ def create_app() -> FastAPI:
         req: MerchantLoginRequest,
         request: Request,
         response: Response,
+        authorization: str | None = Header(default=None, alias="Authorization"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> MerchantAuthResponse:
         """Authenticates merchant by slug and issues active bearer session."""
         try:
-            cookie_token = request.cookies.get(ADMIN_SESSION_COOKIE)
-            if req.admin_token is None and cookie_token:
-                req = req.model_copy(update={"admin_token": cookie_token})
-            auth_response = await MerchantAuthService.authenticate_merchant(
-                db, req, current_settings
-            )
+            bearer_token = _extract_bearer_token(authorization)
+            if bearer_token:
+                identity = await InsforgeAuthService.verify_access_token(
+                    bearer_token, current_settings
+                )
+                auth_response = await MerchantAuthService.authenticate_insforge_merchant(
+                    db, identity.user_id, current_settings
+                )
+            else:
+                cookie_token = request.cookies.get(ADMIN_SESSION_COOKIE)
+                if req.admin_token is None and cookie_token:
+                    req = req.model_copy(update={"admin_token": cookie_token})
+                auth_response = await MerchantAuthService.authenticate_merchant(
+                    db, req, current_settings
+                )
             _set_admin_session_cookie(response, auth_response.token, current_settings)
             return auth_response.model_copy(update={"token": None})
         except ValueError as exc:
@@ -915,10 +948,11 @@ def create_app() -> FastAPI:
             path="/api/v1/merchant",
         )
 
-    def _require_merchant_auth(
+    async def _require_merchant_auth(
         merchant_id: uuid.UUID,
         auth_token: str | None,
         settings: Settings,
+        db: AsyncSession,
     ) -> None:
         """Helper to enforce valid admin session token on protected merchant operations."""
         if not auth_token:
@@ -926,12 +960,18 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Admin session token is required (X-Auth-Token header missing).",
             )
-        secret = settings.RAZORPAY_WEBHOOK_SECRET.get_secret_value()
+        secret = settings.SECRET_KEY.get_secret_value()
         is_valid, tok_m_id, err = MerchantAuthService.verify_admin_token(auth_token, secret)
         if not is_valid or tok_m_id != merchant_id:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=err or "Invalid or expired admin session token.",
+            )
+        merchant = await db.get(Merchant, merchant_id)
+        if merchant is None or merchant.status != "ACTIVE":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Merchant account is not active.",
             )
 
     @app.get(
@@ -947,7 +987,7 @@ def create_app() -> FastAPI:
         current_settings: Settings = Depends(get_settings),
     ) -> MerchantProfileResponse:
         """Fetches active merchant profile and policy configuration."""
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
 
         try:
             return await MerchantAuthService.get_merchant_profile(db, x_merchant_id)
@@ -968,7 +1008,7 @@ def create_app() -> FastAPI:
         current_settings: Settings = Depends(get_settings),
     ) -> MerchantProfileResponse:
         """Updates merchant profile and policy bounds upon setup wizard completion."""
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
 
         try:
             return await MerchantAuthService.complete_merchant_setup(db, x_merchant_id, req)
@@ -993,6 +1033,10 @@ def create_app() -> FastAPI:
         ResolveApprovalPayload,
         UpdatePoliciesPayload,
     )
+    from agent_ready_merchant.services.merchant_mutation_idempotency_service import (
+        IdempotencyConflictError,
+        MerchantMutationIdempotencyService,
+    )
     from agent_ready_merchant.services.merchant_portal_service import MerchantPortalService
 
     @app.get(
@@ -1007,7 +1051,7 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> DashboardSummaryResponse:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         try:
             return await MerchantPortalService.get_dashboard_summary(db, x_merchant_id)
         except ValueError as exc:
@@ -1025,7 +1069,7 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> list[ProductItemResponse]:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         return await MerchantPortalService.list_products(db, x_merchant_id)
 
     @app.post(
@@ -1042,7 +1086,7 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> ProductItemResponse:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         try:
             return await MerchantPortalService.create_product(db, x_merchant_id, req)
         except ValueError as exc:
@@ -1060,7 +1104,7 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> list[InventoryItemResponse]:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         return await MerchantPortalService.list_inventory(db, x_merchant_id)
 
     @app.post(
@@ -1073,12 +1117,31 @@ def create_app() -> FastAPI:
         req: InventoryAdjustRequest,
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> InventoryItemResponse:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         try:
-            return await MerchantPortalService.adjust_inventory(db, x_merchant_id, req)
+            receipt, replay = await MerchantMutationIdempotencyService.claim_or_replay(
+                db,
+                merchant_id=x_merchant_id,
+                operation="inventory.adjust",
+                idempotency_key=x_idempotency_key,
+                payload=req.model_dump(mode="json"),
+            )
+            if replay is not None:
+                return InventoryItemResponse.model_validate(replay)
+            result = await MerchantPortalService.adjust_inventory(db, x_merchant_id, req)
+            assert receipt is not None
+            await MerchantMutationIdempotencyService.complete(
+                db, receipt, result.model_dump(mode="json")
+            )
+            return result
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -1094,7 +1157,7 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> list[QuoteDetailResponse]:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         return await MerchantPortalService.list_quotes(db, x_merchant_id)
 
     @app.get(
@@ -1109,7 +1172,7 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> list[OrderDetailResponse]:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         return await MerchantPortalService.list_orders(db, x_merchant_id)
 
     @app.get(
@@ -1124,7 +1187,7 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> list[PaymentAttemptResponse]:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         return await MerchantPortalService.list_payments(db, x_merchant_id)
 
     @app.get(
@@ -1140,7 +1203,7 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> list[ApprovalItemResponse]:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         return await MerchantPortalService.list_approvals(db, x_merchant_id, status)
 
     @app.post(
@@ -1157,10 +1220,12 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> ApprovalItemResponse:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         try:
             return await MerchantPortalService.resolve_approval(db, x_merchant_id, approval_id, req)
         except ValueError as exc:
+            if str(exc) == "Approval ticket has expired.":
+                await db.commit()
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     @app.get(
@@ -1175,7 +1240,7 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> PolicyGovernanceResponse:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         try:
             return await MerchantPortalService.get_policies(db, x_merchant_id)
         except ValueError as exc:
@@ -1194,7 +1259,7 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> PolicyGovernanceResponse:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         try:
             return await MerchantPortalService.update_policies(
                 db,
@@ -1220,7 +1285,7 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> AuditLedgerResponse:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         return await MerchantPortalService.get_audit_ledger(db, x_merchant_id, limit=limit)
 
     # =========================================================================
@@ -1245,7 +1310,7 @@ def create_app() -> FastAPI:
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> DemoSeedResponse:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         return await DemoSimulatorService.seed_demo_catalog_and_policies(db, x_merchant_id)
 
     @app.post(
@@ -1258,14 +1323,33 @@ def create_app() -> FastAPI:
         req: DemoSimulationStepRequest,
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> DemoSimulationStepResponse:
-        _require_merchant_auth(x_merchant_id, x_auth_token, current_settings)
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
         try:
-            return await DemoSimulatorService.execute_simulation(
+            receipt, replay = await MerchantMutationIdempotencyService.claim_or_replay(
+                db,
+                merchant_id=x_merchant_id,
+                operation="demo.simulate",
+                idempotency_key=x_idempotency_key,
+                payload=req.model_dump(mode="json"),
+            )
+            if replay is not None:
+                return DemoSimulationStepResponse.model_validate(replay)
+            result = await DemoSimulatorService.execute_simulation(
                 db, x_merchant_id, req, current_settings
             )
+            assert receipt is not None
+            await MerchantMutationIdempotencyService.complete(
+                db, receipt, result.model_dump(mode="json")
+            )
+            return result
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

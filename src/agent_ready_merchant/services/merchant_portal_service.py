@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_ready_merchant.gateway.constants import COMMERCE_PROTOCOL_VERSION
@@ -20,7 +20,14 @@ from agent_ready_merchant.models.payment import PaymentAttempt
 from agent_ready_merchant.models.policy import PolicyRule
 from agent_ready_merchant.models.product import Product, ProductVariant
 from agent_ready_merchant.models.quote import PriceQuote, QuoteItem
-from agent_ready_merchant.policy.models import compute_policy_hash
+from agent_ready_merchant.policy.engine import DeterministicPolicyEngine
+from agent_ready_merchant.policy.models import (
+    PolicyContext,
+    PolicyVerdict,
+    QuoteItemProposal,
+    QuoteProposal,
+    compute_policy_hash,
+)
 from agent_ready_merchant.schemas.merchant_auth import PolicySummaryItem
 from agent_ready_merchant.schemas.merchant_portal import (
     ApprovalItemResponse,
@@ -62,10 +69,14 @@ class MerchantPortalService:
         total_products = (await session.execute(prod_count_stmt)).scalar_one() or 0
 
         # 3. Orders and revenue count
+        settled_order_statuses = ("PAID", "FULFILLMENT_PENDING", "COMPLETED")
         order_count_stmt = select(
             func.count(Order.id),
             func.coalesce(func.sum(Order.amount_paise), 0),
-        ).where(Order.merchant_id == merchant_id)
+        ).where(
+            Order.merchant_id == merchant_id,
+            Order.status.in_(settled_order_statuses),
+        )
         res = (await session.execute(order_count_stmt)).one()
         total_orders = res[0] or 0
         total_revenue_paise = int(res[1] or 0)
@@ -436,7 +447,19 @@ class MerchantPortalService:
         """Lists HITL approval tickets filtered by status."""
         stmt = select(MerchantApproval).where(MerchantApproval.merchant_id == merchant_id)
         if status_filter and status_filter.upper() != "ALL":
-            stmt = stmt.where(MerchantApproval.status == status_filter.upper())
+            normalized_status = status_filter.upper()
+            if normalized_status == "EXPIRED":
+                stmt = stmt.where(
+                    or_(
+                        MerchantApproval.status == "EXPIRED",
+                        and_(
+                            MerchantApproval.status == "PENDING",
+                            MerchantApproval.expires_at <= func.now(),
+                        ),
+                    )
+                )
+            else:
+                stmt = stmt.where(MerchantApproval.status == normalized_status)
         stmt = stmt.order_by(MerchantApproval.created_at.desc())
 
         approvals = list((await session.execute(stmt)).scalars().all())
@@ -520,6 +543,88 @@ class MerchantPortalService:
             await session.flush()
             raise ValueError("Approval ticket has expired.")
 
+        validated_counter_discount: int | None = None
+        if req.decision == "COUNTER_OFFER":
+            if req.counter_amount_paise is None:
+                raise ValueError("A counter-offer amount is required.")
+            if approval.quote_id is None:
+                raise ValueError("A counter-offer requires an associated quote.")
+
+            q_stmt = (
+                select(PriceQuote)
+                .where(
+                    PriceQuote.id == approval.quote_id,
+                    PriceQuote.merchant_id == merchant_id,
+                )
+                .with_for_update()
+            )
+            counter_quote = (await session.execute(q_stmt)).scalar_one_or_none()
+            if counter_quote is None:
+                raise ValueError("The approval's associated quote was not found.")
+
+            quote_rows_stmt = (
+                select(QuoteItem, ProductVariant, Product)
+                .join(ProductVariant, QuoteItem.variant_id == ProductVariant.id)
+                .join(Product, ProductVariant.product_id == Product.id)
+                .where(QuoteItem.quote_id == counter_quote.id)
+                .with_for_update()
+            )
+            quote_rows = list((await session.execute(quote_rows_stmt)).all())
+            if not quote_rows:
+                raise ValueError("Cannot counter-offer on a quote with no line items.")
+
+            proposed_goods_paise = req.counter_amount_paise - counter_quote.shipping_paise
+            if proposed_goods_paise <= 0 or req.counter_amount_paise > (
+                counter_quote.subtotal_paise + counter_quote.shipping_paise
+            ):
+                raise ValueError(
+                    "Counter-offer amount must be within the quote's valid total range."
+                )
+
+            floor_total_paise = sum(
+                product.floor_price_paise * item.quantity for item, _, product in quote_rows
+            )
+            if proposed_goods_paise < floor_total_paise:
+                raise ValueError(
+                    "Counter-offer amount would breach one or more product floor prices."
+                )
+
+            validated_counter_discount = counter_quote.subtotal_paise - proposed_goods_paise
+            item_proposals = [
+                QuoteItemProposal(
+                    sku=variant.sku,
+                    quantity=item.quantity,
+                    unit_base_price_paise=item.unit_price_paise,
+                    unit_floor_price_paise=product.floor_price_paise,
+                    proposed_unit_price_paise=max(
+                        product.floor_price_paise,
+                        (item.total_price_paise * proposed_goods_paise)
+                        // max(1, counter_quote.subtotal_paise * item.quantity),
+                    ),
+                    is_negotiable=product.is_negotiable,
+                )
+                for item, variant, product in quote_rows
+            ]
+            policy_summary = await cls._load_policy_summary(session, merchant_id)
+            policy_result = DeterministicPolicyEngine.evaluate_quote(
+                QuoteProposal(
+                    items=item_proposals,
+                    subtotal_paise=counter_quote.subtotal_paise,
+                    discount_paise=validated_counter_discount,
+                    shipping_paise=counter_quote.shipping_paise,
+                    total_paise=req.counter_amount_paise,
+                ),
+                PolicyContext(
+                    merchant_autonomy_level=policy_summary.autonomy_level,
+                    max_discount_percentage=policy_summary.max_discount_percentage,
+                    min_margin_percentage=policy_summary.min_margin_percentage,
+                    max_single_transaction_paise=policy_summary.max_single_transaction_paise,
+                ),
+                required_capability=None,
+            )
+            if policy_result.verdict != PolicyVerdict.ALLOW:
+                raise ValueError(f"Counter-offer rejected by active policy: {policy_result.reason}")
+
         # Update approval status
         if req.decision == "APPROVE":
             approval.status = "APPROVED"
@@ -548,15 +653,11 @@ class MerchantPortalService:
                     quote.discount_reason = f"Merchant Approved: {req.reason_note}"
                 elif req.decision == "COUNTER_OFFER":
                     quote.status = "PROPOSED"
-                    counter_amt = (
-                        req.counter_amount_paise
-                        if req.counter_amount_paise is not None
-                        else approval.requested_amount_paise
-                    )
+                    counter_amt = req.counter_amount_paise
+                    if counter_amt is None or validated_counter_discount is None:
+                        raise ValueError("A validated counter-offer amount is required.")
                     quote.total_paise = counter_amt
-                    quote.discount_paise = max(
-                        0, quote.subtotal_paise + quote.shipping_paise - counter_amt
-                    )
+                    quote.discount_paise = validated_counter_discount
                     approval.proposed_discount_paise = quote.discount_paise
                     quote.discount_reason = f"Merchant Counter-Offer: {req.reason_note}"
                 else:

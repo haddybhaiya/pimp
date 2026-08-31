@@ -59,6 +59,12 @@ class Merchant(Base, TimestampMixin, OptimisticLockMixin):
         String(128),
         nullable=False,
     )
+    auth_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(),
+        unique=True,
+        nullable=True,
+        index=True,
+    )
 
     # Relationships
     products: Mapped[list["Product"]] = relationship(

@@ -60,7 +60,12 @@ class MerchantLoginRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    slug: str = Field(..., min_length=2, max_length=100, description="Merchant slug")
+    slug: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=100,
+        description="Merchant slug",
+    )
     rzp_key_id: str | None = Field(
         default=None,
         max_length=128,

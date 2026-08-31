@@ -39,7 +39,7 @@ export interface MerchantAuthResponse {
 }
 
 export interface LoginCredentials {
-  slug: string;
+  slug?: string;
   rzpKeyId?: string;
   adminToken?: string;
 }
