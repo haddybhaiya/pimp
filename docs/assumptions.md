@@ -144,6 +144,12 @@
 - **FAILURE IF WRONG:** Model hallucinations could alter live pricing, bypass merchant floor limits, fabricate experiment results, or execute unapproved production mutations.
 - **MITIGATION:** Explicit `OBSERVE → DIAGNOSE → FORM HYPOTHESIS → PROPOSE → ESTIMATE → MEASURE` lifecycle; server-authoritative `govern_and_classify_proposal()` marking price/policy changes `PROHIBITED`; approval-first experiment registration (`approval_status = "PENDING"`); and deterministic PostgreSQL formula evaluation of experiment deltas and recommendations (`KEEP`, `ROLLBACK`, `INCONCLUSIVE`).
 
+### 15. Merchant Agent Evidence and Experiment Windows
+- **ASSUMPTION:** A merchant-agent finding is meaningful only when every cited evidence key exists in the bounded authoritative snapshot, and an experiment result must measure records created after merchant approval.
+- **EVIDENCE:** `tests/test_phase7_merchant_agent.py` rejects hallucinated evidence, requires approval before evaluation, and records a post-approval-window inconclusive result when no new observations exist.
+- **STATUS:** **VERIFIED (PASS)**
+- **MITIGATION:** Unsupported diagnoses/proposals are discarded rather than remapped to unrelated metrics; experiment baselines are server-computed, approval/evaluation rows are locked, and duplicate result rows are database-constrained.
+
 
 
 

@@ -5,33 +5,33 @@
 # Review 11: Validated Deferred Phase 5 Follow-ups
 
 > **Reviewed on:** 2026-09-01
-> **Scope:** Read-only validation of AI-generated findings against the current Phase 5 implementation. The items below are confirmed gaps and intentionally deferred; no remediation was applied in this review.
+> **Scope:** Validated Phase 5 findings. Remediated on 2026-09-01 with regression coverage.
 
 ## Open Findings
 
-### 1. P1 — Demo simulation can consume live catalog inventory
+### 1. P1 — Demo simulation can consume live catalog inventory — RESOLVED
 
 [`demo_simulator_service.py`](../src/agent_ready_merchant/services/demo_simulator_service.py): `execute_simulation` selects from all active merchant products, including a caller-supplied live SKU, when demo products have not first been seeded. The real settlement flow then deducts the selected inventory.
 
-**Required remediation:** Restrict simulation to explicitly demo-seeded products/inventory (or an isolated demo tenant) and reject live SKUs. Add a regression test proving a simulation cannot mutate a normal catalog item.
+**Resolution:** `execute_simulation` now filters exclusively to `attributes.demo_seeded == true`, seeds only that isolated catalog when necessary, and rejects every other SKU. `test_demo_rejects_live_catalog_sku_without_mutating_inventory` proves a normal catalog item cannot be settled or decremented by the sandbox.
 
-### 2. P2 — Audit viewer cannot retrieve older ledger entries
+### 2. P2 — Audit viewer cannot retrieve older ledger entries — RESOLVED
 
 [`audit.tsx`](../frontend/src/pages/audit.tsx): the page requests the newest 50 events and transparently reports the total count, but provides no pagination or “load more” control.
 
-**Required remediation:** Extend the audit endpoint/client with a cursor or page/limit contract and provide a way to retrieve older immutable events.
+**Resolution:** The ledger endpoint now accepts bounded `limit` and non-negative `offset` pagination. The typed client and audit view append older immutable events through a lightweight “Load older events” control.
 
-### 3. P2 — Platform transaction ceiling is not enforced at the setup API boundary
+### 3. P2 — Platform transaction ceiling is not enforced at the setup API boundary — RESOLVED
 
 [`merchant_auth.py`](../src/agent_ready_merchant/schemas/merchant_auth.py) and [`merchant_auth_service.py`](../src/agent_ready_merchant/services/merchant_auth_service.py): the onboarding UI rejects values above ₹1,00,000, but a direct setup request can persist a higher merchant transaction limit because the schema allows up to the 64-bit maximum.
 
-**Required remediation:** Enforce the platform maximum in the request schema/service, with boundary and direct-API tests.
+**Resolution:** The shared `PLATFORM_MAX_SINGLE_TRANSACTION_PAISE` constant is enforced in signup/setup schemas and policy updates. `test_setup_schema_enforces_platform_transaction_ceiling` covers the exact boundary and an over-limit direct payload.
 
-### 4. P2 — Expired approval transition can roll back
+### 4. P2 — Expired approval transition can roll back — RESOLVED
 
 [`merchant_portal_service.py`](../src/agent_ready_merchant/services/merchant_portal_service.py): `resolve_approval` sets an expired pending ticket to `EXPIRED`, flushes, then raises a `ValueError`. The request transaction rolls back on that error, leaving the stored ticket `PENDING`.
 
-**Required remediation:** Persist the expiry transition and required audit event before returning the client error, without weakening approval state-machine checks.
+**Resolution:** Expiry now appends an `APPROVAL_EXPIRED` audit event before the existing endpoint commits the transition and returns the client error. The locked approval state machine remains fail-closed.
 
 ---
 
@@ -783,7 +783,7 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 
 > **Reviewed on:** 2026-09-01
 > **Scope:** Phase 7 Merchant-Side Intelligence, Authoritative PostgreSQL Observation Matrix, Diagnostic Engine, Proposal Generation, Server-Authoritative Risk Governance, Approval-First Experimentation Framework, Deterministic Measurement Engine, and Control Plane Integration (`/agent`, `/experiments`).
-> **Verification:** Full test suite green (277 passed, 3 skipped in pytest; 27 passed in Vitest), `ruff check` clean (0 errors), `ruff format` clean, `mypy --strict` clean, frontend production build 100% clean.
+> **Verification:** Remediation verification green (279 passed, 3 skipped in pytest; 27 passed in Vitest), `ruff check` clean (0 errors), `ruff format` clean, `mypy --strict` clean, frontend production build clean.
 
 ---
 

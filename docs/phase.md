@@ -53,12 +53,13 @@
   - Prohibits unauthorized actions (`PROHIBITED`): attempts to alter policy, modify floor prices, grant capabilities, or execute direct payments/refunds.
   - Classifies low-risk reversible proposals as `LOW_RISK_REVERSIBLE` and promotional offers as `APPROVAL_REQUIRED`.
 - [x] **Approval-First Experiment Framework (`MerchantExperiment`, `MerchantExperimentResult`):**
-  - Durable database models and migration `008_merchant_agent_and_experiments.py`.
+  - Durable database models and migrations `008_merchant_agent_and_experiments.py` and `009_merchant_agent_runs.py`.
   - Complete lifecycle: `DRAFT` / `PROPOSED` $\to$ `APPROVAL_REQUIRED` $\to$ `APPROVED` $\to$ `COMPLETED` / `ROLLED_BACK`.
   - Phase 7 does NOT autonomously execute production changes (strictly reserved for Phase 8).
 - [x] **Deterministic Experiment Measurement Engine:**
   - Computes post-experiment metrics, absolute change, percentage change, and sample sizes strictly from database observations.
   - Deterministically recommends `KEEP`, `ROLLBACK`, or `INCONCLUSIVE` (based on sample size $\ge 5$ and delta thresholds).
+  - Rejects ungrounded model evidence, measures only post-approval observations, and database-constrains one deterministic result per experiment.
 - [x] **Web Control Plane Integration:**
   - Dedicated Merchant Agent optimization hub (`frontend/src/pages/agent.tsx`) and Experiments workbench (`frontend/src/pages/experiments.tsx`).
   - Full API endpoints (`/api/v1/merchant/agent/*`, `/api/v1/merchant/experiments/*`) protected by `_require_merchant_auth`.

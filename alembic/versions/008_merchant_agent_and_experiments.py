@@ -1,6 +1,6 @@
 """Create merchant proposals, experiments, and experiment results tables for Phase 7.
 
-Revision ID: 008_merchant_agent_and_experiments
+Revision ID: 008_merchant_agent_experiments
 Revises: 007_merchant_auth_user_binding
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "008_merchant_agent_and_experiments"
+revision: str = "008_merchant_agent_experiments"
 down_revision: str | None = "007_merchant_auth_user_binding"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -156,6 +156,7 @@ def upgrade() -> None:
             "sample_size >= 0",
             name="ck_merchant_experiment_results_sample_non_negative",
         ),
+        sa.UniqueConstraint("experiment_id", name="uq_merchant_experiment_results_experiment"),
         sa.ForeignKeyConstraint(["experiment_id"], ["merchant_experiments.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["merchant_id"], ["merchants.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
