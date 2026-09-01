@@ -18,6 +18,7 @@ import {
   Activity,
   Layers,
   Lock,
+  Bot,
 } from 'lucide-react';
 
 export interface DashboardPageProps {
@@ -100,6 +101,15 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
+            <Button
+              onClick={() => onNavigate('/agent')}
+              variant="outline"
+              size="sm"
+              className="text-xs bg-[#141D31] border-brand-bright/40 text-brand-bright hover:bg-brand-bright/10"
+            >
+              <Bot className="h-3.5 w-3.5 mr-1" />
+              Merchant Agent
+            </Button>
             <Button
               onClick={() => onNavigate('/demo')}
               className="bg-brand hover:bg-brand-deep text-white text-xs font-semibold shadow-glow-sm"

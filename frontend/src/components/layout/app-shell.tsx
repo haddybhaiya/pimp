@@ -17,6 +17,8 @@ import {
   Menu,
   X,
   Database,
+  Bot,
+  FlaskConical,
 } from 'lucide-react';
 
 export interface AppShellProps {
@@ -34,6 +36,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
       title: 'OPERATE',
       items: [
         { label: 'Overview', path: '/dashboard', icon: LayoutDashboard },
+        { label: 'Merchant Agent', path: '/agent', icon: Bot, badge: 'AI' },
         { label: 'Approval Queue', path: '/approvals', icon: Clock },
         { label: 'Orders Ledger', path: '/orders', icon: ShoppingCart },
         { label: 'Payments', path: '/payments', icon: CreditCard },
@@ -50,6 +53,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
     {
       title: 'INSPECT',
       items: [
+        { label: 'Experiments', path: '/experiments', icon: FlaskConical },
         { label: 'Audit Trail (SHA-256)', path: '/audit', icon: FileText },
         { label: 'Simulation Sandbox', path: '/demo', icon: Sparkles, badge: 'Interactive' },
       ],

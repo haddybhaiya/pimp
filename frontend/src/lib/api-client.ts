@@ -15,6 +15,13 @@ import {
   DemoSimulationStepRequest,
   DemoSimulationStepResponse,
   DemoSeedResponse,
+  MerchantObservationSnapshot,
+  MerchantProposalItem,
+  MerchantProposalReviewPayload,
+  MerchantExperimentItem,
+  MerchantExperimentResultItem,
+  ExperimentCreatePayload,
+  MerchantAgentAnalyzeResponse,
 } from '@/types/portal';
 
 export class ApiError extends Error {
@@ -337,6 +344,55 @@ export class ApiClient {
       method: 'POST',
       headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
       body: JSON.stringify(payload),
+    });
+  }
+
+  // =========================================================================
+  // Phase 7 — Merchant Agent & Experiment Methods
+  // =========================================================================
+
+  async getAgentSnapshot(windowDays = 30): Promise<MerchantObservationSnapshot> {
+    return this.request<MerchantObservationSnapshot>(`/api/v1/merchant/agent/snapshot?window_days=${windowDays}`);
+  }
+
+  async runAgentAnalysis(): Promise<MerchantAgentAnalyzeResponse> {
+    return this.request<MerchantAgentAnalyzeResponse>('/api/v1/merchant/agent/analyze', {
+      method: 'POST',
+    });
+  }
+
+  async listProposals(status?: string): Promise<MerchantProposalItem[]> {
+    const query = status ? `?status_filter=${status}` : '';
+    return this.request<MerchantProposalItem[]>(`/api/v1/merchant/agent/proposals${query}`);
+  }
+
+  async reviewProposal(proposalId: string, payload: MerchantProposalReviewPayload): Promise<MerchantProposalItem> {
+    return this.request<MerchantProposalItem>(`/api/v1/merchant/agent/proposals/${proposalId}/review`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async createExperiment(payload: ExperimentCreatePayload): Promise<MerchantExperimentItem> {
+    return this.request<MerchantExperimentItem>('/api/v1/merchant/experiments', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async listExperiments(): Promise<MerchantExperimentItem[]> {
+    return this.request<MerchantExperimentItem[]>('/api/v1/merchant/experiments');
+  }
+
+  async approveExperiment(experimentId: string): Promise<MerchantExperimentItem> {
+    return this.request<MerchantExperimentItem>(`/api/v1/merchant/experiments/${experimentId}/approve`, {
+      method: 'POST',
+    });
+  }
+
+  async evaluateExperiment(experimentId: string): Promise<MerchantExperimentResultItem> {
+    return this.request<MerchantExperimentResultItem>(`/api/v1/merchant/experiments/${experimentId}/evaluate`, {
+      method: 'POST',
     });
   }
 
