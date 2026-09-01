@@ -40,6 +40,7 @@ Authoritative record of a merchant participating in the Agent-Ready platform.
 | `status` | `VARCHAR(32)` | No | `ACTIVE`, `PAUSED`, `SUSPENDED` | Merchant / Platform |
 | `currency` | `VARCHAR(3)` | No | ISO 4217 Currency Code (`INR`) | Platform |
 | `rzp_key_id` | `VARCHAR(128)` | No | Razorpay Test Key ID (`rzp_test_...`) | Merchant Admin |
+| `auth_user_id` | `UUID` | Yes | Unique verified InsForge Auth owner ID | Platform Auth Boundary |
 | `rzp_key_secret_enc` | `BYTEA` | No | Encrypted Razorpay Test Key Secret | Platform Vault |
 | `rzp_webhook_secret_enc` | `BYTEA` | No | Encrypted Webhook HMAC Secret | Platform Vault |
 | `created_at` | `TIMESTAMPTZ` | No | Record creation timestamp | Platform |

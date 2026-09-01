@@ -124,6 +124,16 @@
 - **FAILURE IF WRONG:** Migration failures, broken row-level inventory locks, race conditions during payment settlement, or audit chain forking under concurrent load.
 - **MITIGATION:** Standard SQLAlchemy PostgreSQL dialect with asyncpg, explicit SSL mode (`sslmode=require`), transactional Alembic DDL, and row-level `FOR UPDATE` locks on inventory and merchant audit records.
 
+---
+
+### 13. InsForge Auth Identity Verification
+- **ASSUMPTION:** InsForge verifies email/password credentials and its current-session endpoint returns the authenticated user ID and verified email only for a valid bearer token.
+- **EVIDENCE:** Browser signup/login uses the supported `@insforge/sdk` Auth methods; FastAPI validates the bearer token at the InsForge current-session endpoint before binding or authenticating a merchant.
+- **STATUS:** **IMPLEMENTED — external integration verification required**
+- **CONFIDENCE:** 90%
+- **FAILURE IF WRONG:** Legitimate merchants cannot establish a session, or an identity could be incorrectly linked.
+- **MITIGATION:** Fail closed on every token verification failure, require signup email equality with the verified identity, enforce a unique `merchants.auth_user_id`, and retain the existing secure cookie boundary for control-plane access.
+
 
 
 

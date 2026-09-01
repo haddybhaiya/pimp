@@ -245,6 +245,17 @@
   - *Positive:* Full feature parity and invariant compliance on production-grade cloud PostgreSQL with zero architectural compromises.
   - *Negative:* Requires SSL connection parameters (`sslmode=require`) and network accessibility to the InsForge database host.
 
+---
+
+## ADR-019: InsForge-Backed Persistent Merchant Identity
+
+- **Status:** ACCEPTED
+- **Context:** A store slug and Razorpay key identify a merchant configuration but cannot prove who owns it. The prior browser session refresh mechanism therefore could not support a secure login after logout or session expiry.
+- **Decision:** Use InsForge Auth as the browser identity provider. A verified InsForge user ID is bound once to `merchants.auth_user_id` under a unique database constraint. The backend validates the short-lived InsForge bearer token server-side before issuing its existing `HttpOnly`, `SameSite=Strict` merchant session cookie. Slugs remain public identifiers and are never login credentials.
+- **Consequences:**
+  - *Positive:* Merchants sign up once with email/password and can securely return without Razorpay credentials or browser-stored administrator tokens.
+  - *Negative:* Existing merchants created before this binding require an explicit owner-linking migration before they can use InsForge login.
+
 
 
 

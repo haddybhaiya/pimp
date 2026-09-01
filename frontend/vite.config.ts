@@ -4,6 +4,10 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 
 export default defineConfig({
+  // The project keeps non-committed browser configuration in the repository
+  // root alongside the FastAPI configuration.  Vite otherwise only loads
+  // files from `frontend/`, leaving InsForge Auth unavailable at runtime.
+  envDir: '..',
   plugins: [react()],
   resolve: {
     alias: {
