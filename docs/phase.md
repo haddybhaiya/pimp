@@ -1,8 +1,8 @@
 # Phase Status & Roadmap: Agent-Ready Merchant
 
-> **Current Phase:** Phase 5 (Web Control Plane, Merchant Portal & Demo Hardening)  
+> **Current Phase:** Phase 7 (Merchant Agent — Intelligence & Optimization Layer)  
 > **Status:** 100% COMPLETED & SIGNED OFF  
-> **Milestone Status:** Phase 5.1, Phase 5.2 & Phase 5.3 Complete
+> **Milestone Status:** Phase 1–5 Complete, Phase 6 Skipped (Satisfied), Phase 7 Complete
 
 ---
 
@@ -28,29 +28,42 @@
 | **Phase 5.1** | Web Foundation & Public Surface | **COMPLETED** | Public landing page, merchant authentication, setup wizard, authenticated SPA shell, responsive component tokens, typed API client, error normalization |
 | **Phase 5.2** | Merchant Admin Portal Views & HITL Operations | **COMPLETED** | Approvals UI, catalog editor, inventory manager, orders & settlements, policy config, audit viewer |
 | **Phase 5.3** | Demo Sandbox & Integration Hardening | **COMPLETED** | Interactive simulation sandbox (`/demo`), standard auto commerce, HITL escalation workbench, payment reconciliation, adversarial attack defense matrix |
+| **Phase 6** | Autonomous Negotiation Layer | **SKIPPED — FUNCTIONALITY SATISFIED BY EARLIER PHASES** | Counter-offer evaluation, floor price enforcement, margin protections, and HITL escalations fully implemented and verified in Phases 1–5 |
+| **Phase 7** | Merchant Agent (Intelligence & Optimization Layer) | **COMPLETED** | Live commerce observation matrix, diagnostic finding engine, evidence-backed proposal generation, server risk governance, approval-first experiment framework, deterministic measurement |
 
 ---
 
-## Phase 5.3 Deliverables Completed
+## Phase 7 Deliverables Completed
 
-- [x] **Interactive Simulation Sandbox UI (`/demo`):** Production-grade sandbox workbench allowing merchants and evaluators to trigger real end-to-end commerce lifecycles with deterministic data.
-- [x] **Standard Autonomous Flow Demonstration:** Buyer session initiation -> product discovery -> quote generation -> deterministic policy approval (`ALLOW`) -> order creation -> Razorpay webhook simulation (`payment.captured`) -> order settlement (`PAID`) -> inventory deduction -> immutable cryptographic audit logging.
-- [x] **Human-In-The-Loop (HITL) Escalation Flow Demonstration:** Buyer discount request in Supervised HITL mode -> policy escalation (`ESCALATE_APPROVAL`) -> stateful `MerchantApproval` ticket creation -> real-time resolution in `/approvals` queue -> quote update.
-- [x] **Out-of-Band Payment Reconciliation Demonstration:** Dropped webhook simulation and server-authoritative reconciliation against Razorpay.
-- [x] **Authoritative Demo Backend Service (`DemoSimulatorService`):** Deterministic execution endpoints (`POST /api/v1/merchant/demo/simulate`, `POST /api/v1/merchant/demo/seed`) operating directly against real domain models, state machines, and cryptographic verification pipelines.
-- [x] **Adversarial Security Attack Verification:** Active verification against 10 attack vectors:
-  - Forged Merchant IDs & token tampering
-  - Forged capabilities & unauthorized privilege escalation
-  - Modified prices & floor price guarantees
-  - Cross-merchant resource access & entity ID snooping
-  - Duplicate submission & idempotency protection
-  - Cryptographic HMAC webhook validation & replay prevention
-  - Zero secret leakage in API responses
-- [x] **Comprehensive Test Verification Matrix:**
-  - Frontend: 26 unit and integration tests passing in Vitest across 7 test files (`api-client.test.ts`, `auth-store.test.tsx`, `ui-components.test.tsx`, `onboarding.test.tsx`, `demo-view.test.tsx`, `portal-views.test.tsx`, `router.test.tsx`).
-  - Frontend Build: Production bundle compiled cleanly to `src/agent_ready_merchant/static/`.
-  - Backend: 257 passing tests across all test suites in pytest (2 skipped, 84% coverage).
-- [x] **Full Quality Gate Compliance:** 100% clean passes on `ruff format`, `ruff check`, `mypy (strict)`, Vitest (26 tests), and Pytest (257 tests).
-
-
-
+- [x] **Authoritative Merchant Observation Layer (`MerchantAgentService.build_authoritative_observations`):**
+  - Collects live commerce telemetry from PostgreSQL directly (sessions, intents, quotes, orders, payments, approvals, inventory).
+  - Explicitly categorizes telemetry into `OBSERVED`, `DERIVED`, and `ESTIMATED`.
+  - Enforces strict tenant scoping (`merchant_id`).
+  - Zero fabricated telemetry; integer paise representation for monetary metrics.
+- [x] **Bounded Intelligence Snapshot & Delimited Prompts:**
+  - Packages tenant metadata, active policies, catalog stats, telemetry metrics, context signals, and recent experiments.
+  - Zero credentials, secrets, or buyer PII exposed to LLM context (`INV-AGY-03`).
+- [x] **Diagnostic Finding Engine:**
+  - Structured output diagnosing recurring friction patterns (`REPEATED_DELIVERY_QUESTIONS`, `MISSING_PRODUCT_INFO`, `CHECKOUT_FRICTION`, `INVENTORY_LOST_DEMAND`, etc.).
+  - Explicit evidence references linked to actual telemetry metrics.
+- [x] **Evidence-Backed Proposal Generation:**
+  - Generates structured proposals (`IMPROVE_PRODUCT_DESCRIPTION`, `EXPOSE_DELIVERY_ETA`, `REORDER_RECOMMENDATIONS`, `IMPROVE_DISCOVERY_METADATA`, `SUGGEST_BUNDLE`, `SUGGEST_PROMOTIONAL_OFFER`, `SUGGEST_BOUNDED_EXPERIMENT`).
+  - Strict Pydantic schema validation (`MerchantProposalCreate`).
+- [x] **Server-Authoritative Risk & Governance Classification (`govern_and_classify_proposal`):**
+  - Prohibits unauthorized actions (`PROHIBITED`): attempts to alter policy, modify floor prices, grant capabilities, or execute direct payments/refunds.
+  - Classifies low-risk reversible proposals as `LOW_RISK_REVERSIBLE` and promotional offers as `APPROVAL_REQUIRED`.
+- [x] **Approval-First Experiment Framework (`MerchantExperiment`, `MerchantExperimentResult`):**
+  - Durable database models and migration `008_merchant_agent_and_experiments.py`.
+  - Complete lifecycle: `DRAFT` / `PROPOSED` $\to$ `APPROVAL_REQUIRED` $\to$ `APPROVED` $\to$ `COMPLETED` / `ROLLED_BACK`.
+  - Phase 7 does NOT autonomously execute production changes (strictly reserved for Phase 8).
+- [x] **Deterministic Experiment Measurement Engine:**
+  - Computes post-experiment metrics, absolute change, percentage change, and sample sizes strictly from database observations.
+  - Deterministically recommends `KEEP`, `ROLLBACK`, or `INCONCLUSIVE` (based on sample size $\ge 5$ and delta thresholds).
+- [x] **Web Control Plane Integration:**
+  - Dedicated Merchant Agent optimization hub (`frontend/src/pages/agent.tsx`) and Experiments workbench (`frontend/src/pages/experiments.tsx`).
+  - Full API endpoints (`/api/v1/merchant/agent/*`, `/api/v1/merchant/experiments/*`) protected by `_require_merchant_auth`.
+- [x] **Cryptographic Audit Ledger Linkage:**
+  - Logs immutable SHA-256 audit events for `MERCHANT_AGENT_RUN_COMPLETED`, `MERCHANT_PROPOSAL_REVIEWED`, `MERCHANT_EXPERIMENT_CREATED`, `MERCHANT_EXPERIMENT_APPROVED`, `MERCHANT_EXPERIMENT_EVALUATED`.
+- [x] **Comprehensive Test Suite & Quality Gate Compliance:**
+  - 10 comprehensive tests in `tests/test_phase7_merchant_agent.py` covering multi-tenant scoping, evidence validation, adversarial prompt injection safety, proposal governance, and deterministic experiment evaluation.
+  - 100% clean passes on Ruff, Mypy strict, Vitest, and Pytest.

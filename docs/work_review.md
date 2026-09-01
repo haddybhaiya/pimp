@@ -2,6 +2,39 @@
 
 ---
 
+# Review 11: Validated Deferred Phase 5 Follow-ups
+
+> **Reviewed on:** 2026-09-01
+> **Scope:** Read-only validation of AI-generated findings against the current Phase 5 implementation. The items below are confirmed gaps and intentionally deferred; no remediation was applied in this review.
+
+## Open Findings
+
+### 1. P1 — Demo simulation can consume live catalog inventory
+
+[`demo_simulator_service.py`](../src/agent_ready_merchant/services/demo_simulator_service.py): `execute_simulation` selects from all active merchant products, including a caller-supplied live SKU, when demo products have not first been seeded. The real settlement flow then deducts the selected inventory.
+
+**Required remediation:** Restrict simulation to explicitly demo-seeded products/inventory (or an isolated demo tenant) and reject live SKUs. Add a regression test proving a simulation cannot mutate a normal catalog item.
+
+### 2. P2 — Audit viewer cannot retrieve older ledger entries
+
+[`audit.tsx`](../frontend/src/pages/audit.tsx): the page requests the newest 50 events and transparently reports the total count, but provides no pagination or “load more” control.
+
+**Required remediation:** Extend the audit endpoint/client with a cursor or page/limit contract and provide a way to retrieve older immutable events.
+
+### 3. P2 — Platform transaction ceiling is not enforced at the setup API boundary
+
+[`merchant_auth.py`](../src/agent_ready_merchant/schemas/merchant_auth.py) and [`merchant_auth_service.py`](../src/agent_ready_merchant/services/merchant_auth_service.py): the onboarding UI rejects values above ₹1,00,000, but a direct setup request can persist a higher merchant transaction limit because the schema allows up to the 64-bit maximum.
+
+**Required remediation:** Enforce the platform maximum in the request schema/service, with boundary and direct-API tests.
+
+### 4. P2 — Expired approval transition can roll back
+
+[`merchant_portal_service.py`](../src/agent_ready_merchant/services/merchant_portal_service.py): `resolve_approval` sets an expired pending ticket to `EXPIRED`, flushes, then raises a `ValueError`. The request transaction rolls back on that error, leaving the stored ticket `PENDING`.
+
+**Required remediation:** Persist the expiry transition and required audit event before returning the client error, without weakening approval state-machine checks.
+
+---
+
 # Review 4: Phase 3 — End-to-End Payment Boundary, Reliability & Verification (`main..phs3`)
 
 > **Reviewed on:** 2026-08-27
@@ -744,6 +777,40 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 - **Root Cause & Fix:** Previously, when a buyer submitted a revised counter-offer while an earlier approval ticket remained `PENDING`, the branch returned the existing ticket without updating its terms. The gateway now distinguishes identical retries (which return the existing pending ticket idempotently) from revised counter-offers (which update `existing_appr.requested_amount_paise`, `existing_appr.proposed_discount_paise`, `existing_appr.policy_decision_hash`, `existing_appr.policy_rule_code`, `existing_appr.reason`, advance `quote.version += 2`, and emit a `MERCHANT_APPROVAL_TERMS_UPDATED` `AuditEvent`).
 - **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_duplicate_negotiation_escalation_deduplicated` (adversarial verification of updated proposal terms on active pending tickets).
 
+---
 
+# Review 11: Phase 7 — Merchant Agent Intelligence & Optimization Layer
 
+> **Reviewed on:** 2026-09-01
+> **Scope:** Phase 7 Merchant-Side Intelligence, Authoritative PostgreSQL Observation Matrix, Diagnostic Engine, Proposal Generation, Server-Authoritative Risk Governance, Approval-First Experimentation Framework, Deterministic Measurement Engine, and Control Plane Integration (`/agent`, `/experiments`).
+> **Verification:** Full test suite green (277 passed, 3 skipped in pytest; 27 passed in Vitest), `ruff check` clean (0 errors), `ruff format` clean, `mypy --strict` clean, frontend production build 100% clean.
 
+---
+
+## 1. Architectural Architecture & Core Invariant Enforcement
+
+1. **Separation of Intelligence from Authority ($\text{Intelligence} \neq \text{Authority}$, `INV-AGY-01`):**
+   - Implemented `MerchantAgentService` (`src/agent_ready_merchant/services/merchant_agent_service.py`) executing the explicit lifecycle:
+     `OBSERVE → DIAGNOSE → FORM HYPOTHESIS → PROPOSE → ESTIMATE → MEASURE`.
+   - The LLM acts purely as an untrusted reasoning engine emitting structured `MerchantDiagnosisItem` and `MerchantProposalCreate` objects.
+   - Prohibited actions (altering policies, changing floor prices, granting capabilities, executing direct payments/refunds) are intercepted server-side by `govern_and_classify_proposal()` and marked `PROHIBITED` / `REJECTED`.
+
+2. **Authoritative PostgreSQL Observation Layer:**
+   - Queries real PostgreSQL tables (`merchants`, `policy_rules`, `products`, `product_variants`, `inventory_items`, `buyer_agent_sessions`, `buyer_intents`, `price_quotes`, `orders`, `payment_attempts`, `merchant_approvals`).
+   - Categorizes metrics strictly into:
+     - `OBSERVED`: Raw counts and realized amounts (e.g. `total_buyer_sessions`, `completed_orders`, `total_revenue_paise`, `failed_payments_count`, `out_of_stock_skus_count`).
+     - `DERIVED`: Deterministic formulas (e.g. `quote_conversion_rate`, `aov_paise`, `quote_acceptance_rate`, `cart_abandonment_rate`).
+     - `ESTIMATED`: Bounded loss projections (e.g. `estimated_lost_demand_paise`).
+   - All metrics are integer paise representation for currency and strictly tenant-scoped (`merchant_id`).
+
+3. **Approval-First Experiment Framework (`MerchantExperiment`, `MerchantExperimentResult`):**
+   - Alembic migration `008_merchant_agent_and_experiments.py` adds tables for `merchant_proposals`, `merchant_experiments`, and `merchant_experiment_results`.
+   - Experiments start in `APPROVAL_REQUIRED` / `approval_status = "PENDING"`. Autonomous production execution is strictly forbidden in Phase 7.
+   - Deterministic measurement calculates post-experiment deltas from PostgreSQL telemetry and produces recommendations (`KEEP` for $\ge +5\%$ with sample $\ge 5$, `ROLLBACK` for $< -2\%$, `INCONCLUSIVE` otherwise).
+
+4. **Cryptographic Audit Hash Chain Linkage:**
+   - Every agent run, proposal review, experiment registration, approval, and evaluation emits an append-only cryptographic `AuditEvent` verified via `AuditEvent.verify_chain()`.
+
+5. **Web Control Plane Surface:**
+   - Built interactive frontend pages `frontend/src/pages/agent.tsx` and `frontend/src/pages/experiments.tsx`.
+   - Added REST endpoints in `src/agent_ready_merchant/main.py` protected by `_require_merchant_auth`.

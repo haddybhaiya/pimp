@@ -174,3 +174,20 @@ graph LR
 - **Golden Path:** Verified from Buyer prompt $\to$ LLM $\to$ Intent $\to$ Gateway $\to$ Policy $\to$ Quote $\to$ Order $\to$ Razorpay $\to$ Webhook $\to$ Settlement $\to$ Audit.
 - **Deliberate Failure Matrix:** 16 critical failure scenarios verified with zero unsafe side effects.
 - **Phase Gate Status:** **PASS** (Ready to proceed to Phase 2).
+
+---
+
+## 4. Phase 7 Merchant Agent Verification Results Summary
+
+- **Total Backend Pytest Tests:** 277 passed, 3 skipped (live sandbox testmode skipped in CI)
+- **Total Frontend Vitest Tests:** 27 passed across 7 test suites
+- **Frontend Production Build:** 100% clean TypeScript compilation and Vite bundling
+- **Ruff Lint & Format:** 100% clean (0 issues)
+- **Mypy Static Typing:** 100% strict compliance (0 errors)
+- **Authoritative Observation Telemetry:** Direct database metrics aggregation with explicit `OBSERVED`, `DERIVED`, and `ESTIMATED` categorizations and strict tenant scoping verified.
+- **Intelligence $\neq$ Authority Invariant:** Server-authoritative classification deterministically intercepts and marks prohibited actions (`PROHIBITED`), preventing any price, policy, or capability mutation.
+- **Approval-First Experiment Framework:** Durable experiment lifecycle verified with mandatory administrative approval gate (`approval_status = "PENDING"` $\to$ `APPROVED`).
+- **Server-Authoritative Measurement:** Experiment outcomes computed deterministically from PostgreSQL telemetry; recommendations (`KEEP`, `ROLLBACK`, `INCONCLUSIVE`) adhere strictly to sample size and delta thresholds.
+- **Multi-Tenant Isolation:** Cross-tenant proposal access and review attempts fail closed with HTTP 404.
+- **Phase Gate Status:** **PASS (100% SIGNED OFF)**
+

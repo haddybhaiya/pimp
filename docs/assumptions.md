@@ -134,6 +134,17 @@
 - **FAILURE IF WRONG:** Legitimate merchants cannot establish a session, or an identity could be incorrectly linked.
 - **MITIGATION:** Fail closed on every token verification failure, require signup email equality with the verified identity, enforce a unique `merchants.auth_user_id`, and retain the existing secure cookie boundary for control-plane access.
 
+---
+
+### 14. Merchant Agent Intelligence Separation & Server-Authoritative Experiment Measurement
+- **ASSUMPTION:** The Merchant Agent must never have direct authority to alter financial policies, change floor prices, grant capabilities, or execute financial transactions. All optimization proposals must pass server-authoritative risk governance, require human merchant review, and experiment outcomes must be computed deterministically from PostgreSQL telemetry rather than LLM generation.
+- **EVIDENCE:** Verified via `tests/test_phase7_merchant_agent.py` (all 10 multi-tenant scoping, evidence validation, adversarial prompt injection defense, proposal governance, and deterministic measurement tests passing).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Model hallucinations could alter live pricing, bypass merchant floor limits, fabricate experiment results, or execute unapproved production mutations.
+- **MITIGATION:** Explicit `OBSERVE → DIAGNOSE → FORM HYPOTHESIS → PROPOSE → ESTIMATE → MEASURE` lifecycle; server-authoritative `govern_and_classify_proposal()` marking price/policy changes `PROHIBITED`; approval-first experiment registration (`approval_status = "PENDING"`); and deterministic PostgreSQL formula evaluation of experiment deltas and recommendations (`KEEP`, `ROLLBACK`, `INCONCLUSIVE`).
+
+
 
 
 

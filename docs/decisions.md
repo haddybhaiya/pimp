@@ -256,6 +256,25 @@
   - *Positive:* Merchants sign up once with email/password and can securely return without Razorpay credentials or browser-stored administrator tokens.
   - *Negative:* Existing merchants created before this binding require an explicit owner-linking migration before they can use InsForge login.
 
+---
+
+## ADR-020: Merchant Agent Intelligence Separation & Approval-First Experimentation Framework
+
+- **Status:** ACCEPTED
+- **Context:** Optimizing merchant storefronts (product descriptions, delivery ETA visibility, discovery metadata, recommendation ordering, bundle offerings) requires AI-assisted diagnosis and proposal generation. However, giving an LLM autonomous authority to directly change prices, alter financial policies, grant capabilities, or execute financial transactions violates fundamental financial safety invariants ($\text{Intelligence} \neq \text{Authority}$, `INV-AGY-01`, `INV-AGY-05`).
+- **Decision:**
+  1. **Intelligence $\neq$ Authority Lifecycle:** The Merchant Agent follows an explicit lifecycle: `OBSERVE → DIAGNOSE → FORM HYPOTHESIS → PROPOSE → ESTIMATE → MEASURE`. It acts strictly as an untrusted proposal engine for human review.
+  2. **Authoritative PostgreSQL Observation Layer:** Telemetry metrics are queried directly from database records, strictly tenant-scoped, and explicitly categorized into `OBSERVED` (raw counts), `DERIVED` (deterministic formulas), and `ESTIMATED` (bounded lost demand projections).
+  3. **Zero Secret & PII Leakage in Snapshot Context:** Snapshot context excludes credentials, Razorpay secrets, auth tokens, and sanitizes buyer emails before presenting context to the LLM (`INV-AGY-03`).
+  4. **Server-Authoritative Risk Classification:** The backend deterministically evaluates all model proposals. Any proposal attempting to change floor prices, alter policies, grant capabilities, or execute payments is immediately marked `PROHIBITED` and rejected.
+  5. **Approval-First Experiment Framework:** Durable database entities (`MerchantExperiment`, `MerchantExperimentResult`) require explicit merchant administrative approval (`approval_status = "PENDING"` $\to$ `APPROVED`) before test activation. Autonomous production mutation is strictly forbidden in Phase 7.
+  6. **Server-Computed Deterministic Measurement:** Post-experiment metric changes, sample sizes, and recommendations (`KEEP`, `ROLLBACK`, `INCONCLUSIVE`) are computed deterministically from PostgreSQL telemetry; the model cannot hallucinate or fabricate measurement results.
+  7. **Immutable Audit Ledger Linkage:** Every agent run, proposal review, experiment creation, approval, and evaluation is recorded in the append-only cryptographic `audit_events` ledger.
+- **Consequences:**
+  - *Positive:* Unlocks merchant-side AI optimization while maintaining airtight financial invariants, zero secret leakage, and full administrative control.
+  - *Negative:* All proposals and experiments require human review and consent prior to production activation.
+
+
 
 
 
