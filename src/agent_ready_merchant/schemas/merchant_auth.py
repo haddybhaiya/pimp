@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from agent_ready_merchant.gateway.constants import (
     COMMERCE_PROTOCOL_VERSION,
-    MAX_64BIT_INT,
+    PLATFORM_MAX_SINGLE_TRANSACTION_PAISE,
 )
 
 
@@ -50,7 +50,7 @@ class MerchantSignupRequest(BaseModel):
     max_single_transaction_paise: int = Field(
         default=5_000_000,
         ge=100,
-        le=MAX_64BIT_INT,
+        le=PLATFORM_MAX_SINGLE_TRANSACTION_PAISE,
         description="Maximum single transaction ceiling in paise",
     )
 
@@ -120,7 +120,11 @@ class MerchantSetupRequest(BaseModel):
     autonomy_level: int = Field(default=1, ge=0, le=2)
     max_discount_percentage: float = Field(default=15.0, ge=0.0, le=50.0)
     min_margin_percentage: float = Field(default=20.0, ge=0.0, le=100.0)
-    max_single_transaction_paise: int = Field(default=5_000_000, ge=100, le=MAX_64BIT_INT)
+    max_single_transaction_paise: int = Field(
+        default=5_000_000,
+        ge=100,
+        le=PLATFORM_MAX_SINGLE_TRANSACTION_PAISE,
+    )
 
 
 class MerchantProfileResponse(BaseModel):

@@ -6,7 +6,17 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -154,6 +164,7 @@ class MerchantExperimentResult(Base):
             "sample_size >= 0",
             name="ck_merchant_experiment_results_sample_non_negative",
         ),
+        UniqueConstraint("experiment_id", name="uq_merchant_experiment_results_experiment"),
         Index("ix_merchant_exp_results_merchant_exp", "merchant_id", "experiment_id"),
     )
 

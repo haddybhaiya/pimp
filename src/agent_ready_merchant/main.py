@@ -1283,13 +1283,21 @@ def create_app() -> FastAPI:
     )
     async def get_audit_ledger_endpoint(
         limit: int = 50,
+        offset: int = 0,
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> AuditLedgerResponse:
         await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
-        return await MerchantPortalService.get_audit_ledger(db, x_merchant_id, limit=limit)
+        if not 1 <= limit <= 100 or offset < 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Audit pagination must use a limit from 1 to 100 and a non-negative offset.",
+            )
+        return await MerchantPortalService.get_audit_ledger(
+            db, x_merchant_id, limit=limit, offset=offset
+        )
 
     # =========================================================================
     # Interactive Demo & Sandbox Simulator Endpoints (Phase 5.3)
@@ -1402,58 +1410,84 @@ def create_app() -> FastAPI:
     async def run_agent_analysis_endpoint(
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> MerchantAgentAnalyzeResponse:
         await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
-
-        # Provider initialization
-        llm_instance: BaseLLMProvider
-        if current_settings.is_testing or not current_settings.GROQ_API_KEY.get_secret_value():
-            from agent_ready_merchant.llm.mock_provider import MockLLMProvider
-
-            mock_response_payload = {
-                "diagnoses": [
-                    {
-                        "pattern": "REPEATED_DELIVERY_QUESTIONS",
-                        "summary": "Buyer agents frequently inquire about delivery timeline.",
-                        "severity": "MEDIUM",
-                        "evidence_references": ["total_buyer_sessions", "quote_conversion_rate"],
-                        "affected_entities": ["discovery_metadata"],
-                    }
-                ],
-                "proposals": [
-                    {
-                        "proposal_type": "EXPOSE_DELIVERY_ETA",
-                        "title": "Expose Delivery ETA in Discovery Response",
-                        "observation": "34% of buyer inquiries request delivery ETA before quotes.",
-                        "evidence": ["total_buyer_sessions", "quote_conversion_rate"],
-                        "hypothesis": "Clear ETA will reduce hesitation and boost conversion.",
-                        "proposed_change": "Include delivery window in discovery response.",
-                        "target_entity": "discovery_metadata",
-                        "expected_effect": "Quote conversion rate expected to increase by 8-15%.",
-                        "expected_metric": "quote_conversion_rate",
-                        "confidence": 0.85,
-                        "estimated_cost_paise": 0,
-                    }
-                ],
-            }
-            llm_instance = MockLLMProvider(responses=[json.dumps(mock_response_payload)])
-        else:
-            from agent_ready_merchant.llm.groq_provider import GroqProvider
-
-            llm_instance = GroqProvider(
-                api_key=current_settings.GROQ_API_KEY.get_secret_value(),
-                model=current_settings.LLM_MODEL_NAME,
-            )
-
         try:
-            return await MerchantAgentService.execute_agent_run(
+            receipt, replay = await MerchantMutationIdempotencyService.claim_or_replay(
+                db,
+                merchant_id=x_merchant_id,
+                operation="merchant_agent.analyze",
+                idempotency_key=x_idempotency_key,
+                payload={},
+            )
+            if replay is not None:
+                return MerchantAgentAnalyzeResponse.model_validate(replay)
+
+            # Provider initialization
+            llm_instance: BaseLLMProvider | None
+            if current_settings.is_testing:
+                from agent_ready_merchant.llm.mock_provider import MockLLMProvider
+
+                mock_response_payload = {
+                    "diagnoses": [
+                        {
+                            "pattern": "REPEATED_DELIVERY_QUESTIONS",
+                            "summary": "Buyer agents frequently inquire about delivery timeline.",
+                            "severity": "MEDIUM",
+                            "evidence_references": [
+                                "total_buyer_sessions",
+                                "quote_conversion_rate",
+                            ],
+                            "affected_entities": ["discovery_metadata"],
+                        }
+                    ],
+                    "proposals": [
+                        {
+                            "proposal_type": "EXPOSE_DELIVERY_ETA",
+                            "title": "Expose Delivery ETA in Discovery Response",
+                            "observation": "Delivery-timeline questions appear in the snapshot.",
+                            "evidence": ["total_buyer_sessions", "quote_conversion_rate"],
+                            "hypothesis": "Clear ETA will reduce hesitation and boost conversion.",
+                            "proposed_change": "Include delivery window in discovery response.",
+                            "target_entity": "discovery_metadata",
+                            "expected_effect": "Quote conversion rate may improve.",
+                            "expected_metric": "quote_conversion_rate",
+                            "confidence": 0.85,
+                            "estimated_cost_paise": 0,
+                        }
+                    ],
+                }
+                llm_instance = MockLLMProvider(responses=[json.dumps(mock_response_payload)])
+            elif not current_settings.GROQ_API_KEY.get_secret_value():
+                # Missing provider configuration must never turn into fabricated
+                # intelligence. The service returns the authoritative snapshot only.
+                llm_instance = None
+            else:
+                from agent_ready_merchant.llm.groq_provider import GroqProvider
+
+                llm_instance = GroqProvider(
+                    api_key=current_settings.GROQ_API_KEY.get_secret_value(),
+                    model=current_settings.LLM_MODEL_NAME,
+                )
+
+            result = await MerchantAgentService.execute_agent_run(
                 session=db,
                 merchant_id=x_merchant_id,
                 llm_provider=llm_instance,
                 settings=current_settings,
             )
+            assert receipt is not None
+            await MerchantMutationIdempotencyService.complete(
+                db, receipt, result.model_dump(mode="json")
+            )
+            return result
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

@@ -334,20 +334,31 @@ class DemoSimulatorService:
         if not merchant:
             raise ValueError(f"Merchant '{merchant_id}' not found.")
 
-        # Ensure demo products exist
+        # Simulations are restricted to explicit demo records.  The real checkout
+        # and settlement path intentionally changes inventory, so accepting a
+        # merchant's production SKU here would mutate live stock.
         prod_stmt = select(Product).where(
-            Product.merchant_id == merchant_id, Product.is_active.is_(True)
+            Product.merchant_id == merchant_id,
+            Product.is_active.is_(True),
         )
-        products = list((await session.execute(prod_stmt)).scalars().all())
+        products = [
+            product
+            for product in (await session.execute(prod_stmt)).scalars().all()
+            if (product.attributes or {}).get("demo_seeded") is True
+        ]
         if not products:
             await cls.seed_demo_catalog_and_policies(session, merchant_id)
-            products = list((await session.execute(prod_stmt)).scalars().all())
+            products = [
+                product
+                for product in (await session.execute(prod_stmt)).scalars().all()
+                if (product.attributes or {}).get("demo_seeded") is True
+            ]
 
         target_product = products[0]
         if req.sku:
             selected_product = next((p for p in products if p.sku == req.sku), None)
             if selected_product is None:
-                raise ValueError(f"Active SKU '{req.sku}' was not found for this merchant.")
+                raise ValueError(f"Demo SKU '{req.sku}' was not found for this merchant.")
             target_product = selected_product
 
         # Fetch purchasable variant and lock inventory row to prevent overselling

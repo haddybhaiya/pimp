@@ -11,6 +11,7 @@ from agent_ready_merchant.constants import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     MAX_64BIT_INT,
     MIN_64BIT_INT,
+    PLATFORM_MAX_SINGLE_TRANSACTION_PAISE,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "DEFAULT_MAX_PAYLOAD_BYTES",
     "MAX_64BIT_INT",
     "MIN_64BIT_INT",
+    "PLATFORM_MAX_SINGLE_TRANSACTION_PAISE",
 ]
