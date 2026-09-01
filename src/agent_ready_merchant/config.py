@@ -40,6 +40,10 @@ class Settings(BaseSettings):
         default=SecretStr("default-insecure-secret-key-change-in-production"),
         description="Application secret key used for session/JWT signing",
     )
+    INSFORGE_AUTH_BASE_URL: str | None = Field(
+        default=None,
+        description="InsForge project URL used to verify browser access tokens",
+    )
 
     # --------------------------------------------------------------------------
     # 2. Database Configuration (PostgreSQL 16+ / SQLite for isolated tests)

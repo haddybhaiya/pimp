@@ -40,6 +40,7 @@ Authoritative record of a merchant participating in the Agent-Ready platform.
 | `status` | `VARCHAR(32)` | No | `ACTIVE`, `PAUSED`, `SUSPENDED` | Merchant / Platform |
 | `currency` | `VARCHAR(3)` | No | ISO 4217 Currency Code (`INR`) | Platform |
 | `rzp_key_id` | `VARCHAR(128)` | No | Razorpay Test Key ID (`rzp_test_...`) | Merchant Admin |
+| `auth_user_id` | `UUID` | Yes | Unique verified InsForge Auth owner ID | Platform Auth Boundary |
 | `rzp_key_secret_enc` | `BYTEA` | No | Encrypted Razorpay Test Key Secret | Platform Vault |
 | `rzp_webhook_secret_enc` | `BYTEA` | No | Encrypted Webhook HMAC Secret | Platform Vault |
 | `created_at` | `TIMESTAMPTZ` | No | Record creation timestamp | Platform |
@@ -225,6 +226,24 @@ Cryptographically tamper-evident event log.
 | `prev_event_hash` | `VARCHAR(64)` | No | SHA-256 hash of prior log entry | Platform Engine |
 | `event_hash` | `VARCHAR(64)` | No | SHA-256 hash of this entry | Platform Engine |
 | `created_at` | `TIMESTAMPTZ` | No | Immutable timestamp | Platform |
+
+---
+
+### 2.12 MerchantMutationReceipt (`merchant_mutation_receipts`)
+Durable replay receipt for direct merchant control-plane mutations. The composite
+unique key prevents a retry from applying inventory or simulation effects twice.
+
+| Field | Type | Nullable | Description | Authority |
+|---|---|---|---|---|
+| `id` | `UUID` | No | Primary key | Platform |
+| `merchant_id` | `UUID` | No | Foreign key -> `merchants.id` | Platform |
+| `operation` | `VARCHAR(128)` | No | Mutation capability, e.g. `inventory.adjust` | Platform |
+| `idempotency_key` | `VARCHAR(255)` | No | Caller-provided replay key; unique per merchant/operation | Caller / Platform validates |
+| `payload_hash` | `VARCHAR(64)` | No | SHA-256 of canonical request payload | Platform |
+| `response_body` | `JSONB` | Yes | Completed authoritative response for an identical retry | Platform |
+| `response_status` | `INTEGER` | Yes | Completed HTTP status | Platform |
+| `created_at` | `TIMESTAMPTZ` | No | Claim timestamp | Platform |
+| `updated_at` | `TIMESTAMPTZ` | No | Completion timestamp | Platform |
 
 ---
 

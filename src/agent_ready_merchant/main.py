@@ -5,11 +5,14 @@ Establishes the deterministic application lifecycle for the Agent-Ready Merchant
 
 import logging
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,9 +31,13 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     WebhookReplayError,
     WebhookTimestampError,
 )
+from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.services.payment_service import PaymentService
 
 logger = logging.getLogger("agent_ready_merchant")
+
+ADMIN_SESSION_COOKIE = "arm_admin_session"
+ADMIN_SESSION_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 class CreateOrderFromQuoteRequest(BaseModel):
@@ -71,6 +78,23 @@ def create_app() -> FastAPI:
         debug=settings.DEBUG,
     )
 
+    @app.middleware("http")
+    async def attach_admin_session_cookie(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        """Use an HttpOnly browser session without exposing it to SPA JavaScript."""
+        if (
+            request.url.path.startswith("/api/v1/merchant/")
+            and "x-auth-token" not in request.headers
+        ):
+            admin_session = request.cookies.get(ADMIN_SESSION_COOKIE)
+            if admin_session:
+                request.scope["headers"] = [
+                    *request.scope["headers"],
+                    (b"x-auth-token", admin_session.encode("latin-1")),
+                ]
+        return await call_next(request)
+
     @app.get(
         "/health",
         summary="Service Health Check",
@@ -94,19 +118,31 @@ def create_app() -> FastAPI:
             "service": "agent-ready-merchant",
             "version": agent_ready_merchant.__version__,
             "environment": current_settings.ENVIRONMENT,
+            "application_alive": True,
+            "database_reachable": db_healthy,
             "database_connected": db_healthy,
+            "configuration_valid": True,
         }
+
+    static_dir = Path(__file__).parent / "static"
+    if (static_dir / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="assets")
 
     @app.get(
         "/",
-        summary="Platform Root Descriptor",
+        summary="Platform Root Descriptor & Web Surface",
         tags=["System"],
         status_code=status.HTTP_200_OK,
     )
     async def root_descriptor(
+        request: Request,
         current_settings: Settings = Depends(get_settings),
-    ) -> dict[str, Any]:
-        """Returns machine-readable platform metadata."""
+    ) -> Any:
+        """Returns machine-readable metadata or web control plane surface based on Accept header."""
+        accept_header = request.headers.get("accept", "")
+        index_file = static_dir / "index.html"
+        if "text/html" in accept_header and index_file.exists():
+            return FileResponse(str(index_file), media_type="text/html")
         return {
             "name": "Agent-Ready Merchant Platform",
             "version": agent_ready_merchant.__version__,
@@ -114,6 +150,45 @@ def create_app() -> FastAPI:
             "docs_url": "/docs",
             "environment": current_settings.ENVIRONMENT,
         }
+
+    # SPA Client-Side Routing Fallbacks for Web Control Plane
+    for web_route in [
+        "/login",
+        "/signup",
+        "/onboarding",
+        "/dashboard",
+        "/approvals",
+        "/catalog",
+        "/inventory",
+        "/quotes",
+        "/orders",
+        "/payments",
+        "/negotiations",
+        "/policies",
+        "/audit",
+        "/settings",
+        "/demo",
+        "/unauthorized",
+    ]:
+
+        def _make_route_handler(route_name: str) -> Callable[[], Awaitable[Any]]:
+            async def _handler() -> Any:
+                index_file = static_dir / "index.html"
+                if index_file.exists():
+                    return FileResponse(str(index_file), media_type="text/html")
+                return HTMLResponse(
+                    "<html><body><h1>Agent-Ready Merchant Control Plane</h1></body></html>"
+                )
+
+            return _handler
+
+        app.add_api_route(
+            web_route,
+            _make_route_handler(web_route),
+            methods=["GET"],
+            include_in_schema=False,
+            response_class=HTMLResponse,
+        )
 
     @app.post(
         "/api/v1/payments/webhook",
@@ -754,6 +829,529 @@ def create_app() -> FastAPI:
 
         envelope = await gateway_instance.execute_capability(db, capability, payload, ctx)
         return acp_adapter.from_canonical_envelope(capability, envelope, msg)
+
+    # =========================================================================
+    # Merchant Auth & Portal Control Plane Endpoints (Phase 5.1)
+    # =========================================================================
+    from agent_ready_merchant.schemas.merchant_auth import (
+        MerchantAuthResponse,
+        MerchantLoginRequest,
+        MerchantProfileResponse,
+        MerchantSetupRequest,
+        MerchantSignupRequest,
+    )
+    from agent_ready_merchant.services.insforge_auth_service import InsforgeAuthService
+    from agent_ready_merchant.services.merchant_auth_service import MerchantAuthService
+
+    def _extract_bearer_token(authorization: str | None) -> str | None:
+        if not authorization:
+            return None
+        scheme, _, token = authorization.partition(" ")
+        return token if scheme.lower() == "bearer" and token else None
+
+    @app.post(
+        "/api/v1/merchant/auth/signup",
+        summary="Merchant Registration & Store Creation",
+        tags=["Merchant Portal"],
+        response_model=MerchantAuthResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def merchant_signup_endpoint(
+        req: MerchantSignupRequest,
+        response: Response,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> MerchantAuthResponse:
+        """Registers a new merchant, seeds initial policy bounds, and issues admin session."""
+        try:
+            bearer_token = _extract_bearer_token(authorization)
+            identity = (
+                await InsforgeAuthService.verify_access_token(bearer_token, current_settings)
+                if bearer_token
+                else None
+            )
+            if identity and identity.email != req.email.lower():
+                raise ValueError("Merchant email must match the verified InsForge account.")
+            auth_response = await MerchantAuthService.register_merchant(
+                db,
+                req,
+                current_settings,
+                auth_user_id=identity.user_id if identity else None,
+            )
+            _set_admin_session_cookie(response, auth_response.token, current_settings)
+            return auth_response.model_copy(update={"token": None})
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/merchant/auth/login",
+        summary="Merchant Admin Login",
+        tags=["Merchant Portal"],
+        response_model=MerchantAuthResponse,
+        status_code=status.HTTP_200_OK,
+    )
+    async def merchant_login_endpoint(
+        req: MerchantLoginRequest,
+        request: Request,
+        response: Response,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> MerchantAuthResponse:
+        """Authenticates merchant by slug and issues active bearer session."""
+        try:
+            bearer_token = _extract_bearer_token(authorization)
+            if bearer_token:
+                identity = await InsforgeAuthService.verify_access_token(
+                    bearer_token, current_settings
+                )
+                auth_response = await MerchantAuthService.authenticate_insforge_merchant(
+                    db, identity.user_id, current_settings
+                )
+            else:
+                cookie_token = request.cookies.get(ADMIN_SESSION_COOKIE)
+                if req.admin_token is None and cookie_token:
+                    req = req.model_copy(update={"admin_token": cookie_token})
+                auth_response = await MerchantAuthService.authenticate_merchant(
+                    db, req, current_settings
+                )
+            _set_admin_session_cookie(response, auth_response.token, current_settings)
+            return auth_response.model_copy(update={"token": None})
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/merchant/auth/logout",
+        summary="Merchant Admin Logout",
+        tags=["Merchant Portal"],
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    async def merchant_logout_endpoint(response: Response) -> Response:
+        """Clears the browser-only administrative session cookie."""
+        response.delete_cookie(key=ADMIN_SESSION_COOKIE, path="/api/v1/merchant")
+        response.status_code = status.HTTP_204_NO_CONTENT
+        return response
+
+    def _set_admin_session_cookie(
+        response: Response, token: str | None, current_settings: Settings
+    ) -> None:
+        if token is None:
+            raise RuntimeError("Cannot establish an empty merchant admin session.")
+        response.set_cookie(
+            key=ADMIN_SESSION_COOKIE,
+            value=token,
+            max_age=ADMIN_SESSION_MAX_AGE_SECONDS,
+            httponly=True,
+            secure=current_settings.ENVIRONMENT == "production",
+            samesite="strict",
+            path="/api/v1/merchant",
+        )
+
+    async def _require_merchant_auth(
+        merchant_id: uuid.UUID,
+        auth_token: str | None,
+        settings: Settings,
+        db: AsyncSession,
+    ) -> None:
+        """Helper to enforce valid admin session token on protected merchant operations."""
+        if not auth_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Admin session token is required (X-Auth-Token header missing).",
+            )
+        secret = settings.SECRET_KEY.get_secret_value()
+        is_valid, tok_m_id, err = MerchantAuthService.verify_admin_token(auth_token, secret)
+        if not is_valid or tok_m_id != merchant_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=err or "Invalid or expired admin session token.",
+            )
+        merchant = await db.get(Merchant, merchant_id)
+        if merchant is None or merchant.status != "ACTIVE":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Merchant account is not active.",
+            )
+
+    @app.get(
+        "/api/v1/merchant/auth/me",
+        summary="Get Authenticated Merchant Profile",
+        tags=["Merchant Portal"],
+        response_model=MerchantProfileResponse,
+    )
+    async def merchant_me_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> MerchantProfileResponse:
+        """Fetches active merchant profile and policy configuration."""
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+
+        try:
+            return await MerchantAuthService.get_merchant_profile(db, x_merchant_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/merchant/setup/complete",
+        summary="Complete Onboarding & Update Policies",
+        tags=["Merchant Portal"],
+        response_model=MerchantProfileResponse,
+    )
+    async def merchant_complete_setup_endpoint(
+        req: MerchantSetupRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> MerchantProfileResponse:
+        """Updates merchant profile and policy bounds upon setup wizard completion."""
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+
+        try:
+            return await MerchantAuthService.complete_merchant_setup(db, x_merchant_id, req)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    # =========================================================================
+    # Merchant Control Plane Operations Endpoints (Phase 5.2)
+    # =========================================================================
+    from agent_ready_merchant.schemas.merchant_portal import (
+        ApprovalItemResponse,
+        AuditLedgerResponse,
+        DashboardSummaryResponse,
+        InventoryAdjustRequest,
+        InventoryItemResponse,
+        OrderDetailResponse,
+        PaymentAttemptResponse,
+        PolicyGovernanceResponse,
+        ProductCreateRequest,
+        ProductItemResponse,
+        QuoteDetailResponse,
+        ResolveApprovalPayload,
+        UpdatePoliciesPayload,
+    )
+    from agent_ready_merchant.services.merchant_mutation_idempotency_service import (
+        IdempotencyConflictError,
+        MerchantMutationIdempotencyService,
+    )
+    from agent_ready_merchant.services.merchant_portal_service import MerchantPortalService
+
+    @app.get(
+        "/api/v1/merchant/dashboard/summary",
+        summary="Get Merchant Dashboard Summary KPIs",
+        tags=["Merchant Control Plane"],
+        response_model=DashboardSummaryResponse,
+    )
+    async def get_dashboard_summary_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> DashboardSummaryResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            return await MerchantPortalService.get_dashboard_summary(db, x_merchant_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/merchant/products",
+        summary="List Merchant Products & Inventory Availability",
+        tags=["Merchant Control Plane"],
+        response_model=list[ProductItemResponse],
+    )
+    async def list_products_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> list[ProductItemResponse]:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        return await MerchantPortalService.list_products(db, x_merchant_id)
+
+    @app.post(
+        "/api/v1/merchant/products",
+        summary="Create New Catalog Product",
+        tags=["Merchant Control Plane"],
+        response_model=ProductItemResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_product_endpoint(
+        req: ProductCreateRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> ProductItemResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            return await MerchantPortalService.create_product(db, x_merchant_id, req)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/merchant/inventory",
+        summary="List Merchant Inventory Stocks",
+        tags=["Merchant Control Plane"],
+        response_model=list[InventoryItemResponse],
+    )
+    async def list_inventory_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> list[InventoryItemResponse]:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        return await MerchantPortalService.list_inventory(db, x_merchant_id)
+
+    @app.post(
+        "/api/v1/merchant/inventory/adjust",
+        summary="Adjust Inventory Quantity",
+        tags=["Merchant Control Plane"],
+        response_model=InventoryItemResponse,
+    )
+    async def adjust_inventory_endpoint(
+        req: InventoryAdjustRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> InventoryItemResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            receipt, replay = await MerchantMutationIdempotencyService.claim_or_replay(
+                db,
+                merchant_id=x_merchant_id,
+                operation="inventory.adjust",
+                idempotency_key=x_idempotency_key,
+                payload=req.model_dump(mode="json"),
+            )
+            if replay is not None:
+                return InventoryItemResponse.model_validate(replay)
+            result = await MerchantPortalService.adjust_inventory(db, x_merchant_id, req)
+            assert receipt is not None
+            await MerchantMutationIdempotencyService.complete(
+                db, receipt, result.model_dump(mode="json")
+            )
+            return result
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/merchant/quotes",
+        summary="List Merchant Price Quotes",
+        tags=["Merchant Control Plane"],
+        response_model=list[QuoteDetailResponse],
+    )
+    async def list_quotes_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> list[QuoteDetailResponse]:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        return await MerchantPortalService.list_quotes(db, x_merchant_id)
+
+    @app.get(
+        "/api/v1/merchant/orders",
+        summary="List Merchant Orders",
+        tags=["Merchant Control Plane"],
+        response_model=list[OrderDetailResponse],
+    )
+    async def list_orders_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> list[OrderDetailResponse]:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        return await MerchantPortalService.list_orders(db, x_merchant_id)
+
+    @app.get(
+        "/api/v1/merchant/payments",
+        summary="List Payment Attempts & Settlement Records",
+        tags=["Merchant Control Plane"],
+        response_model=list[PaymentAttemptResponse],
+    )
+    async def list_payments_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> list[PaymentAttemptResponse]:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        return await MerchantPortalService.list_payments(db, x_merchant_id)
+
+    @app.get(
+        "/api/v1/merchant/approvals",
+        summary="List Human-In-The-Loop Approval Tickets",
+        tags=["Merchant Control Plane"],
+        response_model=list[ApprovalItemResponse],
+    )
+    async def list_approvals_endpoint(
+        status: str | None = None,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> list[ApprovalItemResponse]:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        return await MerchantPortalService.list_approvals(db, x_merchant_id, status)
+
+    @app.post(
+        "/api/v1/merchant/approvals/{approval_id}/resolve",
+        summary="Resolve Pending HITL Approval Ticket",
+        tags=["Merchant Control Plane"],
+        response_model=ApprovalItemResponse,
+    )
+    async def resolve_approval_endpoint(
+        approval_id: uuid.UUID,
+        req: ResolveApprovalPayload,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> ApprovalItemResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            return await MerchantPortalService.resolve_approval(db, x_merchant_id, approval_id, req)
+        except ValueError as exc:
+            if str(exc) == "Approval ticket has expired.":
+                await db.commit()
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/merchant/policies",
+        summary="Get Policy Rules and Governance Configuration",
+        tags=["Merchant Control Plane"],
+        response_model=PolicyGovernanceResponse,
+    )
+    async def get_policies_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> PolicyGovernanceResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            return await MerchantPortalService.get_policies(db, x_merchant_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.put(
+        "/api/v1/merchant/policies",
+        summary="Update Policy Rules Atomically",
+        tags=["Merchant Control Plane"],
+        response_model=PolicyGovernanceResponse,
+    )
+    async def update_policies_endpoint(
+        req: UpdatePoliciesPayload,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> PolicyGovernanceResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            return await MerchantPortalService.update_policies(
+                db,
+                x_merchant_id,
+                autonomy_level=req.autonomy_level,
+                max_discount_pct=req.max_discount_percentage,
+                min_margin_pct=req.min_margin_percentage,
+                max_tx_paise=req.max_single_transaction_paise,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/merchant/audit",
+        summary="Get Immutable Audit Event Ledger",
+        tags=["Merchant Control Plane"],
+        response_model=AuditLedgerResponse,
+    )
+    async def get_audit_ledger_endpoint(
+        limit: int = 50,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> AuditLedgerResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        return await MerchantPortalService.get_audit_ledger(db, x_merchant_id, limit=limit)
+
+    # =========================================================================
+    # Interactive Demo & Sandbox Simulator Endpoints (Phase 5.3)
+    # =========================================================================
+    from agent_ready_merchant.schemas.demo_simulator import (
+        DemoSeedResponse,
+        DemoSimulationStepRequest,
+        DemoSimulationStepResponse,
+    )
+    from agent_ready_merchant.services.demo_simulator_service import DemoSimulatorService
+
+    @app.post(
+        "/api/v1/merchant/demo/seed",
+        summary="Seed Demo Catalog and Baseline Policies",
+        tags=["Demo Simulator"],
+        response_model=DemoSeedResponse,
+    )
+    async def demo_seed_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> DemoSeedResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        return await DemoSimulatorService.seed_demo_catalog_and_policies(db, x_merchant_id)
+
+    @app.post(
+        "/api/v1/merchant/demo/simulate",
+        summary="Execute Interactive Agent Commerce Simulation",
+        tags=["Demo Simulator"],
+        response_model=DemoSimulationStepResponse,
+    )
+    async def demo_simulate_endpoint(
+        req: DemoSimulationStepRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> DemoSimulationStepResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            receipt, replay = await MerchantMutationIdempotencyService.claim_or_replay(
+                db,
+                merchant_id=x_merchant_id,
+                operation="demo.simulate",
+                idempotency_key=x_idempotency_key,
+                payload=req.model_dump(mode="json"),
+            )
+            if replay is not None:
+                return DemoSimulationStepResponse.model_validate(replay)
+            result = await DemoSimulatorService.execute_simulation(
+                db, x_merchant_id, req, current_settings
+            )
+            assert receipt is not None
+            await MerchantMutationIdempotencyService.complete(
+                db, receipt, result.model_dump(mode="json")
+            )
+            return result
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     return app
 

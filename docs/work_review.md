@@ -579,6 +579,171 @@ P3: Webhook secrets and Razorpay credentials are inlined throughout the file, bu
 - **Verified by:** Typecheck and gateway capability tests.
 
 
+## Review 9 Resolution Status
+> **Status:** **ALL RESOLVED & VERIFIED (Prior to Phase 5.1)**
+> - Stale approval terms resolved with deduplication and quote version increment.
+> - Registry failure states and merchant:admin actor type fully wired.
+> - Deterministic policy hash normalization and immutable deep-copied records in `PolicyDecisionRecord`.
+> - Doc counts reconciled.
+
+---
+
+# Phase 5.1: Web Foundation & Public Surface Review Report
+
+### 1. Scope & Execution Summary
+Phase 5.1 establishes the production web foundation and merchant public surface for the Agent-Ready Merchant platform:
+- **Public Landing Page Surface:** High-conversion responsive surface showcasing ACP agent protocol readiness, policy governance, Razorpay infrastructure, and live interactive protocol visualizer.
+- **Server-Authoritative Merchant Authentication:** Implemented `MerchantAuthService` (`src/agent_ready_merchant/services/merchant_auth_service.py`) and schemas (`src/agent_ready_merchant/schemas/merchant_auth.py`) providing tamper-evident HMAC SHA-256 bearer tokens, slug registration (`POST /api/v1/merchant/auth/signup`), login (`POST /api/v1/merchant/auth/login`), and profile discovery (`GET /api/v1/merchant/auth/me`).
+- **Merchant Onboarding Flow:** 4-step interactive guided setup wizard (Store Identity -> Razorpay Settlement Gateway -> Autonomous Policy Bounds -> Review & Activation) with atomic persistence of seeded `PolicyRule` records.
+- **Authenticated Application Shell:** Responsive sidebar navigation with mobile collapsible drawer, active merchant context display, environment badge, session expiration detection, and protected route guards.
+- **Reusable UI Component System:** Standardized accessible component foundation (`Button`, `Input`, `Badge`, `Card`, `Dialog`, `StepIndicator`, `Skeleton`, `EmptyState`) in `frontend/src/components/ui/` adhering strictly to design tokens.
+- **Strict Typed API Client Layer:** Robust client (`frontend/src/lib/api-client.ts`) with header injection (`X-Merchant-ID`, `X-Auth-Token`, `Authorization`), automatic 401/403 session expiration interception, and normalized error models.
+- **Dual-Mode Root Endpoint & Static SPA Serving:** FastAPI serves compiled SPA assets (`src/agent_ready_merchant/static`) for browser visits across all web routes while preserving JSON metadata descriptors for API clients.
+
+### 2. Quality Gate Verification
+- **Formatting (`ruff format --check .`):** 100% PASS (128 files checked)
+- **Linting (`ruff check .`):** 100% PASS (0 lint errors)
+- **Type Checking (`mypy src tests`):** 100% PASS (122 source files, 0 errors)
+- **Frontend Test Suite (`npm test` in `frontend/`):** 100% PASS (17 tests passing across 5 test files)
+- **Backend Test Suite (`pytest --cov=agent_ready_merchant`):** 100% PASS (244 passed, 2 skipped, 84% coverage)
+
+### 3. Architecture & Invariants Verified
+- `INV-FIN-01`: Integer paise representation maintained in all onboarding policy inputs and currency formatters.
+- `INV-AGY-01`: Separation of intelligence and authority strictly preserved; web UI cannot bypass server-authoritative validations.
+- `INV-AGY-03`: Zero secret leakage — API key secrets and webhook secrets remain in server environment and are never sent to or stored in the browser.
+- Multi-tenant token isolation: Cryptographic tokens verify merchant ID match; cross-tenant profile reads return 401 Unauthorized.
+
+---
+
+# Phase 5.2: Merchant Control Plane Operations & HITL Management Review Report
+
+### 1. Scope & Execution Summary
+Phase 5.2 implements the authenticated merchant control plane around the existing canonical backend:
+- **Authoritative Dashboard:** Real-time summary aggregates (active products, orders, total revenue paise, pending approvals count, policy hash, autonomy level) rendered directly from backend state without fabricated client metrics.
+- **Product Catalog Management:** Product listing, detail views, and interactive creation dialog enforcing floor price invariants (`floor_price <= base_price`), duplicate SKU prevention, category indexing, and live stock tracking.
+- **Inventory Management:** Stock ledger with optimistic concurrency locking, quantity threshold warnings, and strict non-negative delta adjustments.
+- **Quotes & Price Negotiation Trace:** Comprehensive quote ledger showing line items, state machine transitions (`DRAFT` -> `PROPOSED` -> `ACCEPTED`), discount breakdowns, and multi-round negotiation histories.
+- **Orders & Payments Management:** Authoritative order ledger displaying payment attempts, Razorpay order IDs, capture statuses, and manual reconciliation triggers against Razorpay.
+- **Human-In-The-Loop (HITL) Approvals Queue:** Dedicated approval workbench supporting status filtering (`PENDING`, `APPROVED`, `REJECTED`), expiration checks, note capture, and atomic quote term adjustments upon approval resolution.
+- **Policy Governance Rules Editor:** Dynamic autonomy and safety boundary configuration interface enforcing platform ceilings ($\le 50\%$ discount, $\le 100\%$ margin) and live deterministic SHA-256 policy hash preview.
+- **Cryptographic Audit Trail Inspector:** Immutable audit ledger viewer with real-time SHA-256 hash chain verification badge (`AuditEvent.verify_chain()`), previous hash linking, and actor/payload inspector.
+- **Merchant Settings:** Merchant store profile details and copyable ACP protocol endpoint URLs.
+- **Backend Service & REST Endpoints:** `MerchantPortalService` (`src/agent_ready_merchant/services/merchant_portal_service.py`) and schemas (`src/agent_ready_merchant/schemas/merchant_portal.py`) mounted at `/api/v1/merchant/...`.
+
+### 2. Quality Gate Verification
+- **Formatting (`ruff format --check .`):** 100% PASS (131 files checked)
+- **Linting (`ruff check .`):** 100% PASS (0 lint errors)
+- **Type Checking (`mypy src tests`):** 100% PASS (125 source files, 0 errors)
+- **Frontend Test Suite (`npm test` in `frontend/`):** 100% PASS (23 tests passing across 6 test files)
+- **Frontend Build (`npm run build` in `frontend/`):** 100% PASS (Vite production bundle compiled cleanly to `src/agent_ready_merchant/static/`)
+- **Backend Test Suite (`pytest`):** 100% PASS (250 passed, 2 skipped, 84% coverage)
+
+### 3. Invariants & Security Matrix Verified
+- `INV-FIN-01`: Integer paise representation enforced on all financial mutations, displays, and adjustments.
+- `INV-FIN-02`: Floor price guarantee enforced server-side on product creation and quote mutations.
+- `INV-AGY-01`: Separation of intelligence and authority strictly preserved; browser client is untrusted and cannot dictate financial or transaction state.
+- `INV-AGY-03`: Zero secret leakage — API key secrets and webhook secrets are strictly excluded from API responses and frontend views.
+- Multi-Tenant Isolation: Cross-tenant operations strictly rejected fail-closed (401 Unauthorized) across all control plane routes.
+
+---
+
+# Phase 5.3: Demo Sandbox & Integration Hardening Review Report
+
+### 1. Scope & Execution Summary
+Phase 5.3 completes the end-to-end integration and demonstration capabilities of the Agent-Ready Merchant control plane without weakening any security invariant or resorting to mock bypasses:
+- **Interactive Simulation Sandbox UI (`/demo`):** Production-grade simulation workbench with interactive scenario selector, configurable parameters, live execution timeline trace, real-time status badges, direct entity navigation links, and safe demo state resetting.
+- **Three Deterministic Demo Scenarios:**
+  1. *Standard Autonomous Commerce:* Buyer session initiation -> product discovery -> quote generation -> deterministic policy approval (`ALLOW`) -> order creation -> Razorpay webhook simulation (`payment.captured`) -> order settlement (`PAID`) -> inventory deduction -> immutable cryptographic audit logging.
+  2. *Supervised HITL Escalation:* Buyer agent requests a 20% discount in Supervised Autonomy Mode -> policy engine emits `ESCALATE_APPROVAL` (`HITL_DISCOUNT_APPROVAL_REQUIRED`) -> creates stateful `MerchantApproval` ticket -> resolvable in `/approvals` workbench.
+  3. *Out-of-Band Payment Reconciliation:* Dropped webhook simulation and server-authoritative reconciliation against Razorpay.
+- **Authoritative Demo Backend Service (`DemoSimulatorService`):** Endpoints `POST /api/v1/merchant/demo/simulate` and `POST /api/v1/merchant/demo/seed` running on real PostgreSQL tables and domain models with optimistic locking and HMAC SHA-256 webhook processing.
+- **Adversarial Security Attack Verification Suite:** Comprehensive adversarial penetration tests covering:
+  - Forged Merchant IDs & token tampering -> 401 Unauthorized
+  - Cross-tenant inventory mutation & entity snooping -> 400 Bad Request / 404 Not Found
+  - Floor price violation (`floor_price > base_price`) -> 400 Bad Request
+  - Platform policy discount ceiling violation (> 50%) -> 422 Unprocessable Entity
+  - Zero secret leakage in API payloads and browser contexts.
+
+### 2. Quality Gate Verification
+- **Formatting (`ruff format --check .`):** 100% PASS (134 files checked)
+- **Linting (`ruff check .`):** 100% PASS (0 lint errors)
+- **Type Checking (`mypy src tests`):** 100% PASS (128 source files, 0 errors)
+- **Frontend Test Suite (`npm test` in `frontend/`):** 100% PASS (26 tests passing across 7 test files)
+- **Frontend Build (`npm run build` in `frontend/`):** 100% PASS (Vite production bundle compiled cleanly to `src/agent_ready_merchant/static/`)
+- **Backend Test Suite (`pytest`):** 100% PASS (257 passed, 2 skipped, 84% coverage)
+
+### 3. Invariants & Security Matrix Verified
+- `INV-FIN-01`: Integer paise representation maintained across simulation traces, order amounts, and discount calculations.
+- `INV-FIN-02`: Floor price guarantee strictly preserved; attempts to discount below floor price evaluate to `DENY` (`POLICY_VIOLATION_BELOW_FLOOR_PRICE`).
+- `INV-FIN-05`: Server-authoritative settlement via HMAC SHA-256 webhook signatures and Razorpay client reconciliation.
+- `INV-AGY-01`: Separation of intelligence and authority strictly preserved; untrusted simulation inputs are deterministically validated by the policy engine and state machine before applying state changes.
+- `INV-AGY-03`: Zero secret leakage — Razorpay secret keys, webhook secrets, database credentials, and admin tokens are never exposed in API payloads or UI contexts.
+
+---
+
+# InsForge Managed PostgreSQL Deployment & Integration Review Report
+
+### 1. Scope & Execution Summary
+The Agent-Ready Merchant backend and persistence layer were deployed to the linked InsForge PostgreSQL infrastructure (`9mvctuj3.ap-southeast.database.insforge.app:5432/insforge`):
+- **Alembic Database Migrations Applied:** Upgraded all 5 sequential Alembic migration revisions (`001_initial_schema` $\to$ `002_gateway_hardening_tables` $\to$ `003_session_capability_grants` $\to$ `004_payment_reliability_hardening` $\to$ `005_safety_policy_governance`).
+- **All 21 Schema Tables Verified:** `merchants`, `products`, `product_variants`, `inventory_items`, `price_quotes`, `quote_items`, `orders`, `order_items`, `payment_attempts`, `processed_webhooks`, `transaction_records`, `buyer_agent_sessions`, `buyer_intents`, `merchant_approvals`, `policy_rules`, `audit_events`, `agent_runs`, `gateway_hardening_idempotency`, `gateway_hardening_rate_events`, `alembic_version`.
+- **PostgreSQL Row Locking Verified:** Validated `SELECT ... FOR UPDATE` row locks, foreign key cascade rules, and unique constraints (`uq_transaction_records_settlement_entry`, `processed_webhooks.payload_hash`, `merchants.slug`).
+- **Live Concurrency & End-to-End Simulation:** Executed `tests/test_insforge_postgresql_integration.py` verifying real merchant creation, catalog seeding, autonomous commerce simulation, order settlement, and cryptographic SHA-256 audit chain verification (`AuditEvent.verify_chain()`).
+- **Health Check Observability:** Enriched `/health` endpoint distinguishing `application_alive`, `database_reachable`, `database_connected`, and `configuration_valid`.
+
+### 2. Quality Gate Verification
+- **Formatting (`ruff format --check .`):** 100% PASS (135 files checked)
+- **Linting (`ruff check .`):** 100% PASS (0 lint errors)
+- **Type Checking (`mypy src tests`):** 100% PASS (129 source files, 0 errors)
+- **Frontend Test Suite (`npm test` in `frontend/`):** 100% PASS (26 tests passing across 7 test files)
+- **Frontend Production Build (`npm run build` in `frontend/`):** 100% PASS (compiled cleanly to `src/agent_ready_merchant/static/`)
+- **Backend Test Suite (`pytest`):** 100% PASS (258 passed, 2 skipped, 84% coverage)
+
+---
+
+# Review 10: Phase 5 PR (`main...phs5`)
+
+> **Reviewed on:** 2026-08-30
+> **Scope:** Merchant authentication, control-plane authorization, HITL resolution, and demo simulator behavior.
+> **Verification:** Static review of the PR diff. No code or test changes made.
+
+## Findings & Resolutions
+
+1. **P1 — Authentication bypass.**
+   - **Status:** **RESOLVED & VERIFIED**
+   - **Root Cause & Fix:** Previously, `_require_merchant_auth` only validated `X-Auth-Token` if it was present, and `authenticate_merchant` minted a fresh token from a public slug. `_require_merchant_auth` now strictly enforces that `X-Auth-Token` is present and cryptographically verified against the merchant ID, while `authenticate_merchant` only refreshes an already valid admin session token. Browser responses store this token exclusively in an `HttpOnly`, `SameSite=Strict` cookie and omit it from JSON.
+   - **Verified by:** `tests/test_phase5_1_web_foundation.py::test_merchant_me_endpoint_rejects_missing_token`, `test_merchant_me_endpoint_rejects_forged_token`, and `test_merchant_login_rejects_slug_without_existing_session_token`.
+
+2. **P1 — Demo checkout oversells inventory.**
+   - **Status:** **RESOLVED & VERIFIED**
+   - **Root Cause & Fix:** In `src/agent_ready_merchant/services/demo_simulator_service.py`, `execute_simulation` now locks the inventory item (`with_for_update()`) and asserts `inventory.available_quantity >= req.quantity` before quote creation and payment settlement, failing closed with a 400 error if stock is insufficient.
+   - **Verified by:** `tests/test_phase5_3_demo_and_security_hardening.py::test_demo_checkout_insufficient_inventory_fails_closed`.
+
+3. **P2 — Counter-offers discard the merchant's amount.**
+   - **Status:** **RESOLVED & VERIFIED**
+   - **Root Cause & Fix:** In `src/agent_ready_merchant/services/merchant_portal_service.py`, `resolve_approval` now inspects `req.counter_amount_paise` when `decision == "COUNTER_OFFER"`, updates the quote total, and recalculates the line item discounts to match the merchant's specified amount.
+   - **Verified by:** `tests/test_phase5_2_merchant_control_plane.py::test_approvals_hitl_counter_offer_custom_amount`.
+
+4. **P2 — Reconciliation scenario processes a webhook instead.**
+   - **Status:** **RESOLVED & VERIFIED**
+   - **Root Cause & Fix:** In `src/agent_ready_merchant/services/demo_simulator_service.py`, `PAYMENT_RECONCILIATION` now simulates a dropped webhook (order left in `PENDING_PAYMENT`) and invokes `PaymentService.reconcile_order` against a protocol-faithful simulated Razorpay response. The existing payment service validates the upstream response and performs all state-machine, payment-attempt, ledger, and audit work.
+   - **Verified by:** `tests/test_phase5_3_demo_and_security_hardening.py::test_demo_payment_reconciliation_flow`.
+
+5. **P2 — Demo reset does not reset.**
+   - **Status:** **RESOLVED & VERIFIED**
+   - **Root Cause & Fix:** In `src/agent_ready_merchant/services/demo_simulator_service.py`, `seed_demo_catalog_and_policies` now restores only products carrying the explicit `demo_seeded` marker. It never changes ordinary merchant inventory and leaves any active demo reservation intact; unreserved demo inventory returns to its baseline (50, 35, 20). Policy rules restore to the standard defaults (`autonomy_level=1`, `max_discount_pct=15.0`, `min_margin_pct=20.0`, `max_single_tx_paise=5_000_000`).
+   - **Verified by:** `tests/test_phase5_3_demo_and_security_hardening.py::test_demo_seed_resets_mutated_stock_and_policies`.
+
+---
+
+## 6. Phase 4 Governance Remediation
+
+### Issue: Stale Approval Terms Reused
+- **Location:** `src/agent_ready_merchant/gateway/canonical.py:1613-1675` (`negotiate_quote`)
+- **Status:** **RESOLVED & VERIFIED**
+- **Root Cause & Fix:** Previously, when a buyer submitted a revised counter-offer while an earlier approval ticket remained `PENDING`, the branch returned the existing ticket without updating its terms. The gateway now distinguishes identical retries (which return the existing pending ticket idempotently) from revised counter-offers (which update `existing_appr.requested_amount_paise`, `existing_appr.proposed_discount_paise`, `existing_appr.policy_decision_hash`, `existing_appr.policy_rule_code`, `existing_appr.reason`, advance `quote.version += 2`, and emit a `MERCHANT_APPROVAL_TERMS_UPDATED` `AuditEvent`).
+- **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_duplicate_negotiation_escalation_deduplicated` (adversarial verification of updated proposal terms on active pending tickets).
+
 
 
 

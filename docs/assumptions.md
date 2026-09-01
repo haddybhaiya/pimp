@@ -93,3 +93,47 @@
 - **CONFIDENCE:** 100%
 - **FAILURE IF WRONG:** Runaway discounts below merchant safety margins, unexplainable pricing decisions, retroactive audit invalidation when merchant rules change, or secret/PII leaks into compliance logs.
 - **MITIGATION:** Deterministic SHA-256 policy hashing (`compute_policy_hash()`), hard platform safety ceilings (max 20 items, max 50% discount, max ₹1,00,000 transaction, max 3 negotiation rounds), `MerchantApproval` tickets with explicit expirations and optimistic locking, `sanitize_audit_payload()` redaction of credentials/PII, and authoritative DB policy loading against non-admin callers.
+
+---
+
+### 10. Untrusted Browser Client & Server-Authoritative Merchant Control Plane
+- **ASSUMPTION:** The browser is an untrusted client and must never hold authoritative state over pricing, discounts, floor margins, inventory stock, payment capture, settlement states, or HITL approval resolution.
+- **EVIDENCE:** Verified via `tests/test_phase5_2_merchant_control_plane.py` (all 6 operations and tenant isolation tests passing) and `frontend/tests/portal-views.test.tsx` (all 6 view interaction suites passing).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Price manipulation, bypassing merchant floor prices or approval gates, stock overselling, or unauthorized cross-tenant data modification.
+- **MITIGATION:** All operations route through authenticated `/api/v1/merchant/...` endpoints backed by `MerchantPortalService`, enforcing server-side HMAC token verification with the dedicated application `SECRET_KEY`, current-merchant `ACTIVE` status checks, optimistic concurrency row locking, floor price margin invariant checks (`floor_price <= base_price`), platform policy ceilings, and cryptographic SHA-256 audit hash chain verification. Browser sessions are carried in `HttpOnly`, `SameSite=Strict` cookies; the SPA retains only non-secret merchant profile metadata.
+
+---
+
+### 11. Deterministic End-to-End Simulation & Adversarial Defense Hardening
+- **ASSUMPTION:** Interactive demo sandboxes and merchant simulation workbenches must execute the full, real domain state machines, deterministic policy engine, Razorpay cryptographic HMAC webhook processors, and tamper-evident audit chains without using mock shortcuts or weakening financial invariants.
+- **EVIDENCE:** Verified via `tests/test_phase5_3_demo_and_security_hardening.py` (all 7 end-to-end and adversarial security tests passing deterministically) and `frontend/tests/demo-view.test.tsx` (all 3 interactive sandbox suites passing).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** False confidence in product demonstrations, divergence between simulation tools and production pipelines, or vulnerability to forged identity, below-floor discounts, and token tampering attacks.
+- **MITIGATION:** `DemoSimulatorService` coordinates real database models and authoritative domain services. All simulation actions require valid bearer tokens, enforce floor price guarantees, and generate verifiable SHA-256 cryptographic audit hash chains verified via `AuditEvent.verify_chain()`.
+
+---
+
+### 12. InsForge PostgreSQL Semantic Compatibility & Transaction Isolation
+- **ASSUMPTION:** InsForge's managed PostgreSQL infrastructure fully supports standard PostgreSQL 16+ DDL migrations, transactional isolation, row-level locking (`SELECT ... FOR UPDATE`), unique composite constraints, foreign key integrity, and asyncpg connection pooling.
+- **EVIDENCE:** Verified via Alembic migration chain (revisions 001 through 006 applying cleanly) and `tests/test_insforge_postgresql_integration.py` (all live PostgreSQL tests passing deterministically).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Migration failures, broken row-level inventory locks, race conditions during payment settlement, or audit chain forking under concurrent load.
+- **MITIGATION:** Standard SQLAlchemy PostgreSQL dialect with asyncpg, explicit SSL mode (`sslmode=require`), transactional Alembic DDL, and row-level `FOR UPDATE` locks on inventory and merchant audit records.
+
+---
+
+### 13. InsForge Auth Identity Verification
+- **ASSUMPTION:** InsForge verifies email/password credentials and its current-session endpoint returns the authenticated user ID and verified email only for a valid bearer token.
+- **EVIDENCE:** Browser signup/login uses the supported `@insforge/sdk` Auth methods; FastAPI validates the bearer token at the InsForge current-session endpoint before binding or authenticating a merchant.
+- **STATUS:** **IMPLEMENTED — external integration verification required**
+- **CONFIDENCE:** 90%
+- **FAILURE IF WRONG:** Legitimate merchants cannot establish a session, or an identity could be incorrectly linked.
+- **MITIGATION:** Fail closed on every token verification failure, require signup email equality with the verified identity, enforce a unique `merchants.auth_user_id`, and retain the existing secure cookie boundary for control-plane access.
+
+
+
+

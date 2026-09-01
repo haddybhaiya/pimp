@@ -161,6 +161,7 @@
   2. **Mandatory Session Gate for Privileged/Stateful Capabilities:** Stateful and privileged financial operations (`get_quote`, `negotiate_quote`, `accept_quote`, `create_order`, `request_checkout`, `get_payment_status`, `get_order_status`, `terminate_session`) strictly require an active, non-expired session (`AUTH_SESSION_NOT_FOUND` / `AUTH_SESSION_EXPIRED`). Anonymous requests are bounded strictly to read capabilities (`discover_products`, `get_product`, `check_inventory`, `calculate_shipping`).
   3. **Server-Authoritative Capability Derivation:** Gateway capabilities are strictly bounded by `BuyerAgentSession.granted_capabilities` persisted in PostgreSQL. Client-supplied headers (e.g. `X-Capabilities: buyer:checkout`) can never self-grant or elevate permissions beyond the persisted grant (`INV-AGY-05`).
   4. **Strict Cross-Tenant & Cross-Session Isolation:** All entity queries (`PriceQuote`, `Order`, `InventoryItem`, `BuyerAgentSession`) strictly filter by `merchant_id` and `session_id`. Mismatches return uniform generic not-found errors (`QUOTE_NOT_FOUND`, `ORDER_NOT_FOUND`, `AUTH_SESSION_NOT_FOUND`) without revealing resource existence across merchant or session boundaries.
+  5. **Browser Session Containment:** Merchant portal sessions are delivered only as `HttpOnly`, `SameSite=Strict` cookies. The SPA sends browser credentials automatically and never persists an administrative bearer token in Web Storage; explicit `X-Auth-Token` credentials remain supported for non-browser clients. Merchant-admin session tokens are signed with the dedicated application `SECRET_KEY`, never the Razorpay webhook secret, and every protected request verifies the merchant remains `ACTIVE`.
 - **Consequences:**
   - *Positive:* Eliminates privilege escalation, cross-tenant resource snooping, replay attacks, and timing attacks. Preserves strict separation of intelligence and authority.
   - *Negative:* Session creation is required for all quoting and ordering workflows.
@@ -178,7 +179,84 @@
   4. **Immutable Audit Linkage & Cryptographic Hash Verification:** Every domain mutation logs an immutable audit event recording `request_id -> session_id -> quote_id -> policy_decision_hash -> order_id`. `AuditEvent.verify_chain()` detects any back-channel database tampering.
   5. **Zero Secret & Masked PII Redaction:** Audit payloads pass through `sanitize_audit_payload()` to redact sensitive tokens/secrets (`auth_token`, `key_secret`, `password`, `card_number`) to `"[REDACTED_SECRET]"` and mask buyer emails (`a***r@example.com`), ensuring audit logs remain safe for forensic inspection.
   6. **Anti-Context Tampering Gate:** For non-admin callers, gateway capability execution overrides caller-supplied policy parameters by loading authoritative merchant rules directly from PostgreSQL (`PolicyRule`).
+---
+
+## ADR-015: Web Foundation, Server-Authoritative Merchant Authentication & SPA Shell
+
+- **Status:** ACCEPTED
+- **Context:** Delivering a production-ready merchant control plane requires a responsive, high-performance web surface, secure server-authoritative authentication for store owners, multi-step onboarding wizard, robust route guards, API client error normalization, and visual component tokens inspired by modern accessible UI systems without compromising domain invariants or exposing backend secrets to the browser.
+- **Decision:**
+  1. **Server-Authoritative Merchant Authentication & Tamper-Evident Tokens:** Built `MerchantAuthService` with HMAC SHA-256 signed bearer tokens encoding merchant ID, slug, and expiration timestamp. Unauthenticated access fails closed (401/403). Cross-tenant queries are strictly rejected.
+  2. **Single-Page Application (SPA) Shell & Dual-Mode Root Surface:** Implemented a modern React 18 + TypeScript + Tailwind CSS application in `frontend/` compiled directly to `src/agent_ready_merchant/static/`. FastAPI serves the SPA bundle for browser requests (`Accept: text/html`) across public and protected client routes (`/`, `/login`, `/signup`, `/onboarding`, `/dashboard`, `/approvals`, `/catalog`, `/orders`, `/policies`, `/audit`) while preserving machine-readable JSON root descriptors for programmatic API clients.
+  3. **Multi-Step Guided Merchant Onboarding Wizard:** Designed a 4-step interactive setup flow (Store Identity -> Razorpay Settlement Gateway -> Autonomous Policy Bounds -> Review & Activation) with real-time validation and atomic database persistence of default `PolicyRule` records.
+  4. **Strict Typed API Client with Fail-Closed Error Interception:** Built `ApiClient` with unified headers (`X-Merchant-ID`, `X-Auth-Token`, `Authorization`), automatic 401/403 session expiration detection, and structured `ApiError` normalization.
+  5. **Accessible Reusable UI Component System:** Created foundational primitives (`Button`, `Input`, `Badge`, `Card`, `Dialog`, `StepIndicator`, `Skeleton`, `EmptyState`) strictly respecting design tokens, keyboard navigation, and zero secret leakage (`INV-AGY-03`).
 - **Consequences:**
-  - *Positive:* Physically guarantees explainability, policy boundaries, audit traceability, and zero secret leakage. Protects merchants from runaway agent behavior and external adversarial manipulation.
-  - *Negative:* Escrow/HITL requests require asynchronous merchant resolution, slightly increasing order negotiation latency for high-value counter-offers.
+  - *Positive:* Delivers a complete, tested, responsive web foundation for the Agent-Ready Merchant control plane that seamlessly interfaces with existing canonical gateway and settlement endpoints.
+  - *Negative:* Frontend assets require compilation with `npm run build` during distribution.
+
+---
+
+## ADR-016: Merchant Control Plane Operations & Human-In-The-Loop (HITL) Management
+
+- **Status:** ACCEPTED
+- **Context:** Operating autonomous agent-ready storefronts requires comprehensive merchant administrative surfaces: KPI overview, catalog management, inventory tracking, quotes and negotiations ledger, orders and payments management, policy governance configuration, HITL approval queue, and immutable audit trail verification. In accordance with the foundational separation of intelligence and authority ($\text{Intelligence} \neq \text{Authority}$, `INV-AGY-01`), the browser client is untrusted and must never hold authoritative state over pricing, margins, capabilities, payment settlements, or approvals.
+- **Decision:**
+  1. **Server-Authoritative Control Plane Endpoints:** Implemented authenticated REST endpoints under `/api/v1/merchant/...` backed by `MerchantPortalService`. Every request enforces HMAC-signed token validation, multi-tenant isolation, optimistic concurrency locking, and integer paise monetary arithmetic.
+  2. **Authoritative Human Approval Queue:** Dedicated workbench for reviewing escalated proposals. Approving or rejecting a ticket updates `MerchantApproval` records with optimistic concurrency control, mutates underlying quote terms and statuses, and emits cryptographically signed audit events.
+  3. **Policy Governance & Live Fingerprinting:** Merchant policy configurations are governed with platform-enforced hard ceilings (maximum 50% discount rate, 100% margin constraint). Updates dynamically re-calculate the SHA-256 `policy_hash` directly on the server.
+  4. **Cryptographic Chain Verification:** The control plane provides real-time verification of the immutable append-only `audit_events` hash chain (`AuditEvent.verify_chain()`), surfacing cryptographic tampering detection badges directly on the UI.
+  5. **Out-of-Band Payment Reconciliation:** Store operators can trigger server-side reconciliation for any order directly against Razorpay's authoritative payments API to resolve asynchronous delivery gaps.
+  6. **Durable Mutation Idempotency:** Inventory adjustments and demo simulations require an `X-Idempotency-Key`; a transactionally persisted receipt replays an identical completed request and rejects payload/key conflicts before any repeat side effect.
+- **Consequences:**
+  - *Positive:* Full visibility and operational control over autonomous store actions with tamper-evident audit trails and zero secret exposure.
+  - *Negative:* All admin actions require active backend network roundtrips to maintain authoritative state.
+
+---
+
+## ADR-017: Interactive Demo Simulation Sandbox & End-to-End Hardening
+
+- **Status:** ACCEPTED
+- **Context:** Demonstrating, evaluating, and stress-testing the Agent-Ready Merchant control plane requires a cohesive, deterministic simulation workbench (`/demo`) that exercises the entire commerce flow (session initiation -> discovery -> quote -> negotiation -> HITL escalation -> order creation -> Razorpay payment capture -> webhook verification -> settlement -> audit hash chaining) without using mocked shortcuts or compromising security invariants.
+- **Decision:**
+  1. **Server-Authoritative Demo Simulation Service:** Implemented `DemoSimulatorService` (`src/agent_ready_merchant/services/demo_simulator_service.py`) exposed via authenticated endpoints `POST /api/v1/merchant/demo/simulate` and `POST /api/v1/merchant/demo/seed`. All simulation steps operate directly on real PostgreSQL domain models, pure Python state machines, deterministic policy engine rules, and cryptographically verified webhook processors.
+  2. **Three Core Demonstration Scenarios:**
+     - *Standard Autonomous Commerce:* Policy-compliant discount evaluated to `ALLOW`, order generated, Razorpay HMAC webhook captured, order settled (`PAID`), stock deducted, audit chain appended.
+     - *Supervised HITL Escalation:* Aggressive discount in Supervised Autonomy Mode evaluates to `ESCALATE_APPROVAL`, creating a stateful `MerchantApproval` ticket that can be reviewed and resolved in `/approvals`.
+     - *Out-of-Band Payment Reconciliation:* Dropped webhook scenario with server-authoritative query against Razorpay client.
+  3. **Adversarial Hardening Defense Matrix:** Comprehensive adversarial tests verify resilience against forged merchant tokens, capability injection, below-floor pricing attacks, cross-tenant resource snooping, replay attacks, duplicate submissions, and secret leakage.
+- **Consequences:**
+  - *Positive:* Allows instant, reproducible verification of the complete platform across all quality gates without external network flakiness.
+  - *Negative:* Demo catalog and state requires explicit merchant-scoped reset triggers.
+
+---
+
+## ADR-018: InsForge PostgreSQL Integration & Deployment Architecture
+
+- **Status:** ACCEPTED
+- **Context:** Deploying the Agent-Ready Merchant backend to InsForge requires connecting the application and Alembic migrations to InsForge's managed PostgreSQL infrastructure without altering the canonical architecture, state machines, policy engines, or compromising strict security/concurrency invariants (`INV-FIN-01` through `INV-FIN-05`, `INV-AGY-01` through `INV-AGY-05`).
+- **Decision:**
+  1. **Target Managed PostgreSQL via Connection String:** Connected the FastAPI async backend (`asyncpg`) and Alembic synchronous migration runner (`psycopg2`/`asyncpg`) directly to the linked InsForge PostgreSQL cluster (`9mvctuj3.ap-southeast.database.insforge.app:5432/insforge`).
+  2. **Automated Alembic Migration Chain (001 to 006):** Applied the canonical Alembic migration chain against the target database, including the durable merchant mutation receipt uniqueness constraint that prevents replayed control-plane side effects.
+  3. **Preservation of Authoritative Domain & Gateway Architecture:** The application logic, deterministic policy engine, HMAC verification, cryptographic audit chain, and capability checks remain 100% server-authoritative inside FastAPI; InsForge serves exclusively as the managed PostgreSQL database and deployment platform.
+  4. **Health Check Observability:** Enhanced `/health` endpoint to explicitly report `application_alive`, `database_reachable`, `database_connected`, and `configuration_valid` without exposing database credentials or secrets.
+  5. **Direct Concurrency Verification:** Created and verified `tests/test_insforge_postgresql_integration.py` to confirm that PostgreSQL row-level locks (`SELECT ... FOR UPDATE`), transaction rollback boundaries, and cryptographic hash chain linking execute cleanly on InsForge infrastructure.
+- **Consequences:**
+  - *Positive:* Full feature parity and invariant compliance on production-grade cloud PostgreSQL with zero architectural compromises.
+  - *Negative:* Requires SSL connection parameters (`sslmode=require`) and network accessibility to the InsForge database host.
+
+---
+
+## ADR-019: InsForge-Backed Persistent Merchant Identity
+
+- **Status:** ACCEPTED
+- **Context:** A store slug and Razorpay key identify a merchant configuration but cannot prove who owns it. The prior browser session refresh mechanism therefore could not support a secure login after logout or session expiry.
+- **Decision:** Use InsForge Auth as the browser identity provider. A verified InsForge user ID is bound once to `merchants.auth_user_id` under a unique database constraint. The backend validates the short-lived InsForge bearer token server-side before issuing its existing `HttpOnly`, `SameSite=Strict` merchant session cookie. Slugs remain public identifiers and are never login credentials.
+- **Consequences:**
+  - *Positive:* Merchants sign up once with email/password and can securely return without Razorpay credentials or browser-stored administrator tokens.
+  - *Negative:* Existing merchants created before this binding require an explicit owner-linking migration before they can use InsForge login.
+
+
+
+
 

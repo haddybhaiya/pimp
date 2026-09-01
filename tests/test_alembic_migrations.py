@@ -5,12 +5,12 @@ from alembic.script import ScriptDirectory
 
 
 def test_alembic_script_directory_and_head() -> None:
-    """Verifies that Alembic discovers the migration chain and points to 002_gateway_hardening."""
+    """Verifies that Alembic discovers the complete migration chain and its head."""
     config = Config("alembic.ini")
     script = ScriptDirectory.from_config(config)
 
     head = script.get_current_head()
-    assert head == "005_safety_policy_governance"
+    assert head == "007_merchant_auth_user_binding"
 
     revision = script.get_revision("001_initial_schema")
     assert revision is not None
@@ -31,3 +31,11 @@ def test_alembic_script_directory_and_head() -> None:
     governance_revision = script.get_revision("005_safety_policy_governance")
     assert governance_revision is not None
     assert governance_revision.down_revision == "004_payment_reliability"
+
+    mutation_receipts_revision = script.get_revision("006_merchant_mutation_receipts")
+    assert mutation_receipts_revision is not None
+    assert mutation_receipts_revision.down_revision == "005_safety_policy_governance"
+
+    auth_binding_revision = script.get_revision("007_merchant_auth_user_binding")
+    assert auth_binding_revision is not None
+    assert auth_binding_revision.down_revision == "006_merchant_mutation_receipts"
