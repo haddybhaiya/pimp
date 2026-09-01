@@ -10,9 +10,11 @@ from agent_ready_merchant.db.base import GUID, Base, OptimisticLockMixin, Timest
 
 if TYPE_CHECKING:
     from agent_ready_merchant.models.audit import AuditEvent
+    from agent_ready_merchant.models.experiment import MerchantExperiment
     from agent_ready_merchant.models.order import Order
     from agent_ready_merchant.models.policy import PolicyRule
     from agent_ready_merchant.models.product import Product
+    from agent_ready_merchant.models.proposal import MerchantProposal
     from agent_ready_merchant.models.quote import PriceQuote
     from agent_ready_merchant.models.session import BuyerAgentSession
     from agent_ready_merchant.models.transaction import TransactionRecord
@@ -99,4 +101,14 @@ class Merchant(Base, TimestampMixin, OptimisticLockMixin):
     audit_events: Mapped[list["AuditEvent"]] = relationship(
         "AuditEvent",
         back_populates="merchant",
+    )
+    proposals: Mapped[list["MerchantProposal"]] = relationship(
+        "MerchantProposal",
+        back_populates="merchant",
+        cascade="all, delete-orphan",
+    )
+    experiments: Mapped[list["MerchantExperiment"]] = relationship(
+        "MerchantExperiment",
+        back_populates="merchant",
+        cascade="all, delete-orphan",
     )
