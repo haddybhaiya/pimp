@@ -329,8 +329,8 @@ export class ApiClient {
     });
   }
 
-  async getAuditLedger(limit = 50): Promise<AuditLedger> {
-    return this.request<AuditLedger>(`/api/v1/merchant/audit?limit=${limit}`);
+  async getAuditLedger(limit = 50, offset = 0): Promise<AuditLedger> {
+    return this.request<AuditLedger>(`/api/v1/merchant/audit?limit=${limit}&offset=${offset}`);
   }
 
   async seedDemoState(): Promise<DemoSeedResponse> {
@@ -358,6 +358,7 @@ export class ApiClient {
   async runAgentAnalysis(): Promise<MerchantAgentAnalyzeResponse> {
     return this.request<MerchantAgentAnalyzeResponse>('/api/v1/merchant/agent/analyze', {
       method: 'POST',
+      headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
     });
   }
 

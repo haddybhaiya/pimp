@@ -8,15 +8,18 @@ import { AuditLedger, AuditEventItem } from '@/types/portal';
 import { formatRelativeTime } from '@/lib/utils';
 import { FileText, ShieldCheck, ShieldAlert } from 'lucide-react';
 
+const PAGE_SIZE = 50;
+
 export const AuditPage: React.FC = () => {
   const [ledger, setLedger] = useState<AuditLedger | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   useEffect(() => {
     const fetchAudit = async () => {
       try {
-        const data = await api.getAuditLedger(50);
+        const data = await api.getAuditLedger(PAGE_SIZE);
         setLedger(data);
         setError(null);
       } catch (err: unknown) {
@@ -27,6 +30,20 @@ export const AuditPage: React.FC = () => {
     };
     fetchAudit();
   }, []);
+
+  const loadOlder = async () => {
+    if (!ledger || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      const next = await api.getAuditLedger(PAGE_SIZE, ledger.events.length);
+      setLedger({ ...next, events: [...ledger.events, ...next.events] });
+      setError(null);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Unable to load older audit events.');
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -90,9 +107,19 @@ export const AuditPage: React.FC = () => {
         </div>
       )}
       {ledger && ledger.total_count > ledger.events.length && (
-        <p className="text-center text-xs text-muted-foreground">
-          Showing the latest {ledger.events.length} of {ledger.total_count} immutable audit events.
-        </p>
+        <div className="space-y-2 text-center">
+          <p className="text-xs text-muted-foreground">
+            Showing {ledger.events.length} of {ledger.total_count} immutable audit events.
+          </p>
+          <button
+            type="button"
+            onClick={loadOlder}
+            disabled={isLoadingMore}
+            className="text-xs font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isLoadingMore ? 'Loading older events…' : 'Load older events'}
+          </button>
+        </div>
       )}
     </div>
   );

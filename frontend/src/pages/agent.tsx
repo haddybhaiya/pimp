@@ -123,7 +123,7 @@ export const AgentPage: React.FC = () => {
       case 'REJECTED':
         return <Badge variant="destructive" className="text-[10px] font-mono">REJECTED</Badge>;
       case 'CONVERTED_TO_EXPERIMENT':
-        return <Badge variant="default" className="text-[10px] font-mono bg-indigo-500/20 text-indigo-300 border-indigo-500/30">EXPERIMENT</Badge>;
+        return <Badge variant="default" className="text-[10px] font-mono bg-brand-bright/10 text-brand-bright border-brand-bright/30">EXPERIMENT</Badge>;
       case 'UNDER_REVIEW':
         return <Badge variant="warning" className="text-[10px] font-mono">UNDER REVIEW</Badge>;
       default:
@@ -134,7 +134,7 @@ export const AgentPage: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Top Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#0D1527]/80 p-5 rounded-2xl border border-[#24314A]/60 shadow-lg">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#1B1C1E] p-5 rounded-2xl border border-white/10 shadow-lg">
         <div className="flex items-start gap-3.5">
           <div className="h-10 w-10 rounded-xl bg-brand-bright/10 border border-brand-bright/30 flex items-center justify-center shrink-0">
             <Bot className="h-5 w-5 text-brand-bright" />
@@ -158,7 +158,7 @@ export const AgentPage: React.FC = () => {
             size="sm"
             onClick={fetchData}
             isLoading={isLoading}
-            className="text-xs border-[#24314A] bg-[#0A101D] hover:bg-[#141D31]"
+            className="text-xs border-white/10 bg-[#0C0F11] hover:bg-[#202426]"
           >
             <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Refresh
           </Button>
@@ -174,7 +174,7 @@ export const AgentPage: React.FC = () => {
       </div>
 
       {/* Safety & Invariant Indicator */}
-      <div className="flex items-center justify-between px-4 py-2.5 bg-[#0B132B]/60 rounded-xl border border-emerald-500/20 text-xs">
+      <div className="flex items-center justify-between px-4 py-2.5 bg-[#171A1C] rounded-xl border border-emerald-500/20 text-xs">
         <div className="flex items-center gap-2 text-emerald-400">
           <ShieldCheck className="h-4 w-4 shrink-0" />
           <span><strong>Safety Principle:</strong> Intelligence ≠ Authority. The Merchant Agent cannot mutate prices, alter financial policy, or grant capabilities directly.</span>
@@ -215,13 +215,13 @@ export const AgentPage: React.FC = () => {
         {isLoading ? (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
-              <Skeleton key={i} className="h-24 w-full rounded-xl bg-[#0D1527]/50" />
+              <Skeleton key={i} className="h-24 w-full rounded-xl bg-[#202426]" />
             ))}
           </div>
         ) : snapshot?.telemetry ? (
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
             {snapshot.telemetry.map((t) => (
-              <Card key={t.metric_name} className="bg-[#0D1527]/60 border-[#24314A]/70 p-3.5 rounded-xl hover:border-brand-bright/30 transition-all">
+              <Card key={t.metric_name} className="bg-[#202426] border-white/10 p-3.5 rounded-xl hover:border-brand-bright/30 transition-all">
                 <div className="flex items-center justify-between gap-1 mb-1.5">
                   <span className="text-[10px] font-mono text-text-muted uppercase truncate">
                     {t.metric_name.replace(/_/g, ' ')}
@@ -269,7 +269,7 @@ export const AgentPage: React.FC = () => {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {diagnoses.map((d, idx) => (
-              <Card key={idx} className="bg-[#0D1527]/50 border-amber-500/20 p-4 rounded-xl">
+              <Card key={idx} className="bg-[#202426] border-amber-500/20 p-4 rounded-xl">
                 <div className="flex items-center justify-between mb-2">
                   <span className="font-mono text-xs text-amber-400 font-semibold">{d.pattern}</span>
                   <Badge variant={d.severity === 'HIGH' ? 'destructive' : 'warning'} className="text-[10px]">
@@ -277,10 +277,10 @@ export const AgentPage: React.FC = () => {
                   </Badge>
                 </div>
                 <p className="text-xs text-text-secondary leading-relaxed mb-3">{d.summary}</p>
-                <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-[#24314A]/40 text-[11px] font-mono text-text-muted">
+                <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-white/10 text-[11px] font-mono text-text-muted">
                   <span>Evidence:</span>
                   {d.evidence_references.map((ev, i) => (
-                    <span key={i} className="px-1.5 py-0.5 rounded bg-[#141D31] text-brand-bright text-[10px]">
+                    <span key={i} className="px-1.5 py-0.5 rounded bg-[#202426] text-brand-bright text-[10px]">
                       {ev}
                     </span>
                   ))}
@@ -308,7 +308,7 @@ export const AgentPage: React.FC = () => {
         {isLoading ? (
           <div className="space-y-3">
             {[1, 2, 3].map((i) => (
-              <Skeleton key={i} className="h-32 w-full rounded-xl bg-[#0D1527]/50" />
+              <Skeleton key={i} className="h-32 w-full rounded-xl bg-[#202426]" />
             ))}
           </div>
         ) : proposals.length === 0 ? (
@@ -322,7 +322,7 @@ export const AgentPage: React.FC = () => {
             {proposals.map((p) => {
               const isPending = p.status === 'PROPOSED' || p.status === 'UNDER_REVIEW';
               return (
-                <Card key={p.id} className="bg-[#0D1527]/70 border-[#24314A]/80 p-5 rounded-2xl hover:border-brand-bright/40 transition-all">
+                <Card key={p.id} className="bg-[#1B1C1E] border-white/10 p-5 rounded-2xl hover:border-brand-bright/40 transition-all">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
                     <div className="flex items-center gap-2.5">
                       <span className="font-mono text-xs text-brand-bright font-bold">
@@ -340,7 +340,7 @@ export const AgentPage: React.FC = () => {
                   <p className="text-xs text-text-secondary mb-3 leading-relaxed">{p.proposed_change}</p>
 
                   {/* Hypothesis & Expected Impact Box */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-[#070B14] p-3.5 rounded-xl border border-[#24314A]/60 mb-3 text-xs">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-[#0C0F11] p-3.5 rounded-xl border border-white/10 mb-3 text-xs">
                     <div>
                       <span className="text-[10px] font-mono text-text-muted uppercase block">Observation & Hypothesis</span>
                       <p className="text-text-secondary text-xs mt-0.5">{p.hypothesis}</p>
@@ -359,7 +359,7 @@ export const AgentPage: React.FC = () => {
                   <div className="flex flex-wrap items-center gap-1.5 mb-3 text-[11px] font-mono text-text-muted">
                     <span>Evidence Links:</span>
                     {p.evidence.map((ev, i) => (
-                      <span key={i} className="px-1.5 py-0.5 rounded bg-[#141D31] text-brand-bright text-[10px]">
+                      <span key={i} className="px-1.5 py-0.5 rounded bg-[#202426] text-brand-bright text-[10px]">
                         {ev}
                       </span>
                     ))}
@@ -368,7 +368,7 @@ export const AgentPage: React.FC = () => {
 
                   {/* Review Action Footer */}
                   {isPending && p.risk_level !== 'PROHIBITED' && (
-                    <div className="flex justify-end gap-2.5 pt-3 border-t border-[#24314A]/60">
+                    <div className="flex justify-end gap-2.5 pt-3 border-t border-white/10">
                       <Button
                         variant="outline"
                         size="sm"
@@ -387,7 +387,7 @@ export const AgentPage: React.FC = () => {
                           setSelectedProposal(p);
                           setReviewAction('CONVERT_TO_EXPERIMENT');
                         }}
-                        className="text-xs border-indigo-500/40 text-indigo-300 hover:bg-indigo-500/10"
+                        className="text-xs border-brand-bright/40 text-brand-bright hover:bg-brand-bright/10"
                       >
                         <FlaskConical className="h-3.5 w-3.5 mr-1" /> Convert to Experiment
                       </Button>
@@ -439,7 +439,7 @@ export const AgentPage: React.FC = () => {
                 Reason for Rejection
               </label>
               <textarea
-                className="w-full h-20 bg-[#070B14] border border-[#24314A] rounded-lg p-2 text-xs text-text-primary focus:border-brand-bright focus:outline-none"
+                className="w-full h-20 bg-[#0C0F11] border border-white/10 rounded-lg p-2 text-xs text-text-primary focus:border-brand-bright focus:outline-none"
                 placeholder="Explain why this proposal is unsuitable..."
                 value={rejectionReason}
                 onChange={(e) => setRejectionReason(e.target.value)}

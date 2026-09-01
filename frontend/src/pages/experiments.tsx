@@ -139,15 +139,15 @@ export const ExperimentsPage: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Top Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#0D1527]/80 p-5 rounded-2xl border border-[#24314A]/60 shadow-lg">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#1B1C1E] p-5 rounded-2xl border border-white/10 shadow-lg">
         <div className="flex items-start gap-3.5">
-          <div className="h-10 w-10 rounded-xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center shrink-0">
-            <FlaskConical className="h-5 w-5 text-indigo-400" />
+          <div className="h-10 w-10 rounded-xl bg-brand-bright/10 border border-brand-bright/30 flex items-center justify-center shrink-0">
+            <FlaskConical className="h-5 w-5 text-brand-bright" />
           </div>
           <div>
             <div className="flex items-center gap-2.5">
               <h2 className="text-xl font-bold tracking-tight text-text-primary">Optimization Experiments</h2>
-              <Badge variant="outline" className="text-[10px] font-mono border-indigo-500/40 text-indigo-300">
+              <Badge variant="outline" className="text-[10px] font-mono border-brand-bright/40 text-brand-bright">
                 Approval-First Framework
               </Badge>
             </div>
@@ -163,14 +163,14 @@ export const ExperimentsPage: React.FC = () => {
             size="sm"
             onClick={fetchExperiments}
             isLoading={isLoading}
-            className="text-xs border-[#24314A] bg-[#0A101D] hover:bg-[#141D31]"
+            className="text-xs border-white/10 bg-[#0C0F11] hover:bg-[#202426]"
           >
             <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Refresh
           </Button>
           <Button
             size="sm"
             onClick={() => setShowCreateModal(true)}
-            className="text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 shadow-md shadow-indigo-500/10"
+            className="text-xs font-semibold bg-brand-bright text-[#070B14] hover:bg-brand-bright/90 shadow-md shadow-brand-bright/10"
           >
             <Plus className="h-3.5 w-3.5 mr-1.5" /> New Experiment
           </Button>
@@ -178,8 +178,8 @@ export const ExperimentsPage: React.FC = () => {
       </div>
 
       {/* Safety Principle */}
-      <div className="flex items-center justify-between px-4 py-2.5 bg-[#0B132B]/60 rounded-xl border border-indigo-500/20 text-xs">
-        <div className="flex items-center gap-2 text-indigo-300">
+      <div className="flex items-center justify-between px-4 py-2.5 bg-[#171A1C] rounded-xl border border-emerald-500/20 text-xs">
+        <div className="flex items-center gap-2 text-emerald-400">
           <ShieldCheck className="h-4 w-4 shrink-0" />
           <span><strong>Measurement Invariant:</strong> Outcomes are calculated deterministically from authoritative telemetry. The model cannot hallucinate or fabricate experiment results.</span>
         </div>
@@ -203,12 +203,12 @@ export const ExperimentsPage: React.FC = () => {
       {isLoading ? (
         <div className="space-y-3">
           {[1, 2, 3].map((i) => (
-            <Skeleton key={i} className="h-36 w-full rounded-xl bg-[#0D1527]/50" />
+            <Skeleton key={i} className="h-36 w-full rounded-xl bg-[#202426]" />
           ))}
         </div>
       ) : experiments.length === 0 ? (
         <EmptyState
-          icon={<FlaskConical className="h-10 w-10 text-indigo-400" />}
+          icon={<FlaskConical className="h-10 w-10 text-brand-bright" />}
           title="No experiments registered"
           description="Create a new experiment or convert an agent proposal into a structured test."
         />
@@ -220,10 +220,10 @@ export const ExperimentsPage: React.FC = () => {
             const isPendingApproval = exp.approval_status === 'PENDING';
 
             return (
-              <Card key={exp.id} className="bg-[#0D1527]/70 border-[#24314A]/80 p-5 rounded-2xl hover:border-indigo-500/40 transition-all">
+              <Card key={exp.id} className="bg-[#1B1C1E] border-white/10 p-5 rounded-2xl hover:border-brand-bright/40 transition-all">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
                   <div className="flex items-center gap-2.5">
-                    <span className="font-mono text-xs text-indigo-300 font-bold">
+                    <span className="font-mono text-xs text-brand-bright font-bold">
                       EXP-{exp.id.slice(0, 8)}
                     </span>
                     {getStatusBadge(exp.status)}
@@ -240,7 +240,7 @@ export const ExperimentsPage: React.FC = () => {
                 <p className="text-xs text-text-secondary mb-3 leading-relaxed">{exp.hypothesis}</p>
 
                 {/* Target Metric Box */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-[#070B14] p-3.5 rounded-xl border border-[#24314A]/60 mb-3 text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-[#0C0F11] p-3.5 rounded-xl border border-white/10 mb-3 text-xs">
                   <div>
                     <span className="text-[10px] font-mono text-text-muted uppercase block">Target Metric</span>
                     <span className="font-bold text-text-primary font-mono text-xs mt-0.5 block">{exp.target_metric}</span>
@@ -251,7 +251,7 @@ export const ExperimentsPage: React.FC = () => {
                   </div>
                   <div>
                     <span className="text-[10px] font-mono text-text-muted uppercase block">Target Goal</span>
-                    <span className="font-bold text-indigo-400 font-mono text-xs mt-0.5 block">{exp.target_value}</span>
+                    <span className="font-bold text-brand-bright font-mono text-xs mt-0.5 block">{exp.target_value}</span>
                   </div>
                   <div>
                     <span className="text-[10px] font-mono text-text-muted uppercase block">Approval Status</span>
@@ -261,7 +261,7 @@ export const ExperimentsPage: React.FC = () => {
 
                 {/* Measurement Result (if evaluated) */}
                 {latestResult && (
-                  <div className="bg-[#0A101D] border border-emerald-500/30 p-4 rounded-xl mb-3 space-y-2 text-xs">
+                  <div className="bg-[#0C0F11] border border-emerald-500/30 p-4 rounded-xl mb-3 space-y-2 text-xs">
                     <div className="flex items-center justify-between">
                       <span className="font-mono text-xs font-bold text-emerald-400">Authoritative Measurement Result</span>
                       {getRecommendationBadge(latestResult.recommendation)}
@@ -283,7 +283,7 @@ export const ExperimentsPage: React.FC = () => {
                       </div>
                       <div>
                         <span className="text-text-muted block uppercase text-[9px]">Confidence</span>
-                        <span className="font-bold text-indigo-300">{Math.round(latestResult.confidence_score * 100)}%</span>
+                        <span className="font-bold text-brand-bright">{Math.round(latestResult.confidence_score * 100)}%</span>
                       </div>
                     </div>
                     {latestResult.limitations.length > 0 && (
@@ -295,7 +295,7 @@ export const ExperimentsPage: React.FC = () => {
                 )}
 
                 {/* Action Footer */}
-                <div className="flex justify-end gap-2.5 pt-3 border-t border-[#24314A]/60">
+                <div className="flex justify-end gap-2.5 pt-3 border-t border-white/10">
                   {isPendingApproval && (
                     <Button
                       size="sm"
@@ -312,7 +312,7 @@ export const ExperimentsPage: React.FC = () => {
                       size="sm"
                       isLoading={actionLoadingId === exp.id}
                       onClick={() => handleEvaluate(exp.id)}
-                      className="text-xs border-indigo-500/40 text-indigo-300 hover:bg-indigo-500/10"
+                      className="text-xs border-brand-bright/40 text-brand-bright hover:bg-brand-bright/10"
                     >
                       <Sliders className="h-3.5 w-3.5 mr-1" /> Evaluate Results
                     </Button>
@@ -344,7 +344,7 @@ export const ExperimentsPage: React.FC = () => {
               Hypothesis & Expected Mechanism
             </label>
             <textarea
-              className="w-full h-20 bg-[#070B14] border border-[#24314A] rounded-lg p-2 text-xs text-text-primary focus:border-indigo-400 focus:outline-none"
+              className="w-full h-20 bg-[#0C0F11] border border-white/10 rounded-lg p-2 text-xs text-text-primary focus:border-brand-bright focus:outline-none"
               placeholder="Explain what change will be made and why it improves conversion..."
               value={newExpHypothesis}
               onChange={(e) => setNewExpHypothesis(e.target.value)}
@@ -379,7 +379,7 @@ export const ExperimentsPage: React.FC = () => {
             <Button type="button" variant="outline" size="sm" onClick={() => setShowCreateModal(false)}>
               Cancel
             </Button>
-            <Button type="submit" size="sm" isLoading={isCreating} className="bg-indigo-500 text-white hover:bg-indigo-600">
+            <Button type="submit" size="sm" isLoading={isCreating} className="bg-brand-bright text-[#070B14] hover:bg-brand-bright/90">
               Register Experiment
             </Button>
           </DialogFooter>
