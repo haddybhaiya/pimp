@@ -400,6 +400,35 @@ async def test_suspended_merchant_session_is_rejected_immediately(
 
 
 @pytest.mark.asyncio
+async def test_insforge_identity_opens_only_its_linked_active_workspace(
+    db_session: AsyncSession,
+) -> None:
+    """A verified InsForge identity may authenticate only its linked merchant."""
+    owner_id = uuid.uuid4()
+    merchant = Merchant(
+        name="InsForge Linked Store",
+        slug=f"insforge-{uuid.uuid4().hex[:8]}",
+        status="ACTIVE",
+        rzp_key_id="rzp_test_insforge_linked",
+        auth_user_id=owner_id,
+    )
+    db_session.add(merchant)
+    await db_session.flush()
+
+    response = await MerchantAuthService.authenticate_insforge_merchant(
+        db_session, owner_id, get_settings()
+    )
+
+    assert response.merchant_id == merchant.id
+    assert response.token
+
+    with pytest.raises(ValueError, match="No merchant workspace"):
+        await MerchantAuthService.authenticate_insforge_merchant(
+            db_session, uuid.uuid4(), get_settings()
+        )
+
+
+@pytest.mark.asyncio
 async def test_webhook_secret_cannot_authorize_merchant_session(
     db_session: AsyncSession,
 ) -> None:

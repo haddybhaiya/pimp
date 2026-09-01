@@ -10,7 +10,7 @@ def test_alembic_script_directory_and_head() -> None:
     script = ScriptDirectory.from_config(config)
 
     head = script.get_current_head()
-    assert head == "006_merchant_mutation_receipts"
+    assert head == "007_merchant_auth_user_binding"
 
     revision = script.get_revision("001_initial_schema")
     assert revision is not None
@@ -35,3 +35,7 @@ def test_alembic_script_directory_and_head() -> None:
     mutation_receipts_revision = script.get_revision("006_merchant_mutation_receipts")
     assert mutation_receipts_revision is not None
     assert mutation_receipts_revision.down_revision == "005_safety_policy_governance"
+
+    auth_binding_revision = script.get_revision("007_merchant_auth_user_binding")
+    assert auth_binding_revision is not None
+    assert auth_binding_revision.down_revision == "006_merchant_mutation_receipts"
