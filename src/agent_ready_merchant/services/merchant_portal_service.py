@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent_ready_merchant.constants import PLATFORM_MAX_SINGLE_TRANSACTION_PAISE
 from agent_ready_merchant.gateway.constants import COMMERCE_PROTOCOL_VERSION
 from agent_ready_merchant.models.approval import MerchantApproval
 from agent_ready_merchant.models.audit import AuditEvent
@@ -541,6 +542,18 @@ class MerchantPortalService:
         if exp < now:
             approval.status = "EXPIRED"
             await session.flush()
+            await AuditEvent.create_event(
+                session=session,
+                merchant_id=merchant_id,
+                actor_type="SYSTEM",
+                event_type="APPROVAL_EXPIRED",
+                payload={
+                    "approval_id": str(approval.id),
+                    "quote_id": str(approval.quote_id) if approval.quote_id else None,
+                    "status": approval.status,
+                    "expires_at": exp.isoformat(),
+                },
+            )
             raise ValueError("Approval ticket has expired.")
 
         validated_counter_discount: int | None = None
@@ -765,6 +778,8 @@ class MerchantPortalService:
             raise ValueError(
                 "Autonomy level must be 0 (Read-Only), 1 (Bounded), or 2 (Supervised)."
             )
+        if not 100 <= max_tx_paise <= PLATFORM_MAX_SINGLE_TRANSACTION_PAISE:
+            raise ValueError("Maximum transaction limit exceeds the platform governance ceiling.")
 
         rules_stmt = select(PolicyRule).where(PolicyRule.merchant_id == merchant_id)
         existing_rules = {
@@ -814,13 +829,14 @@ class MerchantPortalService:
 
     @classmethod
     async def get_audit_ledger(
-        cls, session: AsyncSession, merchant_id: uuid.UUID, limit: int = 50
+        cls, session: AsyncSession, merchant_id: uuid.UUID, limit: int = 50, offset: int = 0
     ) -> AuditLedgerResponse:
         """Fetches immutable audit event trail and verifies cryptographic SHA-256 chain."""
         stmt = (
             select(AuditEvent)
             .where(AuditEvent.merchant_id == merchant_id)
             .order_by(AuditEvent.created_at.desc())
+            .offset(offset)
             .limit(limit)
         )
         events = list((await session.execute(stmt)).scalars().all())

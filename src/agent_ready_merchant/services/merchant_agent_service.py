@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_ready_merchant.config import Settings
 from agent_ready_merchant.llm.base import BaseLLMProvider, LLMMessage
+from agent_ready_merchant.models.agent_run import AgentRun
 from agent_ready_merchant.models.approval import MerchantApproval
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.experiment import MerchantExperiment, MerchantExperimentResult
@@ -52,11 +53,17 @@ class MerchantAgentService:
 
     @classmethod
     async def build_authoritative_observations(
-        cls, session: AsyncSession, merchant_id: uuid.UUID, window_days: int = 30
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+        window_days: int = 30,
+        start_at: datetime | None = None,
     ) -> MerchantObservationSnapshot:
         """Collects authoritative, tenant-scoped commerce telemetry directly from PostgreSQL."""
+        if not 1 <= window_days <= 90:
+            raise ValueError("Observation window must be between 1 and 90 days.")
         now = datetime.now(UTC)
-        start_window = now - timedelta(days=window_days)
+        start_window = start_at or (now - timedelta(days=window_days))
 
         # 1. Merchant Metadata
         m_stmt = select(Merchant).where(Merchant.id == merchant_id)
@@ -174,7 +181,7 @@ class MerchantAgentService:
 
         # 10. Compute Derived & Estimated Metrics
         conversion_rate = (
-            round((completed_orders / total_sessions) * 100, 2) if total_sessions > 0 else 0.0
+            round((completed_orders / total_quotes) * 100, 2) if total_quotes > 0 else 0.0
         )
         aov_paise = int(total_revenue_paise / completed_orders) if completed_orders > 0 else 0
         quote_acceptance_rate = (
@@ -206,7 +213,7 @@ class MerchantAgentService:
                 value=total_sessions,
                 formatted_value=f"{total_sessions} sessions",
                 unit="count",
-                sample_size=total_sessions,
+                sample_size=total_quotes,
                 window_days=window_days,
                 description="Total unique AI buyer sessions initiated within the window.",
             ),
@@ -268,7 +275,7 @@ class MerchantAgentService:
                 unit="percentage",
                 sample_size=total_sessions,
                 window_days=window_days,
-                description="Percentage of buyer sessions converted into settled orders.",
+                description="Percentage of issued quotes converted into settled orders.",
             ),
             ObservationTelemetryItem(
                 category=ObservationCategory.DERIVED,
@@ -464,11 +471,20 @@ class MerchantAgentService:
         # Prohibited actions check
         prohibited_keywords = (
             "change policy",
+            "modify policy",
+            "update policy",
             "alter floor price",
+            "change floor price",
+            "set floor price",
             "grant capability",
+            "grant permission",
             "increase autonomy",
+            "change autonomy",
             "execute refund",
             "direct refund",
+            "issue refund",
+            "charge card",
+            "initiate payment",
             "transfer money",
             "bypass approval",
             "disable policy",
@@ -507,7 +523,7 @@ class MerchantAgentService:
         session: AsyncSession,
         merchant_id: uuid.UUID,
         snapshot: MerchantObservationSnapshot,
-        llm_provider: BaseLLMProvider,
+        llm_provider: BaseLLMProvider | None,
         settings: Settings,
     ) -> tuple[list[MerchantDiagnosisItem], list[MerchantProposal]]:
         """Invokes LLM with trusted snapshot and parses structured diagnoses and proposals."""
@@ -565,12 +581,16 @@ class MerchantAgentService:
             LLMMessage(role="user", content=user_content),
         ]
 
+        if llm_provider is None:
+            logger.warning("Merchant Agent is unavailable because no LLM provider is configured.")
+            return [], []
+
         try:
             resp = await llm_provider.generate_response(
                 messages=messages,
                 temperature=0.2,
                 max_tokens=2048,
-                timeout=settings.LLM_TIMEOUT_SECONDS,
+                timeout=min(settings.LLM_TIMEOUT_SECONDS, 15.0),
             )
             raw_json = resp.content.strip()
             if raw_json.startswith("```json"):
@@ -598,9 +618,9 @@ class MerchantAgentService:
                 ev_refs = [
                     ref for ref in d.get("evidence_references", []) if ref in all_valid_evidence
                 ]
-                # Default to at least one valid metric if none matched to prevent loss
-                if not ev_refs and snapshot.telemetry:
-                    ev_refs = [snapshot.telemetry[0].metric_name]
+                if not ev_refs:
+                    logger.info("Rejecting diagnosis without snapshot-backed evidence.")
+                    continue
 
                 diag_item = MerchantDiagnosisItem(
                     pattern=d.get("pattern", "GENERAL_OBSERVATION"),
@@ -620,8 +640,13 @@ class MerchantAgentService:
             try:
                 # Validate evidence
                 ev_list = [ref for ref in p.get("evidence", []) if ref in all_valid_evidence]
-                if not ev_list and snapshot.telemetry:
-                    ev_list = [snapshot.telemetry[0].metric_name]
+                if not ev_list:
+                    logger.info("Rejecting proposal without snapshot-backed evidence.")
+                    continue
+                expected_metric = p.get("expected_metric", "")
+                if expected_metric not in valid_telemetry_keys:
+                    logger.info("Rejecting proposal with unsupported expected metric.")
+                    continue
 
                 # Server-authoritative governance check
                 risk_level, is_acceptable, reject_reason = cls.govern_and_classify_proposal(
@@ -637,7 +662,7 @@ class MerchantAgentService:
                     proposed_change=p.get("proposed_change", "Actionable change."),
                     target_entity=p.get("target_entity", "general"),
                     expected_effect=p.get("expected_effect", "Improved conversion."),
-                    expected_metric=p.get("expected_metric", "quote_conversion_rate"),
+                    expected_metric=expected_metric,
                     confidence=float(p.get("confidence", 0.8)),
                     estimated_cost_paise=int(p.get("estimated_cost_paise", 0)),
                     metadata_payload=p.get("metadata_payload", {}),
@@ -675,13 +700,21 @@ class MerchantAgentService:
         cls,
         session: AsyncSession,
         merchant_id: uuid.UUID,
-        llm_provider: BaseLLMProvider,
+        llm_provider: BaseLLMProvider | None,
         settings: Settings,
     ) -> MerchantAgentAnalyzeResponse:
         """Executes a bounded, auditable Merchant Agent optimization turn."""
         start_time = time.monotonic()
-        run_id = uuid.uuid4()
         now = datetime.now(UTC)
+        run = AgentRun(
+            merchant_id=merchant_id,
+            status="RUNNING",
+            step_count=1,
+            total_tokens=0,
+        )
+        session.add(run)
+        await session.flush()
+        run_id = run.id
 
         # 1. Authoritative observation snapshot
         snapshot = await cls.build_authoritative_observations(
@@ -701,6 +734,7 @@ class MerchantAgentService:
         for p in proposals:
             p.run_id = run_id
             session.add(p)
+        run.status = "COMPLETED"
         await session.flush()
 
         # 4. Audit Event Chain Linkage
@@ -751,12 +785,12 @@ class MerchantAgentService:
         return MerchantAgentAnalyzeResponse(
             run_id=run_id,
             merchant_id=merchant_id,
-            status="COMPLETED",
+            status="COMPLETED" if llm_provider is not None else "NO_INTELLIGENCE_ACTION",
             snapshot=snapshot,
             diagnoses=diagnoses,
             proposals=proposal_responses,
             step_count=1,
-            total_tokens=150,
+            total_tokens=0,
             execution_duration_ms=duration_ms,
             executed_at=now,
             message=(
@@ -816,12 +850,18 @@ class MerchantAgentService:
         reviewer_id: str = "merchant_admin",
     ) -> MerchantProposalResponse:
         """Executes human review on a proposal (APPROVE, REJECT, or CONVERT_TO_EXPERIMENT)."""
-        stmt = select(MerchantProposal).where(
-            MerchantProposal.id == proposal_id, MerchantProposal.merchant_id == merchant_id
+        stmt = (
+            select(MerchantProposal)
+            .where(MerchantProposal.id == proposal_id, MerchantProposal.merchant_id == merchant_id)
+            .with_for_update()
         )
         proposal = (await session.execute(stmt)).scalar_one_or_none()
         if not proposal:
             raise ValueError(f"Proposal '{proposal_id}' not found.")
+        if proposal.status != ProposalStatus.PROPOSED.value:
+            raise ValueError(f"Proposal is already reviewed with status '{proposal.status}'.")
+        if proposal.risk_level == ProposalRiskLevel.PROHIBITED.value:
+            raise ValueError("A prohibited proposal cannot be approved or converted.")
 
         now = datetime.now(UTC)
         proposal.reviewed_by = reviewer_id
@@ -882,16 +922,60 @@ class MerchantAgentService:
         creator_id: str = "merchant_admin",
     ) -> ExperimentResponse:
         """Registers a structured merchant optimization experiment in approval-first status."""
+        snapshot = await cls.build_authoritative_observations(session, merchant_id)
+        metrics = {item.metric_name: item for item in snapshot.telemetry}
+        baseline_metric = metrics.get(req.target_metric)
+        if baseline_metric is None or not isinstance(baseline_metric.value, (int, float)):
+            raise ValueError(
+                "Experiment target_metric must be an authoritative numeric telemetry metric."
+            )
+
+        risk_level = ProposalRiskLevel.APPROVAL_REQUIRED.value
+        if req.proposal_id is not None:
+            proposal_stmt = (
+                select(MerchantProposal)
+                .where(
+                    MerchantProposal.id == req.proposal_id,
+                    MerchantProposal.merchant_id == merchant_id,
+                )
+                .with_for_update()
+            )
+            proposal = (await session.execute(proposal_stmt)).scalar_one_or_none()
+            if proposal is None:
+                raise ValueError("Proposal was not found for this merchant.")
+            if proposal.status not in {
+                ProposalStatus.APPROVED.value,
+                ProposalStatus.CONVERTED_TO_EXPERIMENT.value,
+            }:
+                raise ValueError("Experiment proposals must receive merchant approval first.")
+            if proposal.risk_level == ProposalRiskLevel.PROHIBITED.value:
+                raise ValueError("A prohibited proposal cannot be converted into an experiment.")
+            risk_level = proposal.risk_level
+
+        variation_text = json.dumps(req.proposed_variation, sort_keys=True).lower()
+        variation_risk, variation_allowed, _ = cls.govern_and_classify_proposal(
+            {
+                "proposal_type": ProposalType.SUGGEST_BOUNDED_EXPERIMENT.value,
+                "title": req.title,
+                "proposed_change": variation_text,
+            },
+            snapshot.active_policies,
+        )
+        if not variation_allowed:
+            raise ValueError("Experiment variation contains a prohibited production action.")
+        if variation_risk == ProposalRiskLevel.PROHIBITED:
+            raise ValueError("Experiment variation is prohibited by merchant governance.")
+
         exp = MerchantExperiment(
             merchant_id=merchant_id,
             proposal_id=req.proposal_id,
             title=req.title,
             hypothesis=req.hypothesis,
             target_metric=req.target_metric,
-            baseline_value=req.baseline_value,
+            baseline_value=float(baseline_metric.value),
             target_value=req.target_value,
             proposed_variation=req.proposed_variation,
-            risk_level="LOW_RISK_REVERSIBLE",
+            risk_level=risk_level,
             status="APPROVAL_REQUIRED",
             approval_status="PENDING",
             stopping_condition=req.stopping_condition,
@@ -947,13 +1031,19 @@ class MerchantAgentService:
         approver_id: str = "merchant_admin",
     ) -> ExperimentResponse:
         """Approves an experiment to transition it into READY state."""
-        stmt = select(MerchantExperiment).where(
-            MerchantExperiment.id == experiment_id,
-            MerchantExperiment.merchant_id == merchant_id,
+        stmt = (
+            select(MerchantExperiment)
+            .where(
+                MerchantExperiment.id == experiment_id,
+                MerchantExperiment.merchant_id == merchant_id,
+            )
+            .with_for_update()
         )
         exp = (await session.execute(stmt)).scalar_one_or_none()
         if not exp:
             raise ValueError(f"Experiment '{experiment_id}' not found.")
+        if exp.status != "APPROVAL_REQUIRED" or exp.approval_status != "PENDING":
+            raise ValueError("Only a pending experiment can be approved.")
 
         now = datetime.now(UTC)
         exp.approval_status = "APPROVED"
@@ -1072,16 +1162,45 @@ class MerchantAgentService:
         experiment_id: uuid.UUID,
     ) -> ExperimentResultResponse:
         """Deterministically evaluates experiment outcomes against observed metrics."""
-        stmt = select(MerchantExperiment).where(
-            MerchantExperiment.id == experiment_id,
-            MerchantExperiment.merchant_id == merchant_id,
+        stmt = (
+            select(MerchantExperiment)
+            .where(
+                MerchantExperiment.id == experiment_id,
+                MerchantExperiment.merchant_id == merchant_id,
+            )
+            .with_for_update()
         )
         exp = (await session.execute(stmt)).scalar_one_or_none()
         if not exp:
             raise ValueError(f"Experiment '{experiment_id}' not found.")
+        if exp.status != "APPROVED" or exp.approval_status != "APPROVED" or exp.start_time is None:
+            raise ValueError(
+                "Only an approved experiment with a recorded start time can be evaluated."
+            )
+
+        result_stmt = select(MerchantExperimentResult).where(
+            MerchantExperimentResult.experiment_id == exp.id
+        )
+        existing_result = (await session.execute(result_stmt)).scalar_one_or_none()
+        if existing_result is not None:
+            return ExperimentResultResponse(
+                id=existing_result.id,
+                experiment_id=existing_result.experiment_id,
+                merchant_id=existing_result.merchant_id,
+                sample_size=existing_result.sample_size,
+                baseline_metric=existing_result.baseline_metric,
+                post_experiment_metric=existing_result.post_experiment_metric,
+                absolute_change=existing_result.absolute_change,
+                percentage_change=existing_result.percentage_change,
+                confidence_score=existing_result.confidence_score,
+                limitations=existing_result.limitations,
+                recommendation=existing_result.recommendation,  # type: ignore[arg-type]
+                deterministic_evidence=existing_result.deterministic_evidence,
+                recorded_at=existing_result.recorded_at,
+            )
 
         snapshot = await cls.build_authoritative_observations(
-            session=session, merchant_id=merchant_id
+            session=session, merchant_id=merchant_id, start_at=exp.start_time
         )
 
         # Match target metric in telemetry
