@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_ready_merchant.config import get_settings
 from agent_ready_merchant.llm.mock_provider import MockLLMProvider
 from agent_ready_merchant.main import app
+from agent_ready_merchant.models.agent_run import AgentRun
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.experiment import MerchantExperiment
 from agent_ready_merchant.models.intent import BuyerIntent
@@ -429,6 +430,11 @@ async def test_agent_run_lifecycle_and_audit_event(
     saved_prop = (await db_session.execute(stmt)).scalar_one_or_none()
     assert saved_prop is not None
     assert saved_prop.merchant_id == m1.id
+    assert saved_prop.run_id == res.run_id
+    saved_run = await db_session.get(AgentRun, res.run_id)
+    assert saved_run is not None
+    assert saved_run.merchant_id == m1.id
+    assert saved_run.status == "COMPLETED"
 
     # Verify Audit Event Linkage
     audit_stmt = (
@@ -552,14 +558,14 @@ async def test_experiment_approval_first_and_deterministic_measurement(
     assert appr_exp.start_time is not None
 
     # 3. Deterministically Evaluate Outcome
-    # Telemetry for m1 has 1 session and 1 order -> conversion rate is 100.0% (vs baseline 50.0%)
-    # But sample size is 1 (< 5) -> must return INCONCLUSIVE due to sample size limitation
+    # The post-approval window contains no new interactions, so the result is
+    # safely inconclusive rather than reusing pre-approval records.
     eval_result = await MerchantAgentService.evaluate_experiment_results(
         session=db_session,
         merchant_id=m1.id,
         experiment_id=exp.id,
     )
-    assert eval_result.sample_size == 1
+    assert eval_result.sample_size == 0
     assert eval_result.recommendation == "INCONCLUSIVE"
     assert any("Sample size too small" in limit for limit in eval_result.limitations)
 
@@ -577,6 +583,7 @@ async def test_fastapi_endpoints_for_agent_and_experiments(
     headers_m1 = {
         "X-Merchant-ID": str(m1.id),
         "X-Auth-Token": token1,
+        "X-Idempotency-Key": str(uuid.uuid4()),
     }
 
     async with AsyncClient(
@@ -714,11 +721,9 @@ async def test_hallucinated_evidence_and_malformed_llm_output_recovery(
         settings=settings,
     )
 
-    # Evidence links must be sanitized to valid telemetry metrics
-    assert len(diagnoses) == 1
-    assert "hallucinated_metric_999" not in diagnoses[0].evidence_references
-    assert len(proposals) == 1
-    assert "hallucinated_metric_xyz" not in proposals[0].evidence
+    # Unsupported evidence is rejected, never remapped to unrelated telemetry.
+    assert diagnoses == []
+    assert proposals == []
 
     # 2. Malformed non-JSON payload
     malformed_llm = MockLLMProvider(responses=["NOT_JSON_AT_ALL <<broken>>"])
@@ -792,6 +797,7 @@ async def test_deterministic_experiment_keep_and_rollback_thresholds(
         target_value=70.0,
         status="APPROVED",
         approval_status="APPROVED",
+        start_time=datetime.now(UTC) - timedelta(minutes=1),
     )
     db_session.add(exp_keep)
 
@@ -805,6 +811,7 @@ async def test_deterministic_experiment_keep_and_rollback_thresholds(
         target_value=150.0,
         status="APPROVED",
         approval_status="APPROVED",
+        start_time=datetime.now(UTC) - timedelta(minutes=1),
     )
     db_session.add(exp_rollback)
     await db_session.commit()

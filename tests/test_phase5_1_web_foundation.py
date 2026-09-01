@@ -25,6 +25,7 @@ from agent_ready_merchant.main import app
 from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.models.policy import PolicyRule
+from agent_ready_merchant.schemas.merchant_auth import MerchantSetupRequest
 from agent_ready_merchant.services.merchant_auth_service import MerchantAuthService
 
 
@@ -367,6 +368,16 @@ async def test_admin_token_expiration_fails_closed(db_session: AsyncSession) -> 
     assert is_valid is False
     assert m_id is None
     assert "expired" in (err or "").lower()
+
+
+def test_setup_schema_enforces_platform_transaction_ceiling() -> None:
+    """Direct setup payloads cannot bypass the ₹1,00,000 platform boundary."""
+    with pytest.raises(ValueError):
+        MerchantSetupRequest(max_single_transaction_paise=10_000_001)
+    assert (
+        MerchantSetupRequest(max_single_transaction_paise=10_000_000).max_single_transaction_paise
+        == 10_000_000
+    )
 
 
 @pytest.mark.asyncio
