@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_ready_merchant.config import get_settings
 from agent_ready_merchant.main import app
+from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.inventory import InventoryItem
 from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.models.order import Order
@@ -534,6 +535,28 @@ async def test_demo_rejects_live_catalog_sku_without_mutating_inventory(
     assert "demo sku" in res.json()["detail"].lower()
     await db_session.refresh(live_inventory)
     assert live_inventory.available_quantity == 7
+    demo_products = list(
+        (
+            await db_session.execute(
+                select(Product).where(
+                    Product.merchant_id == m1.id,
+                    Product.is_demo_sandbox_product.is_(True),
+                )
+            )
+        ).scalars()
+    )
+    demo_audits = list(
+        (
+            await db_session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.merchant_id == m1.id,
+                    AuditEvent.event_type == "DEMO_STATE_INITIALIZED",
+                )
+            )
+        ).scalars()
+    )
+    assert demo_products == []
+    assert demo_audits == []
 
 
 @pytest.mark.asyncio

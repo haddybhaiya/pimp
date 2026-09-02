@@ -9,7 +9,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_ready_merchant.config import get_settings
@@ -17,7 +19,7 @@ from agent_ready_merchant.llm.mock_provider import MockLLMProvider
 from agent_ready_merchant.main import app
 from agent_ready_merchant.models.agent_run import AgentRun
 from agent_ready_merchant.models.audit import AuditEvent
-from agent_ready_merchant.models.experiment import MerchantExperiment
+from agent_ready_merchant.models.experiment import MerchantExperiment, MerchantExperimentResult
 from agent_ready_merchant.models.intent import BuyerIntent
 from agent_ready_merchant.models.inventory import InventoryItem
 from agent_ready_merchant.models.merchant import Merchant
@@ -29,7 +31,9 @@ from agent_ready_merchant.models.proposal import MerchantProposal
 from agent_ready_merchant.models.quote import PriceQuote
 from agent_ready_merchant.models.session import BuyerAgentSession
 from agent_ready_merchant.schemas.merchant_agent import (
+    DiagnosisPattern,
     ExperimentCreateRequest,
+    MerchantDiagnosisItem,
     MerchantObservationSnapshot,
     MerchantProposalReviewRequest,
     ObservationCategory,
@@ -39,6 +43,7 @@ from agent_ready_merchant.schemas.merchant_agent import (
 )
 from agent_ready_merchant.services.merchant_agent_service import MerchantAgentService
 from agent_ready_merchant.services.merchant_auth_service import MerchantAuthService
+from agent_ready_merchant.state_machines.agent_run import AgentRunStateMachine
 
 
 @pytest_asyncio.fixture
@@ -251,6 +256,7 @@ async def test_build_authoritative_observations_tenant_scoped(
     assert "quote_conversion_rate" in telemetry_map
     assert telemetry_map["quote_conversion_rate"].category.value == "DERIVED"
     assert telemetry_map["quote_conversion_rate"].value == 100.0
+    assert telemetry_map["quote_conversion_rate"].sample_size == 1
 
     assert "average_order_value_paise" in telemetry_map
     assert telemetry_map["average_order_value_paise"].category.value == "DERIVED"
@@ -422,7 +428,7 @@ async def test_agent_run_lifecycle_and_audit_event(
                 "expected_effect": "Increases buyer agent selection confidence.",
                 "expected_metric": "quote_conversion_rate",
                 "confidence": 0.90,
-                "estimated_cost_paise": 0,
+                "estimated_cost_paise": 1_250,
             }
         ],
     }
@@ -440,6 +446,7 @@ async def test_agent_run_lifecycle_and_audit_event(
     assert len(res.diagnoses) == 1
     assert len(res.proposals) == 1
     assert res.proposals[0].title == "Add Complete Sizing Guide to Product Description"
+    assert res.proposals[0].estimated_cost_paise == 1_250
 
     # Verify persistent DB record
     stmt = select(MerchantProposal).where(MerchantProposal.id == res.proposals[0].id)
@@ -447,6 +454,7 @@ async def test_agent_run_lifecycle_and_audit_event(
     assert saved_prop is not None
     assert saved_prop.merchant_id == m1.id
     assert saved_prop.run_id == res.run_id
+    assert saved_prop.estimated_cost_paise == 1_250
     saved_run = await db_session.get(AgentRun, res.run_id)
     assert saved_run is not None
     assert saved_run.merchant_id == m1.id
@@ -465,6 +473,122 @@ async def test_agent_run_lifecycle_and_audit_event(
     assert audit is not None
     assert audit.payload["diagnoses_count"] == 1
     assert audit.payload["proposals_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_merchant_only_agent_run_transition_uses_durable_merchant_scope(
+    db_session: AsyncSession, setup_two_merchants_with_history
+):
+    """Merchant Agent runs must transition and audit without a buyer session."""
+    merchant = setup_two_merchants_with_history["m1"]
+    run = AgentRun(merchant_id=merchant.id, status="PENDING")
+    db_session.add(run)
+    await db_session.flush()
+
+    await AgentRunStateMachine.transition(
+        session=db_session,
+        run=run,
+        target_state="RUNNING",
+        actor_type="SYSTEM",
+    )
+
+    audit_stmt = select(AuditEvent).where(AuditEvent.event_type == "AGENT_RUN_TRANSITION_RUNNING")
+    audit = (await db_session.execute(audit_stmt)).scalar_one()
+    assert audit.merchant_id == merchant.id
+    assert audit.session_id is None
+    assert audit.payload["merchant_id"] == str(merchant.id)
+
+
+@pytest.mark.asyncio
+async def test_phase7_database_constraints_link_runs_and_experiment_tenants(
+    db_session: AsyncSession, setup_two_merchants_with_history
+):
+    """Proposal runs and experiment results cannot cross a merchant boundary."""
+    merchant_one = setup_two_merchants_with_history["m1"]
+    merchant_two = setup_two_merchants_with_history["m2"]
+    merchant_one_id = merchant_one.id
+    merchant_two_id = merchant_two.id
+    run = AgentRun(merchant_id=merchant_one_id, status="PENDING")
+    db_session.add(run)
+    await db_session.commit()
+
+    cross_tenant_proposal = MerchantProposal(
+        merchant_id=merchant_two_id,
+        run_id=run.id,
+        proposal_type="EXPOSE_DELIVERY_ETA",
+        title="Cross tenant proposal must be rejected",
+        observation="Observed delivery questions within the merchant storefront.",
+        evidence=["total_buyer_sessions"],
+        hypothesis="Early ETA information may reduce checkout hesitation.",
+        proposed_change="Expose ETA before checkout for selected products.",
+        target_entity="discovery",
+        expected_effect="Higher quote conversion.",
+        expected_metric="quote_conversion_rate",
+        confidence=0.8,
+        risk_level="LOW_RISK_REVERSIBLE",
+        status="PROPOSED",
+    )
+    db_session.add(cross_tenant_proposal)
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
+
+    experiment = MerchantExperiment(
+        merchant_id=merchant_one_id,
+        title="Tenant-bound experiment",
+        hypothesis="A reversible discovery change improves conversion.",
+        target_metric="quote_conversion_rate",
+        baseline_value=20.0,
+        target_value=25.0,
+        status="APPROVED",
+        approval_status="APPROVED",
+    )
+    db_session.add(experiment)
+    await db_session.commit()
+
+    cross_tenant_result = MerchantExperimentResult(
+        experiment_id=experiment.id,
+        merchant_id=merchant_two_id,
+        sample_size=10,
+        baseline_metric=20.0,
+        post_experiment_metric=25.0,
+        absolute_change=5.0,
+        percentage_change=25.0,
+        confidence_score=0.8,
+        recommendation="KEEP",
+    )
+    db_session.add(cross_tenant_result)
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+
+
+def test_merchant_agent_schema_rejects_unknown_diagnoses_and_invalid_targets() -> None:
+    """Model output and experiment targets must remain within bounded typed contracts."""
+    diagnosis = MerchantDiagnosisItem(
+        pattern=DiagnosisPattern.CHECKOUT_FRICTION,
+        summary="Payment attempts often fail before checkout completes.",
+        severity="MEDIUM",
+        evidence_references=["failed_payments_count"],
+    )
+    assert diagnosis.pattern is DiagnosisPattern.CHECKOUT_FRICTION
+
+    with pytest.raises(ValidationError, match="pattern"):
+        MerchantDiagnosisItem.model_validate(
+            {
+                "pattern": "UNSUPPORTED_PATTERN",
+                "summary": "Unsupported model classification.",
+                "severity": "LOW",
+            }
+        )
+
+    for invalid_target in (-0.01, float("nan"), float("inf")):
+        with pytest.raises(ValidationError):
+            ExperimentCreateRequest(
+                title="Bounded metric target",
+                hypothesis="A harmless presentation change improves conversion.",
+                target_metric="quote_conversion_rate",
+                target_value=invalid_target,
+            )
 
 
 @pytest.mark.asyncio
@@ -655,6 +779,13 @@ async def test_fastapi_endpoints_for_agent_and_experiments(
         )
         assert rev_resp.status_code == 200
         assert rev_resp.json()["status"] == "APPROVED"
+        rev_replay_resp = await client.post(
+            f"/api/v1/merchant/agent/proposals/{prop_id}/review",
+            headers=headers_m1,
+            json={"decision": "APPROVE"},
+        )
+        assert rev_replay_resp.status_code == 200
+        assert rev_replay_resp.json() == rev_resp.json()
 
         # 5. POST create experiment
         create_exp_resp = await client.post(
@@ -671,6 +802,20 @@ async def test_fastapi_endpoints_for_agent_and_experiments(
         )
         assert create_exp_resp.status_code == 201
         exp_id = create_exp_resp.json()["id"]
+        create_exp_replay_resp = await client.post(
+            "/api/v1/merchant/experiments",
+            headers=headers_m1,
+            json={
+                "title": "API Test Experiment",
+                "hypothesis": "Test hypothesis mechanism",
+                "target_metric": "quote_conversion_rate",
+                "baseline_value": 10.0,
+                "target_value": 20.0,
+                "proposed_variation": {"feature": "test"},
+            },
+        )
+        assert create_exp_replay_resp.status_code == 201
+        assert create_exp_replay_resp.json()["id"] == exp_id
 
         # 6. GET list experiments
         exp_list_resp = await client.get("/api/v1/merchant/experiments", headers=headers_m1)
@@ -695,6 +840,7 @@ async def test_fastapi_endpoints_for_agent_and_experiments(
         headers_m2 = {
             "X-Merchant-ID": str(m2.id),
             "X-Auth-Token": token2,
+            "X-Idempotency-Key": str(uuid.uuid4()),
         }
         cross_resp = await client.post(
             f"/api/v1/merchant/agent/proposals/{prop_id}/review",
@@ -772,6 +918,51 @@ async def test_hallucinated_evidence_and_malformed_llm_output_recovery(
     )
     assert diag_empty == []
     assert prop_empty == []
+
+    # 3. Valid JSON with an invalid top-level shape also degrades safely.
+    wrong_shape_llm = MockLLMProvider(responses=["[]"])
+    diag_empty, prop_empty = await MerchantAgentService.diagnose_and_propose(
+        session=db_session,
+        merchant_id=m1.id,
+        snapshot=snapshot,
+        llm_provider=wrong_shape_llm,
+        settings=settings,
+    )
+    assert diag_empty == []
+    assert prop_empty == []
+
+
+@pytest.mark.asyncio
+async def test_observations_use_quote_cohorts_and_count_timed_out_payments(
+    db_session: AsyncSession, setup_two_merchants_with_history
+):
+    """Telemetry must use quote cohorts and include upstream payment timeouts."""
+    m1 = setup_two_merchants_with_history["m1"]
+    quote = (
+        await db_session.execute(select(PriceQuote).where(PriceQuote.merchant_id == m1.id))
+    ).scalar_one()
+    order = (await db_session.execute(select(Order).where(Order.merchant_id == m1.id))).scalar_one()
+    quote.created_at = datetime.now(UTC) - timedelta(days=31)
+    order.created_at = datetime.now(UTC) - timedelta(hours=1)
+    db_session.add(
+        PaymentAttempt(
+            order_id=order.id,
+            rzp_order_id="order_alpha_timeout_001",
+            rzp_payment_id="pay_alpha_timeout_001",
+            amount_paise=order.amount_paise,
+            status="TIMED_OUT",
+        )
+    )
+    await db_session.commit()
+
+    snapshot = await MerchantAgentService.build_authoritative_observations(
+        session=db_session, merchant_id=m1.id, window_days=30
+    )
+    telemetry = {item.metric_name: item for item in snapshot.telemetry}
+    assert telemetry["total_quotes_generated"].value == 0
+    assert telemetry["quote_conversion_rate"].value == 0.0
+    assert telemetry["quote_conversion_rate"].sample_size == 0
+    assert telemetry["failed_payments_count"].value == 1
 
 
 @pytest.mark.asyncio
