@@ -1,5 +1,7 @@
 """Tests for Alembic migrations and schema verification."""
 
+from pathlib import Path
+
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
@@ -47,3 +49,15 @@ def test_alembic_script_directory_and_head() -> None:
     merchant_runs_revision = script.get_revision("009_merchant_agent_runs")
     assert merchant_runs_revision is not None
     assert merchant_runs_revision.down_revision == "008_merchant_agent_experiments"
+
+
+def test_merchant_run_downgrade_refuses_to_discard_merchant_scoped_runs() -> None:
+    """Rollback must fail before changing schema when its old shape cannot retain Phase 7 runs."""
+    migration_source = Path("alembic/versions/009_merchant_agent_runs.py").read_text(
+        encoding="utf-8"
+    )
+    preflight = "Cannot downgrade 009_merchant_agent_runs while merchant-scoped"
+    assert preflight in migration_source
+    assert migration_source.index(preflight) < migration_source.index(
+        'op.alter_column("agent_runs", "session_id", existing_type=sa.UUID(), nullable=False)'
+    )

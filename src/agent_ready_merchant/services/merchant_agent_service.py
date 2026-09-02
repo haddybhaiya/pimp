@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -51,6 +52,8 @@ logger = logging.getLogger("agent_ready_merchant.agent_service")
 class MerchantAgentService:
     """Authoritative service executing Merchant Agent observation and optimization."""
 
+    EXPERIMENT_MEASUREMENT_WINDOW_DAYS: int = 30
+
     @classmethod
     async def build_authoritative_observations(
         cls,
@@ -58,11 +61,14 @@ class MerchantAgentService:
         merchant_id: uuid.UUID,
         window_days: int = 30,
         start_at: datetime | None = None,
+        end_at: datetime | None = None,
     ) -> MerchantObservationSnapshot:
         """Collects authoritative, tenant-scoped commerce telemetry directly from PostgreSQL."""
         if not 1 <= window_days <= 90:
             raise ValueError("Observation window must be between 1 and 90 days.")
-        now = datetime.now(UTC)
+        now = end_at or datetime.now(UTC)
+        if start_at is not None and start_at > now:
+            raise ValueError("Observation start time cannot be after its end time.")
         start_window = start_at or (now - timedelta(days=window_days))
 
         # 1. Merchant Metadata
@@ -489,7 +495,57 @@ class MerchantAgentService:
             "bypass approval",
             "disable policy",
         )
-        if any(kw in proposed_change or kw in title for kw in prohibited_keywords):
+        prohibited_text_patterns = (
+            r"\b(?:refund|reimburse|payout|charge|debit|credit|transfer|disburse)\b",
+            r"\b(?:grant|revoke|increase|decrease|change|modify|update|alter|set|disable|enable)\b"
+            r".*\b(?:policy|floor(?: price)?|capabilit(?:y|ies)|permission|autonomy)\b",
+        )
+
+        def has_prohibited_structured_action(value: Any) -> bool:
+            """Reject typed action intents without trusting an LLM's declared proposal type."""
+            action_keys = {"action", "operation", "tool", "command", "intent", "kind", "type"}
+            prohibited_actions = (
+                "refund",
+                "reimburse",
+                "payout",
+                "charge",
+                "debit",
+                "credit",
+                "transfer",
+                "payment",
+                "policy",
+                "floor",
+                "capability",
+                "permission",
+                "autonomy",
+            )
+            if isinstance(value, dict):
+                for key, nested_value in value.items():
+                    normalized_key = str(key).lower()
+                    if normalized_key in action_keys or normalized_key in prohibited_actions:
+                        action_value = json.dumps(nested_value, sort_keys=True, default=str).lower()
+                        if any(
+                            term in normalized_key or term in action_value
+                            for term in prohibited_actions
+                        ):
+                            return True
+                    if has_prohibited_structured_action(nested_value):
+                        return True
+            elif isinstance(value, list):
+                return any(has_prohibited_structured_action(item) for item in value)
+            return False
+
+        text = f"{title}\n{proposed_change}"
+        structured_values = (
+            proposal_data.get("metadata_payload"),
+            proposal_data.get("proposed_variation"),
+            proposal_data.get("structured_action"),
+        )
+        if (
+            any(kw in text for kw in prohibited_keywords)
+            or any(re.search(pattern, text) for pattern in prohibited_text_patterns)
+            or any(has_prohibited_structured_action(value) for value in structured_values)
+        ):
             return (
                 ProposalRiskLevel.PROHIBITED,
                 False,
@@ -958,6 +1014,7 @@ class MerchantAgentService:
                 "proposal_type": ProposalType.SUGGEST_BOUNDED_EXPERIMENT.value,
                 "title": req.title,
                 "proposed_change": variation_text,
+                "proposed_variation": req.proposed_variation,
             },
             snapshot.active_policies,
         )
@@ -1046,11 +1103,29 @@ class MerchantAgentService:
             raise ValueError("Only a pending experiment can be approved.")
 
         now = datetime.now(UTC)
+        baseline_snapshot = await cls.build_authoritative_observations(
+            session=session,
+            merchant_id=merchant_id,
+            window_days=cls.EXPERIMENT_MEASUREMENT_WINDOW_DAYS,
+            end_at=now,
+        )
+        baseline_metric = next(
+            (
+                item
+                for item in baseline_snapshot.telemetry
+                if item.metric_name == exp.target_metric and isinstance(item.value, (int, float))
+            ),
+            None,
+        )
+        if baseline_metric is None:
+            raise ValueError("Experiment target metric is unavailable for baseline measurement.")
+
         exp.approval_status = "APPROVED"
         exp.status = "APPROVED"
         exp.approved_by = approver_id
         exp.approved_at = now
         exp.start_time = now
+        exp.baseline_value = float(baseline_metric.value)
 
         await AuditEvent.create_event(
             session=session,
@@ -1060,6 +1135,9 @@ class MerchantAgentService:
             payload={
                 "experiment_id": str(exp.id),
                 "approved_by": approver_id,
+                "baseline_metric": exp.target_metric,
+                "baseline_value": exp.baseline_value,
+                "measurement_window_days": cls.EXPERIMENT_MEASUREMENT_WINDOW_DAYS,
             },
         )
         await session.commit()
@@ -1199,8 +1277,33 @@ class MerchantAgentService:
                 recorded_at=existing_result.recorded_at,
             )
 
+        experiment_start = (
+            exp.start_time
+            if exp.start_time.tzinfo is not None
+            else exp.start_time.replace(tzinfo=UTC)
+        )
+        measurement_window_end = experiment_start + timedelta(
+            days=cls.EXPERIMENT_MEASUREMENT_WINDOW_DAYS
+        )
+        if datetime.now(UTC) < measurement_window_end:
+            raise ValueError(
+                "Experiment must complete its fixed post-approval measurement window "
+                "before evaluation."
+            )
+
+        baseline_snapshot = await cls.build_authoritative_observations(
+            session=session,
+            merchant_id=merchant_id,
+            window_days=cls.EXPERIMENT_MEASUREMENT_WINDOW_DAYS,
+            start_at=experiment_start - timedelta(days=cls.EXPERIMENT_MEASUREMENT_WINDOW_DAYS),
+            end_at=experiment_start,
+        )
         snapshot = await cls.build_authoritative_observations(
-            session=session, merchant_id=merchant_id, start_at=exp.start_time
+            session=session,
+            merchant_id=merchant_id,
+            window_days=cls.EXPERIMENT_MEASUREMENT_WINDOW_DAYS,
+            start_at=experiment_start,
+            end_at=measurement_window_end,
         )
 
         # Match target metric in telemetry
@@ -1213,7 +1316,17 @@ class MerchantAgentService:
                 sample_size = item.sample_size
                 break
 
-        baseline_metric = exp.baseline_value
+        baseline_metric = next(
+            (
+                float(item.value)
+                for item in baseline_snapshot.telemetry
+                if item.metric_name == exp.target_metric and isinstance(item.value, (int, float))
+            ),
+            None,
+        )
+        if baseline_metric is None:
+            raise ValueError("Experiment target metric is unavailable for baseline measurement.")
+        exp.baseline_value = baseline_metric
         post_experiment_metric = current_metric_val
         absolute_change = round(post_experiment_metric - baseline_metric, 4)
         percentage_change = (
@@ -1256,6 +1369,13 @@ class MerchantAgentService:
                 "baseline": baseline_metric,
                 "post_experiment": post_experiment_metric,
                 "sample_size": sample_size,
+                "measurement_window_days": cls.EXPERIMENT_MEASUREMENT_WINDOW_DAYS,
+                "baseline_window_start": (
+                    experiment_start - timedelta(days=cls.EXPERIMENT_MEASUREMENT_WINDOW_DAYS)
+                ).isoformat(),
+                "baseline_window_end": experiment_start.isoformat(),
+                "post_window_start": experiment_start.isoformat(),
+                "post_window_end": measurement_window_end.isoformat(),
             },
         )
         session.add(result)

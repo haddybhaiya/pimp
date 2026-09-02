@@ -30,7 +30,10 @@ from agent_ready_merchant.models.quote import PriceQuote
 from agent_ready_merchant.models.session import BuyerAgentSession
 from agent_ready_merchant.schemas.merchant_agent import (
     ExperimentCreateRequest,
+    MerchantObservationSnapshot,
     MerchantProposalReviewRequest,
+    ObservationCategory,
+    ObservationTelemetryItem,
     ProposalRiskLevel,
     ProposalType,
 )
@@ -292,7 +295,20 @@ async def test_deterministic_risk_and_governance_classification():
     assert risk == ProposalRiskLevel.PROHIBITED
     assert not ok
 
-    # 3. Low-risk reversible proposal
+    # 3. A structured action cannot bypass governance through an otherwise low-risk type.
+    structured_refund_proposal = {
+        "proposal_type": ProposalType.SUGGEST_BOUNDED_EXPERIMENT.value,
+        "title": "Retention workflow",
+        "proposed_change": "Improve buyer retention messaging.",
+        "metadata_payload": {"action": "refund"},
+    }
+    risk, ok, _ = MerchantAgentService.govern_and_classify_proposal(
+        structured_refund_proposal, policies
+    )
+    assert risk == ProposalRiskLevel.PROHIBITED
+    assert not ok
+
+    # 4. Low-risk reversible proposal
     reversible_proposal = {
         "proposal_type": ProposalType.EXPOSE_DELIVERY_ETA.value,
         "title": "Expose Delivery ETA in Discovery",
@@ -305,7 +321,7 @@ async def test_deterministic_risk_and_governance_classification():
     assert ok
     assert reason is None
 
-    # 4. Approval-required promotional proposal
+    # 5. Approval-required promotional proposal
     promo_proposal = {
         "proposal_type": ProposalType.SUGGEST_PROMOTIONAL_OFFER.value,
         "title": "10% Welcome Discount for First-Time Buyers",
@@ -557,17 +573,37 @@ async def test_experiment_approval_first_and_deterministic_measurement(
     assert appr_exp.approved_by == "merchant.admin@example.com"
     assert appr_exp.start_time is not None
 
-    # 3. Deterministically Evaluate Outcome
-    # The post-approval window contains no new interactions, so the result is
-    # safely inconclusive rather than reusing pre-approval records.
-    eval_result = await MerchantAgentService.evaluate_experiment_results(
-        session=db_session,
-        merchant_id=m1.id,
-        experiment_id=exp.id,
-    )
-    assert eval_result.sample_size == 0
-    assert eval_result.recommendation == "INCONCLUSIVE"
-    assert any("Sample size too small" in limit for limit in eval_result.limitations)
+    # 3. Evaluation is fail-closed until the fixed post-approval window completes.
+    with pytest.raises(ValueError, match="fixed post-approval measurement window"):
+        await MerchantAgentService.evaluate_experiment_results(
+            session=db_session,
+            merchant_id=m1.id,
+            experiment_id=exp.id,
+        )
+    persisted_exp = await db_session.get(MerchantExperiment, exp.id)
+    assert persisted_exp is not None
+    assert persisted_exp.status == "APPROVED"
+
+
+@pytest.mark.asyncio
+async def test_experiment_variation_rejects_structured_financial_action(
+    db_session: AsyncSession, setup_two_merchants_with_history
+):
+    """Structured experiment action fields must not bypass governance classification."""
+    m1 = setup_two_merchants_with_history["m1"]
+
+    with pytest.raises(ValueError, match="prohibited production action"):
+        await MerchantAgentService.create_experiment(
+            session=db_session,
+            merchant_id=m1.id,
+            req=ExperimentCreateRequest(
+                title="Unsafe retention experiment",
+                hypothesis="A financial intervention would recover abandoned buyers.",
+                target_metric="quote_conversion_rate",
+                target_value=55.0,
+                proposed_variation={"action": "refund"},
+            ),
+        )
 
 
 @pytest.mark.asyncio
@@ -652,8 +688,8 @@ async def test_fastapi_endpoints_for_agent_and_experiments(
         eval_resp = await client.post(
             f"/api/v1/merchant/experiments/{exp_id}/evaluate", headers=headers_m1
         )
-        assert eval_resp.status_code == 200
-        assert eval_resp.json()["experiment_id"] == exp_id
+        assert eval_resp.status_code == 404
+        assert "fixed post-approval measurement window" in eval_resp.json()["detail"]
 
         # 9. Cross-Tenant Isolation: Merchant Beta cannot access Merchant Alpha's proposal
         headers_m2 = {
@@ -781,48 +817,74 @@ async def test_adversarial_prompt_injection_invariance(
 
 
 @pytest.mark.asyncio
-async def test_deterministic_experiment_keep_and_rollback_thresholds(
-    db_session: AsyncSession, setup_two_merchants_with_history
+async def test_experiment_evaluation_uses_equal_fixed_measurement_windows(
+    db_session: AsyncSession,
+    setup_two_merchants_with_history,
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    """Verifies deterministic outcome calculation for positive and negative deltas."""
+    """Baseline and post-experiment observations must use equal, contiguous windows."""
     m1 = setup_two_merchants_with_history["m1"]
+    window_days = MerchantAgentService.EXPERIMENT_MEASUREMENT_WINDOW_DAYS
+    start_time = datetime.now(UTC) - timedelta(days=window_days)
 
-    # 1. Experiment with low baseline vs 100% conversion (sample size 10 -> KEEP)
-    exp_keep = MerchantExperiment(
+    exp = MerchantExperiment(
         merchant_id=m1.id,
-        title="High Conversion Winning Test",
+        title="Fixed window test",
         hypothesis="Feature increases conversion",
         target_metric="quote_conversion_rate",
-        baseline_value=50.0,
+        baseline_value=0.0,
         target_value=70.0,
         status="APPROVED",
         approval_status="APPROVED",
-        start_time=datetime.now(UTC) - timedelta(minutes=1),
+        start_time=start_time,
     )
-    db_session.add(exp_keep)
-
-    # 2. Experiment with high baseline vs 100% conversion (negative delta -> ROLLBACK)
-    exp_rollback = MerchantExperiment(
-        merchant_id=m1.id,
-        title="Degrading Test",
-        hypothesis="Variation reduces conversion",
-        target_metric="quote_conversion_rate",
-        baseline_value=120.0,
-        target_value=150.0,
-        status="APPROVED",
-        approval_status="APPROVED",
-        start_time=datetime.now(UTC) - timedelta(minutes=1),
-    )
-    db_session.add(exp_rollback)
+    db_session.add(exp)
     await db_session.commit()
 
-    # Telemetry conversion rate is 100.0%
-    # With baseline 120.0% -> delta is -16.67% (< -2%)
-    eval_rollback = await MerchantAgentService.evaluate_experiment_results(
+    calls: list[tuple[datetime | None, datetime | None, int]] = []
+
+    async def fixed_snapshot(
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+        window_days: int = 30,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+    ) -> MerchantObservationSnapshot:
+        calls.append((start_at, end_at, window_days))
+        value = 50.0 if end_at == start_time else 60.0
+        return MerchantObservationSnapshot(
+            merchant_id=merchant_id,
+            store_name="Alpha Athletics",
+            generated_at=end_at or start_time,
+            telemetry=[
+                ObservationTelemetryItem(
+                    category=ObservationCategory.DERIVED,
+                    metric_name="quote_conversion_rate",
+                    value=value,
+                    formatted_value=f"{value}%",
+                    unit="percentage",
+                    sample_size=10,
+                    window_days=window_days,
+                    description="Test metric",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(
+        MerchantAgentService,
+        "build_authoritative_observations",
+        classmethod(fixed_snapshot),
+    )
+    result = await MerchantAgentService.evaluate_experiment_results(
         session=db_session,
         merchant_id=m1.id,
-        experiment_id=exp_rollback.id,
+        experiment_id=exp.id,
     )
-    # Sample size is 1 (< 5) so it notes sample size limitation, but delta is calculated exactly
-    assert eval_rollback.absolute_change < 0
-    assert eval_rollback.percentage_change < 0
+    assert result.baseline_metric == 50.0
+    assert result.post_experiment_metric == 60.0
+    assert result.recommendation == "KEEP"
+    assert calls == [
+        (start_time - timedelta(days=window_days), start_time, window_days),
+        (start_time, start_time + timedelta(days=window_days), window_days),
+    ]
