@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
@@ -42,9 +42,19 @@ export const AgentPage: React.FC = () => {
   const [selectedProposal, setSelectedProposal] = useState<MerchantProposalItem | null>(null);
   const [reviewAction, setReviewAction] = useState<'APPROVE' | 'REJECT' | 'CONVERT_TO_EXPERIMENT' | null>(null);
   const [rejectionReason, setRejectionReason] = useState<string>('');
+  const [experimentTargetValue, setExperimentTargetValue] = useState<string>('');
   const [isReviewing, setIsReviewing] = useState<boolean>(false);
+  const requestVersionRef = useRef(0);
 
-  const fetchData = async () => {
+  const closeReviewDialog = useCallback(() => {
+    setSelectedProposal(null);
+    setReviewAction(null);
+    setRejectionReason('');
+    setExperimentTargetValue('');
+  }, []);
+
+  const fetchData = useCallback(async () => {
+    const requestVersion = ++requestVersionRef.current;
     setIsLoading(true);
     setErrorMessage(null);
     try {
@@ -52,21 +62,30 @@ export const AgentPage: React.FC = () => {
         api.getAgentSnapshot(),
         api.listProposals(),
       ]);
-      setSnapshot(snapData);
-      setProposals(propData);
+      if (requestVersion === requestVersionRef.current) {
+        setSnapshot(snapData);
+        setProposals(propData);
+      }
     } catch (err: unknown) {
-      setErrorMessage(err instanceof Error ? err.message : 'Failed to load merchant agent snapshot.');
+      if (requestVersion === requestVersionRef.current) {
+        setErrorMessage(err instanceof Error ? err.message : 'Failed to load merchant agent snapshot.');
+      }
     } finally {
-      setIsLoading(false);
+      if (requestVersion === requestVersionRef.current) {
+        setIsLoading(false);
+      }
     }
-  };
+  }, []);
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
   }, []);
 
   const handleRunAnalysis = async () => {
+    if (isAnalyzing) return;
+    ++requestVersionRef.current;
     setIsAnalyzing(true);
+    setIsLoading(false);
     setErrorMessage(null);
     setSuccessMessage(null);
     try {
@@ -84,18 +103,42 @@ export const AgentPage: React.FC = () => {
 
   const handleConfirmReview = async () => {
     if (!selectedProposal || !reviewAction) return;
+    const proposal = selectedProposal;
+    const action = reviewAction;
+    const targetValue = Number(experimentTargetValue);
+    if (
+      action === 'CONVERT_TO_EXPERIMENT' &&
+      (!Number.isFinite(targetValue) || targetValue < 0)
+    ) {
+      setErrorMessage('Enter a non-negative, finite target value before creating the experiment.');
+      return;
+    }
     setIsReviewing(true);
     try {
-      await api.reviewProposal(selectedProposal.id, {
-        decision: reviewAction,
-        rejection_reason: reviewAction === 'REJECT' ? rejectionReason : undefined,
+      await api.reviewProposal(proposal.id, {
+        decision: action,
+        rejection_reason: action === 'REJECT' ? rejectionReason : undefined,
       });
-      setSelectedProposal(null);
-      setReviewAction(null);
-      setRejectionReason('');
+      if (action === 'CONVERT_TO_EXPERIMENT') {
+        await api.createExperiment({
+          proposal_id: proposal.id,
+          title: proposal.title,
+          hypothesis: proposal.hypothesis,
+          target_metric: proposal.expected_metric,
+          baseline_value: 0,
+          target_value: targetValue,
+          proposed_variation: { description: proposal.proposed_change },
+        });
+        setSuccessMessage('Proposal converted into an approval-first experiment.');
+      }
+      closeReviewDialog();
       await fetchData();
     } catch (err: unknown) {
-      setErrorMessage(err instanceof Error ? err.message : 'Failed to update proposal state.');
+      setErrorMessage(
+        err instanceof Error
+          ? err.message
+          : 'Failed to update proposal state.'
+      );
     } finally {
       setIsReviewing(false);
     }
@@ -126,8 +169,24 @@ export const AgentPage: React.FC = () => {
         return <Badge variant="default" className="text-[10px] font-mono bg-brand-bright/10 text-brand-bright border-brand-bright/30">EXPERIMENT</Badge>;
       case 'UNDER_REVIEW':
         return <Badge variant="warning" className="text-[10px] font-mono">UNDER REVIEW</Badge>;
-      default:
+      case 'PROPOSED':
         return <Badge variant="outline" className="text-[10px] font-mono">PROPOSED</Badge>;
+      default:
+        return <Badge variant="outline" className="text-[10px] font-mono">{status}</Badge>;
+    }
+  };
+
+  const openReviewDialog = (proposal: MerchantProposalItem, action: NonNullable<typeof reviewAction>) => {
+    setSelectedProposal(proposal);
+    setReviewAction(action);
+    setRejectionReason('');
+    if (action === 'CONVERT_TO_EXPERIMENT') {
+      const metric = snapshot?.telemetry.find((item) => item.metric_name === proposal.expected_metric);
+      setExperimentTargetValue(
+        typeof metric?.value === 'number' && Number.isFinite(metric.value)
+          ? String(metric.value)
+          : ''
+      );
     }
   };
 
@@ -156,8 +215,9 @@ export const AgentPage: React.FC = () => {
           <Button
             variant="outline"
             size="sm"
-            onClick={fetchData}
+            onClick={() => void fetchData()}
             isLoading={isLoading}
+            disabled={isAnalyzing}
             className="text-xs border-white/10 bg-[#0C0F11] hover:bg-[#202426]"
           >
             <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Refresh
@@ -166,6 +226,7 @@ export const AgentPage: React.FC = () => {
             size="sm"
             onClick={handleRunAnalysis}
             isLoading={isAnalyzing}
+            disabled={isLoading}
             className="text-xs font-semibold bg-brand-bright text-[#070B14] hover:bg-brand-bright/90 shadow-md shadow-brand-bright/10"
           >
             <Sparkles className="h-3.5 w-3.5 mr-1.5" /> Run Agent Analysis
@@ -372,10 +433,7 @@ export const AgentPage: React.FC = () => {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => {
-                          setSelectedProposal(p);
-                          setReviewAction('REJECT');
-                        }}
+                        onClick={() => openReviewDialog(p, 'REJECT')}
                         className="text-xs text-rose-300 border-rose-500/30 hover:bg-rose-500/10"
                       >
                         <XCircle className="h-3.5 w-3.5 mr-1" /> Reject
@@ -383,20 +441,14 @@ export const AgentPage: React.FC = () => {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => {
-                          setSelectedProposal(p);
-                          setReviewAction('CONVERT_TO_EXPERIMENT');
-                        }}
+                        onClick={() => openReviewDialog(p, 'CONVERT_TO_EXPERIMENT')}
                         className="text-xs border-brand-bright/40 text-brand-bright hover:bg-brand-bright/10"
                       >
                         <FlaskConical className="h-3.5 w-3.5 mr-1" /> Convert to Experiment
                       </Button>
                       <Button
                         size="sm"
-                        onClick={() => {
-                          setSelectedProposal(p);
-                          setReviewAction('APPROVE');
-                        }}
+                        onClick={() => openReviewDialog(p, 'APPROVE')}
                         className="text-xs font-semibold bg-emerald-500 text-slate-950 hover:bg-emerald-400"
                       >
                         <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Approve Proposal
@@ -419,10 +471,7 @@ export const AgentPage: React.FC = () => {
       {/* Review Dialog */}
       <Dialog
         isOpen={selectedProposal !== null && reviewAction !== null}
-        onClose={() => {
-          setSelectedProposal(null);
-          setReviewAction(null);
-        }}
+        onClose={closeReviewDialog}
         title={
           reviewAction === 'APPROVE'
             ? 'Approve Optimization Proposal'
@@ -445,6 +494,24 @@ export const AgentPage: React.FC = () => {
                 onChange={(e) => setRejectionReason(e.target.value)}
               />
             </div>
+          ) : reviewAction === 'CONVERT_TO_EXPERIMENT' ? (
+            <div>
+              <label className="block text-[11px] font-mono text-text-muted uppercase mb-1">
+                Target value for {selectedProposal?.expected_metric}
+              </label>
+              <input
+                className="w-full bg-[#0C0F11] border border-white/10 rounded-lg p-2 text-xs text-text-primary focus:border-brand-bright focus:outline-none"
+                type="number"
+                min="0"
+                step="any"
+                value={experimentTargetValue}
+                onChange={(event) => setExperimentTargetValue(event.target.value)}
+                required
+              />
+              <p className="mt-1.5 text-[11px] text-text-muted">
+                The proposal&apos;s change and metric will be registered as an approval-first experiment.
+              </p>
+            </div>
           ) : (
             <p className="text-text-secondary leading-relaxed">
               {reviewAction === 'APPROVE'
@@ -457,10 +524,7 @@ export const AgentPage: React.FC = () => {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => {
-              setSelectedProposal(null);
-              setReviewAction(null);
-            }}
+            onClick={closeReviewDialog}
           >
             Cancel
           </Button>

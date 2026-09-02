@@ -168,6 +168,12 @@ export interface AuditLedger {
   total_count: number;
   chain_valid: boolean;
   chain_error?: string;
+  next_cursor?: AuditCursor | null;
+}
+
+export interface AuditCursor {
+  created_at: string;
+  id: string;
 }
 
 export interface SimulationTraceStep {

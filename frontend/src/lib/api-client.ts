@@ -12,6 +12,7 @@ import {
   ResolveApprovalPayload,
   PolicyGovernance,
   AuditLedger,
+  AuditCursor,
   DemoSimulationStepRequest,
   DemoSimulationStepResponse,
   DemoSeedResponse,
@@ -329,8 +330,13 @@ export class ApiClient {
     });
   }
 
-  async getAuditLedger(limit = 50, offset = 0): Promise<AuditLedger> {
-    return this.request<AuditLedger>(`/api/v1/merchant/audit?limit=${limit}&offset=${offset}`);
+  async getAuditLedger(limit = 50, before?: AuditCursor): Promise<AuditLedger> {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (before) {
+      query.set('before_created_at', before.created_at);
+      query.set('before_id', before.id);
+    }
+    return this.request<AuditLedger>(`/api/v1/merchant/audit?${query.toString()}`);
   }
 
   async seedDemoState(): Promise<DemoSeedResponse> {
@@ -370,6 +376,7 @@ export class ApiClient {
   async reviewProposal(proposalId: string, payload: MerchantProposalReviewPayload): Promise<MerchantProposalItem> {
     return this.request<MerchantProposalItem>(`/api/v1/merchant/agent/proposals/${proposalId}/review`, {
       method: 'POST',
+      headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
       body: JSON.stringify(payload),
     });
   }
@@ -377,6 +384,7 @@ export class ApiClient {
   async createExperiment(payload: ExperimentCreatePayload): Promise<MerchantExperimentItem> {
     return this.request<MerchantExperimentItem>('/api/v1/merchant/experiments', {
       method: 'POST',
+      headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
       body: JSON.stringify(payload),
     });
   }
@@ -388,12 +396,14 @@ export class ApiClient {
   async approveExperiment(experimentId: string): Promise<MerchantExperimentItem> {
     return this.request<MerchantExperimentItem>(`/api/v1/merchant/experiments/${experimentId}/approve`, {
       method: 'POST',
+      headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
     });
   }
 
   async evaluateExperiment(experimentId: string): Promise<MerchantExperimentResultItem> {
     return this.request<MerchantExperimentResultItem>(`/api/v1/merchant/experiments/${experimentId}/evaluate`, {
       method: 'POST',
+      headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
     });
   }
 

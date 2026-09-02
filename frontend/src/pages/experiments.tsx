@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
@@ -32,10 +32,15 @@ export const ExperimentsPage: React.FC = () => {
   const [newExpMetric, setNewExpMetric] = useState<string>('quote_conversion_rate');
   const [newExpBaseline, setNewExpBaseline] = useState<string>('12.5');
   const [newExpTarget, setNewExpTarget] = useState<string>('18.0');
+  const [newExpVariation, setNewExpVariation] = useState<string>('');
   const [isCreating, setIsCreating] = useState<boolean>(false);
 
   // Action loading states
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+
+  const closeCreateModal = useCallback(() => {
+    setShowCreateModal(false);
+  }, []);
 
   const fetchExperiments = async () => {
     setIsLoading(true);
@@ -66,12 +71,13 @@ export const ExperimentsPage: React.FC = () => {
         target_metric: newExpMetric,
         baseline_value: parseFloat(newExpBaseline) || 0.0,
         target_value: parseFloat(newExpTarget) || 0.0,
-        proposed_variation: { description: 'Expose delivery ETA in product discovery metadata' },
+        proposed_variation: { description: newExpVariation },
       };
       await api.createExperiment(payload);
-      setShowCreateModal(false);
+      closeCreateModal();
       setNewExpTitle('');
       setNewExpHypothesis('');
+      setNewExpVariation('');
       setSuccessMessage('Experiment registered in approval-first state.');
       await fetchExperiments();
     } catch (err: unknown) {
@@ -327,7 +333,7 @@ export const ExperimentsPage: React.FC = () => {
       {/* Create Experiment Modal */}
       <Dialog
         isOpen={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
+        onClose={closeCreateModal}
         title="Register Optimization Experiment"
         description="Define an approval-first experiment with clear metric targets."
       >
@@ -348,6 +354,18 @@ export const ExperimentsPage: React.FC = () => {
               placeholder="Explain what change will be made and why it improves conversion..."
               value={newExpHypothesis}
               onChange={(e) => setNewExpHypothesis(e.target.value)}
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] font-mono text-text-muted uppercase mb-1">
+              Proposed Variation
+            </label>
+            <textarea
+              className="w-full h-16 bg-[#0C0F11] border border-white/10 rounded-lg p-2 text-xs text-text-primary focus:border-brand-bright focus:outline-none"
+              placeholder="Describe the exact merchant-controlled change being measured..."
+              value={newExpVariation}
+              onChange={(e) => setNewExpVariation(e.target.value)}
               required
             />
           </div>
@@ -376,7 +394,7 @@ export const ExperimentsPage: React.FC = () => {
             />
           </div>
           <DialogFooter>
-            <Button type="button" variant="outline" size="sm" onClick={() => setShowCreateModal(false)}>
+            <Button type="button" variant="outline" size="sm" onClick={closeCreateModal}>
               Cancel
             </Button>
             <Button type="submit" size="sm" isLoading={isCreating} className="bg-brand-bright text-[#070B14] hover:bg-brand-bright/90">
