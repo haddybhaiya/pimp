@@ -2,6 +2,20 @@
 
 ---
 
+# Review 12: Phase 7 Measurement, Governance, and Rollback Safeguards
+
+> **Reviewed on:** 2026-09-02
+> **Scope:** Fixed-duration experiment evaluation, structured prohibited-action detection, and merchant-scoped AgentRun downgrade safety.
+> **Status:** **RESOLVED & VERIFIED**
+
+1. **Experiment measurement windows:** Baselines are refreshed from the 30 days immediately before approval. Evaluation is blocked until the matching 30-day post-approval window closes and records the exact windows in deterministic evidence.
+2. **Structured action governance:** The deterministic classifier now recursively inspects typed action fields in proposal metadata and experiment variations; `{"action":"refund"}` is prohibited regardless of the declared low-risk proposal type.
+3. **Migration 009 rollback:** Downgrade now preflights for merchant-only `AgentRun` rows and fails clearly before altering `session_id` to `NOT NULL`; it never silently deletes durable run records.
+
+**Verified by:** `tests/test_phase7_merchant_agent.py` and `tests/test_alembic_migrations.py`.
+
+---
+
 # Review 11: Validated Deferred Phase 5 Follow-ups
 
 > **Reviewed on:** 2026-09-01

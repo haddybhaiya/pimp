@@ -21,6 +21,8 @@
 | **Merchant Agent Malformed JSON** | Model generates unparseable proposal syntax | Service catches JSON parsing error; returns empty proposals | Returns structured diagnostic empty list; prompts user to re-run | Zero state change. |
 | **Hallucinated Proposal Evidence** | Model invents metric names not in snapshot | Server evidence validator rejects the diagnosis/proposal | No unrelated telemetry is substituted; only snapshot-backed findings can persist | Preserves telemetry integrity. |
 | **Adversarial Proposal Injection** | Buyer query injects malicious instruction into telemetry | Server-authoritative governance classifier evaluates proposal | Intercepts prohibited keywords/actions (`PROHIBITED`), rejects proposal immediately | Zero policy mutation or capability escalation. |
+| **Structured Prohibited Action** | An LLM proposal or experiment variation encodes a financial/policy action in fields such as `action` | Deterministic governance inspects structured action fields independently of declared proposal type | Rejects the proposal or experiment variation as `PROHIBITED` | Zero financial, policy, or capability mutation. |
+| **Incomplete Experiment Window** | Merchant requests measurement before the fixed post-approval window has closed | Experiment remains `APPROVED`; no result or recommendation is persisted | Return a deterministic validation error; evaluate only matching fixed baseline and post windows | Prevents misleading `KEEP` or `ROLLBACK` decisions. |
 | **Cross-Tenant Proposal Access** | Merchant Beta requests/reviews Alpha's proposal | Server enforces `merchant_id == proposal.merchant_id` | Returns HTTP 404 NOT FOUND; fails closed | Strict multi-tenant isolation preserved. |
 
 ---

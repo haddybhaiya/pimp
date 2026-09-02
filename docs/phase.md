@@ -57,7 +57,8 @@
   - Complete lifecycle: `DRAFT` / `PROPOSED` $\to$ `APPROVAL_REQUIRED` $\to$ `APPROVED` $\to$ `COMPLETED` / `ROLLED_BACK`.
   - Phase 7 does NOT autonomously execute production changes (strictly reserved for Phase 8).
 - [x] **Deterministic Experiment Measurement Engine:**
-  - Computes post-experiment metrics, absolute change, percentage change, and sample sizes strictly from database observations.
+  - Computes post-experiment metrics, absolute change, percentage change, and sample sizes strictly from database observations over equal, fixed 30-day baseline and post-approval windows.
+  - Refuses early evaluation rather than persisting a recommendation from an incomplete post-approval window.
   - Deterministically recommends `KEEP`, `ROLLBACK`, or `INCONCLUSIVE` (based on sample size $\ge 5$ and delta thresholds).
   - Rejects ungrounded model evidence, measures only post-approval observations, and database-constrains one deterministic result per experiment.
 - [x] **Web Control Plane Integration:**

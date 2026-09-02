@@ -35,6 +35,21 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute(
+        sa.text(
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT 1 FROM agent_runs WHERE session_id IS NULL) THEN
+                    RAISE EXCEPTION
+                        'Cannot downgrade 009_merchant_agent_runs while merchant-scoped '
+                        'AgentRun records exist. '
+                        'Archive or explicitly dispose of those records before rollback.';
+                END IF;
+            END $$;
+            """
+        )
+    )
     op.drop_constraint("ck_agent_runs_session_or_merchant_required", "agent_runs", type_="check")
     op.alter_column("agent_runs", "session_id", existing_type=sa.UUID(), nullable=False)
     op.drop_index("ix_agent_runs_merchant_id", table_name="agent_runs")
