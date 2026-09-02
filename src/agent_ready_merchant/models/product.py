@@ -87,6 +87,11 @@ class Product(Base, TimestampMixin, OptimisticLockMixin):
         default=True,
         nullable=False,
     )
+    is_demo_sandbox_product: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
     attributes: Mapped[dict[str, Any]] = mapped_column(
         JSON,
         default=dict,

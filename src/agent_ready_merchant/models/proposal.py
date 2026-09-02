@@ -6,7 +6,17 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, String, Text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -43,6 +53,15 @@ class MerchantProposal(Base, TimestampMixin, OptimisticLockMixin):
             "confidence >= 0.0 AND confidence <= 1.0",
             name="ck_merchant_proposals_confidence_bounds",
         ),
+        CheckConstraint(
+            "estimated_cost_paise >= 0",
+            name="ck_merchant_proposals_estimated_cost_non_negative",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "merchant_id"],
+            ["agent_runs.id", "agent_runs.merchant_id"],
+            name="fk_merchant_proposals_run_merchant",
+        ),
         Index("ix_merchant_proposals_merchant_status", "merchant_id", "status"),
     )
 
@@ -61,6 +80,11 @@ class MerchantProposal(Base, TimestampMixin, OptimisticLockMixin):
         GUID(),
         nullable=True,
         index=True,
+    )
+    estimated_cost_paise: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
     )
     proposal_type: Mapped[str] = mapped_column(
         String(64),

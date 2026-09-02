@@ -139,9 +139,7 @@ class DemoSimulatorService:
         prod_stmt = select(Product).where(Product.merchant_id == merchant_id)
         existing_products = list((await session.execute(prod_stmt)).scalars().all())
         demo_products_by_sku = {
-            product.sku: product
-            for product in existing_products
-            if product.attributes.get("demo_seeded") is True
+            product.sku: product for product in existing_products if product.is_demo_sandbox_product
         }
         demo_skus = {product["sku"] for product in DEMO_PRODUCTS}
         conflicting_skus = sorted(
@@ -169,6 +167,7 @@ class DemoSimulatorService:
                     floor_price_paise=demo_product["floor_price_paise"],
                     is_negotiable=True,
                     is_active=True,
+                    is_demo_sandbox_product=True,
                     attributes={"brand": "Apex Athletics", "demo_seeded": True},
                 )
                 session.add(prod)
@@ -337,21 +336,26 @@ class DemoSimulatorService:
         # Simulations are restricted to explicit demo records.  The real checkout
         # and settlement path intentionally changes inventory, so accepting a
         # merchant's production SKU here would mutate live stock.
+        canonical_demo_skus = {demo_product["sku"] for demo_product in DEMO_PRODUCTS}
+        if req.sku is not None and req.sku not in canonical_demo_skus:
+            raise ValueError(f"Demo SKU '{req.sku}' was not found for this merchant.")
+
         prod_stmt = select(Product).where(
             Product.merchant_id == merchant_id,
             Product.is_active.is_(True),
+            Product.is_demo_sandbox_product.is_(True),
         )
         products = [
             product
             for product in (await session.execute(prod_stmt)).scalars().all()
-            if (product.attributes or {}).get("demo_seeded") is True
+            if product.sku in canonical_demo_skus
         ]
         if not products:
             await cls.seed_demo_catalog_and_policies(session, merchant_id)
             products = [
                 product
                 for product in (await session.execute(prod_stmt)).scalars().all()
-                if (product.attributes or {}).get("demo_seeded") is True
+                if product.sku in canonical_demo_skus
             ]
 
         target_product = products[0]

@@ -118,6 +118,7 @@ class MerchantAgentService:
         sess_stmt = select(func.count(BuyerAgentSession.id)).where(
             BuyerAgentSession.merchant_id == merchant_id,
             BuyerAgentSession.created_at >= start_window,
+            BuyerAgentSession.created_at < now,
         )
         total_sessions = int((await session.execute(sess_stmt)).scalar_one() or 0)
 
@@ -125,6 +126,7 @@ class MerchantAgentService:
         quotes_stmt = select(PriceQuote).where(
             PriceQuote.merchant_id == merchant_id,
             PriceQuote.created_at >= start_window,
+            PriceQuote.created_at < now,
         )
         quotes = list((await session.execute(quotes_stmt)).scalars().all())
         total_quotes = len(quotes)
@@ -135,12 +137,34 @@ class MerchantAgentService:
         orders_stmt = select(Order).where(
             Order.merchant_id == merchant_id,
             Order.created_at >= start_window,
+            Order.created_at < now,
         )
         orders = list((await session.execute(orders_stmt)).scalars().all())
         total_orders = len(orders)
         completed_orders = sum(1 for o in orders if o.status in ("PAID", "SETTLED", "COMPLETED"))
         total_revenue_paise = sum(
             o.amount_paise for o in orders if o.status in ("PAID", "SETTLED", "COMPLETED")
+        )
+
+        # Quote conversion is a quote cohort metric.  A settled order must be
+        # linked to a quote issued in this same observation window; filtering
+        # orders by their own creation time can otherwise compare different
+        # populations around a window boundary.
+        quote_cohort_orders_stmt = (
+            select(Order)
+            .join(PriceQuote, PriceQuote.id == Order.quote_id)
+            .where(
+                Order.merchant_id == merchant_id,
+                PriceQuote.merchant_id == merchant_id,
+                PriceQuote.created_at >= start_window,
+                PriceQuote.created_at < now,
+            )
+        )
+        quote_cohort_orders = list(
+            (await session.execute(quote_cohort_orders_stmt)).scalars().all()
+        )
+        completed_quote_cohort_orders = sum(
+            1 for order in quote_cohort_orders if order.status in ("PAID", "SETTLED", "COMPLETED")
         )
 
         # 7. Payment Attempts & Failures
@@ -150,16 +174,20 @@ class MerchantAgentService:
             .where(
                 Order.merchant_id == merchant_id,
                 PaymentAttempt.created_at >= start_window,
+                PaymentAttempt.created_at < now,
             )
         )
         pay_attempts = list((await session.execute(pay_stmt)).scalars().all())
         total_payment_attempts = len(pay_attempts)
-        failed_payment_attempts = sum(1 for p in pay_attempts if p.status == "FAILED")
+        failed_payment_attempts = sum(
+            1 for p in pay_attempts if p.status in ("FAILED", "TIMED_OUT")
+        )
 
         # 8. Human Approvals
         appr_stmt = select(MerchantApproval).where(
             MerchantApproval.merchant_id == merchant_id,
             MerchantApproval.created_at >= start_window,
+            MerchantApproval.created_at < now,
         )
         approvals = list((await session.execute(appr_stmt)).scalars().all())
         total_approvals = len(approvals)
@@ -171,6 +199,7 @@ class MerchantAgentService:
             .where(
                 BuyerAgentSession.merchant_id == merchant_id,
                 BuyerIntent.created_at >= start_window,
+                BuyerIntent.created_at < now,
             )
             .order_by(BuyerIntent.created_at.desc())
             .limit(50)
@@ -187,7 +216,9 @@ class MerchantAgentService:
 
         # 10. Compute Derived & Estimated Metrics
         conversion_rate = (
-            round((completed_orders / total_quotes) * 100, 2) if total_quotes > 0 else 0.0
+            round((completed_quote_cohort_orders / total_quotes) * 100, 2)
+            if total_quotes > 0
+            else 0.0
         )
         aov_paise = int(total_revenue_paise / completed_orders) if completed_orders > 0 else 0
         quote_acceptance_rate = (
@@ -219,7 +250,7 @@ class MerchantAgentService:
                 value=total_sessions,
                 formatted_value=f"{total_sessions} sessions",
                 unit="count",
-                sample_size=total_quotes,
+                sample_size=total_sessions,
                 window_days=window_days,
                 description="Total unique AI buyer sessions initiated within the window.",
             ),
@@ -279,7 +310,7 @@ class MerchantAgentService:
                 value=conversion_rate,
                 formatted_value=f"{conversion_rate:.1f}%",
                 unit="percentage",
-                sample_size=total_sessions,
+                sample_size=total_quotes,
                 window_days=window_days,
                 description="Percentage of issued quotes converted into settled orders.",
             ),
@@ -658,6 +689,14 @@ class MerchantAgentService:
             raw_json = raw_json.strip()
 
             parsed = json.loads(raw_json)
+            if (
+                not isinstance(parsed, dict)
+                or not isinstance(parsed.get("diagnoses", []), list)
+                or not isinstance(parsed.get("proposals", []), list)
+            ):
+                raise ValueError(
+                    "LLM response must be an object with diagnosis and proposal lists."
+                )
         except Exception as exc:
             logger.warning("LLM generation failed or returned invalid JSON: %s", exc)
             # Safe degradation to deterministic observation without proposals
@@ -736,6 +775,7 @@ class MerchantAgentService:
                     expected_effect=prop_create.expected_effect,
                     expected_metric=prop_create.expected_metric,
                     confidence=prop_create.confidence,
+                    estimated_cost_paise=prop_create.estimated_cost_paise,
                     risk_level=risk_level.value,
                     status=(
                         ProposalStatus.PROPOSED.value
@@ -758,6 +798,7 @@ class MerchantAgentService:
         merchant_id: uuid.UUID,
         llm_provider: BaseLLMProvider | None,
         settings: Settings,
+        commit: bool = True,
     ) -> MerchantAgentAnalyzeResponse:
         """Executes a bounded, auditable Merchant Agent optimization turn."""
         start_time = time.monotonic()
@@ -807,7 +848,8 @@ class MerchantAgentService:
                 "telemetry_metrics_count": len(snapshot.telemetry),
             },
         )
-        await session.commit()
+        if commit:
+            await session.commit()
 
         duration_ms = round((time.monotonic() - start_time) * 1000, 2)
 
@@ -826,6 +868,7 @@ class MerchantAgentService:
                 expected_effect=p.expected_effect,
                 expected_metric=p.expected_metric,
                 confidence=p.confidence,
+                estimated_cost_paise=p.estimated_cost_paise,
                 risk_level=p.risk_level,
                 status=p.status,
                 rejection_reason=p.rejection_reason,
@@ -884,6 +927,7 @@ class MerchantAgentService:
                 expected_effect=p.expected_effect,
                 expected_metric=p.expected_metric,
                 confidence=p.confidence,
+                estimated_cost_paise=p.estimated_cost_paise,
                 risk_level=p.risk_level,
                 status=p.status,
                 rejection_reason=p.rejection_reason,
@@ -904,6 +948,7 @@ class MerchantAgentService:
         proposal_id: uuid.UUID,
         review_req: MerchantProposalReviewRequest,
         reviewer_id: str = "merchant_admin",
+        commit: bool = True,
     ) -> MerchantProposalResponse:
         """Executes human review on a proposal (APPROVE, REJECT, or CONVERT_TO_EXPERIMENT)."""
         stmt = (
@@ -943,7 +988,8 @@ class MerchantAgentService:
                 "reviewed_by": reviewer_id,
             },
         )
-        await session.commit()
+        if commit:
+            await session.commit()
 
         return MerchantProposalResponse(
             id=proposal.id,
@@ -959,6 +1005,7 @@ class MerchantAgentService:
             expected_effect=proposal.expected_effect,
             expected_metric=proposal.expected_metric,
             confidence=proposal.confidence,
+            estimated_cost_paise=proposal.estimated_cost_paise,
             risk_level=proposal.risk_level,
             status=proposal.status,
             rejection_reason=proposal.rejection_reason,
@@ -976,6 +1023,7 @@ class MerchantAgentService:
         merchant_id: uuid.UUID,
         req: ExperimentCreateRequest,
         creator_id: str = "merchant_admin",
+        commit: bool = True,
     ) -> ExperimentResponse:
         """Registers a structured merchant optimization experiment in approval-first status."""
         snapshot = await cls.build_authoritative_observations(session, merchant_id)
@@ -1053,7 +1101,8 @@ class MerchantAgentService:
                 "proposal_id": str(req.proposal_id) if req.proposal_id else None,
             },
         )
-        await session.commit()
+        if commit:
+            await session.commit()
 
         return ExperimentResponse(
             id=exp.id,
@@ -1086,6 +1135,7 @@ class MerchantAgentService:
         merchant_id: uuid.UUID,
         experiment_id: uuid.UUID,
         approver_id: str = "merchant_admin",
+        commit: bool = True,
     ) -> ExperimentResponse:
         """Approves an experiment to transition it into READY state."""
         stmt = (
@@ -1140,7 +1190,8 @@ class MerchantAgentService:
                 "measurement_window_days": cls.EXPERIMENT_MEASUREMENT_WINDOW_DAYS,
             },
         )
-        await session.commit()
+        if commit:
+            await session.commit()
 
         return ExperimentResponse(
             id=exp.id,
@@ -1238,6 +1289,7 @@ class MerchantAgentService:
         session: AsyncSession,
         merchant_id: uuid.UUID,
         experiment_id: uuid.UUID,
+        commit: bool = True,
     ) -> ExperimentResultResponse:
         """Deterministically evaluates experiment outcomes against observed metrics."""
         stmt = (
@@ -1394,7 +1446,8 @@ class MerchantAgentService:
                 "sample_size": sample_size,
             },
         )
-        await session.commit()
+        if commit:
+            await session.commit()
 
         return ExperimentResultResponse(
             id=result.id,

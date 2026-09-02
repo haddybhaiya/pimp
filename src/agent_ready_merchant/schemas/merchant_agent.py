@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
 
 
 class ObservationCategory(StrEnum):
@@ -70,7 +70,7 @@ class MerchantDiagnosisItem(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    pattern: str
+    pattern: DiagnosisPattern
     summary: str
     severity: Literal["LOW", "MEDIUM", "HIGH"]
     evidence_references: list[str] = Field(default_factory=list)
@@ -146,6 +146,7 @@ class MerchantProposalResponse(BaseModel):
     expected_effect: str
     expected_metric: str
     confidence: float
+    estimated_cost_paise: int
     risk_level: str
     status: str
     rejection_reason: str | None = None
@@ -190,7 +191,7 @@ class ExperimentCreateRequest(BaseModel):
     hypothesis: str = Field(..., min_length=10)
     target_metric: str = Field(..., min_length=2, max_length=64)
     baseline_value: float = Field(default=0.0)
-    target_value: float = Field(default=0.0)
+    target_value: FiniteFloat = Field(default=0.0, ge=0.0)
     proposed_variation: dict[str, Any] = Field(default_factory=dict)
     stopping_condition: dict[str, Any] = Field(default_factory=dict)
     rollback_condition: dict[str, Any] = Field(default_factory=dict)

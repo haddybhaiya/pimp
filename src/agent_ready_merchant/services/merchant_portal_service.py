@@ -33,6 +33,7 @@ from agent_ready_merchant.schemas.merchant_auth import PolicySummaryItem
 from agent_ready_merchant.schemas.merchant_portal import (
     ApprovalItemResponse,
     AuditEventResponse,
+    AuditLedgerCursor,
     AuditLedgerResponse,
     DashboardSummaryResponse,
     InventoryAdjustRequest,
@@ -829,17 +830,31 @@ class MerchantPortalService:
 
     @classmethod
     async def get_audit_ledger(
-        cls, session: AsyncSession, merchant_id: uuid.UUID, limit: int = 50, offset: int = 0
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+        limit: int = 50,
+        before_created_at: datetime | None = None,
+        before_id: uuid.UUID | None = None,
     ) -> AuditLedgerResponse:
         """Fetches immutable audit event trail and verifies cryptographic SHA-256 chain."""
         stmt = (
             select(AuditEvent)
             .where(AuditEvent.merchant_id == merchant_id)
-            .order_by(AuditEvent.created_at.desc())
-            .offset(offset)
-            .limit(limit)
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
         )
-        events = list((await session.execute(stmt)).scalars().all())
+        if before_created_at is not None and before_id is not None:
+            stmt = stmt.where(
+                or_(
+                    AuditEvent.created_at < before_created_at,
+                    and_(
+                        AuditEvent.created_at == before_created_at,
+                        AuditEvent.id < before_id,
+                    ),
+                )
+            )
+        page_rows = list((await session.execute(stmt.limit(limit + 1))).scalars().all())
+        events = page_rows[:limit]
 
         count_stmt = select(func.count(AuditEvent.id)).where(AuditEvent.merchant_id == merchant_id)
         total_count = (await session.execute(count_stmt)).scalar_one() or 0
@@ -862,11 +877,20 @@ class MerchantPortalService:
             for e in events
         ]
 
+        next_cursor: AuditLedgerCursor | None = None
+        if len(page_rows) > limit and events:
+            last_event = events[-1]
+            next_cursor = AuditLedgerCursor(
+                created_at=last_event.created_at,
+                id=last_event.id,
+            )
+
         return AuditLedgerResponse(
             events=event_responses,
             total_count=total_count,
             chain_valid=is_chain_valid,
             chain_error=chain_error,
+            next_cursor=next_cursor,
         )
 
     @classmethod

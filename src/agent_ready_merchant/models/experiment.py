@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -47,6 +48,7 @@ class MerchantExperiment(Base, TimestampMixin, OptimisticLockMixin):
             "risk_level IN ('READ_ONLY', 'LOW_RISK_REVERSIBLE', 'APPROVAL_REQUIRED', 'PROHIBITED')",
             name="ck_merchant_experiments_risk_level_valid",
         ),
+        UniqueConstraint("id", "merchant_id", name="uq_merchant_experiments_id_merchant"),
         Index("ix_merchant_experiments_merchant_status", "merchant_id", "status"),
     )
 
@@ -147,6 +149,7 @@ class MerchantExperiment(Base, TimestampMixin, OptimisticLockMixin):
         "MerchantExperimentResult",
         back_populates="experiment",
         cascade="all, delete-orphan",
+        foreign_keys="MerchantExperimentResult.experiment_id",
     )
 
 
@@ -165,6 +168,12 @@ class MerchantExperimentResult(Base):
             name="ck_merchant_experiment_results_sample_non_negative",
         ),
         UniqueConstraint("experiment_id", name="uq_merchant_experiment_results_experiment"),
+        ForeignKeyConstraint(
+            ["experiment_id", "merchant_id"],
+            ["merchant_experiments.id", "merchant_experiments.merchant_id"],
+            name="fk_merchant_experiment_results_experiment_merchant",
+            ondelete="CASCADE",
+        ),
         Index("ix_merchant_exp_results_merchant_exp", "merchant_id", "experiment_id"),
     )
 
@@ -240,6 +249,8 @@ class MerchantExperimentResult(Base):
 
     # Relationships
     experiment: Mapped[MerchantExperiment] = relationship(
-        "MerchantExperiment", back_populates="results"
+        "MerchantExperiment",
+        back_populates="results",
+        foreign_keys=[experiment_id],
     )
     merchant: Mapped[Merchant] = relationship("Merchant")

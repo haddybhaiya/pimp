@@ -3,7 +3,7 @@
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, Text
+from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agent_ready_merchant.db.base import GUID, Base, OptimisticLockMixin, TimestampMixin
@@ -35,6 +35,7 @@ class AgentRun(Base, TimestampMixin, OptimisticLockMixin):
             "session_id IS NOT NULL OR merchant_id IS NOT NULL",
             name="ck_agent_runs_session_or_merchant_required",
         ),
+        UniqueConstraint("id", "merchant_id", name="uq_agent_runs_id_merchant"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
