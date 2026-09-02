@@ -148,7 +148,7 @@
 - **ASSUMPTION:** A merchant-agent finding is meaningful only when every cited evidence key exists in the bounded authoritative snapshot, and an experiment recommendation is meaningful only when equal, fixed baseline and post-approval observation windows are compared.
 - **EVIDENCE:** `tests/test_phase7_merchant_agent.py` rejects hallucinated evidence, requires approval before evaluation, rejects early evaluation, and proves deterministic evaluation uses contiguous equal-duration windows.
 - **STATUS:** **VERIFIED (PASS)**
-- **MITIGATION:** Unsupported diagnoses/proposals are discarded rather than remapped to unrelated metrics; experiment baselines are server-computed at approval, evaluation is blocked until its fixed 30-day post-approval window closes, approval/evaluation rows are locked, and duplicate result rows are database-constrained.
+- **MITIGATION:** Unsupported diagnoses/proposals are discarded rather than remapped to unrelated metrics; every scalar untrusted structured value is screened for prohibited financial/governance intent; experiment baselines are server-computed at approval; conversion cohorts are calculated as-of their matching observation endpoints; approval/evaluation rows are locked; and duplicate result rows are database-constrained.
 
 ### 16. Phase 7 Tenant Linkage, Replay Safety, and Demo Isolation
 - **ASSUMPTION:** Durable merchant-agent records, demo simulations, and merchant control-plane mutations remain safe only if database relations enforce tenant ownership, demos identify sandbox products through server-owned provenance, and retried mutations replay their original result.

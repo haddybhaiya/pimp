@@ -69,7 +69,8 @@
   - Logs immutable SHA-256 audit events for `MERCHANT_AGENT_RUN_COMPLETED`, `MERCHANT_PROPOSAL_REVIEWED`, `MERCHANT_EXPERIMENT_CREATED`, `MERCHANT_EXPERIMENT_APPROVED`, `MERCHANT_EXPERIMENT_EVALUATED`.
 - [x] **Review Remediation Boundaries:**
   - Phase 7 mutations use durable idempotency receipts; the audit ledger uses keyset pagination to avoid duplicates or omissions while new events arrive.
-  - Malformed structured model payloads degrade to no new intelligence action, and telemetry uses bounded, cohort-consistent observations.
+  - Malformed structured model payloads degrade to no new intelligence action; every scalar structured value is screened for prohibited financial/governance intent.
+  - Quote conversion is reconstructed as-of each bounded observation endpoint, preventing later settlements from biasing historical experiment cohorts.
 - [x] **Comprehensive Test Suite & Quality Gate Compliance:**
-  - 15 comprehensive tests in `tests/test_phase7_merchant_agent.py` covering multi-tenant scoping, evidence validation, adversarial prompt injection safety, proposal governance, deterministic experiment evaluation, bounded windows, and replay-safe mutations.
+  - 16 comprehensive tests in `tests/test_phase7_merchant_agent.py` covering multi-tenant scoping, evidence validation, adversarial prompt injection safety, proposal governance, deterministic experiment evaluation, bounded windows, replay-safe mutations, and historical conversion cohorts.
   - 100% clean passes on Ruff, Mypy strict, Vitest, and Pytest.

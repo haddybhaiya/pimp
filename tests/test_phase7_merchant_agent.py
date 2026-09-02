@@ -314,7 +314,20 @@ async def test_deterministic_risk_and_governance_classification():
     assert risk == ProposalRiskLevel.PROHIBITED
     assert not ok
 
-    # 4. Low-risk reversible proposal
+    # 4. A prohibited value under a neutral metadata key cannot bypass governance.
+    neutral_key_refund_proposal = {
+        "proposal_type": ProposalType.SUGGEST_BOUNDED_EXPERIMENT.value,
+        "title": "Retention workflow",
+        "proposed_change": "Improve buyer retention messaging.",
+        "metadata_payload": {"feature": "refund"},
+    }
+    risk, ok, _ = MerchantAgentService.govern_and_classify_proposal(
+        neutral_key_refund_proposal, policies
+    )
+    assert risk == ProposalRiskLevel.PROHIBITED
+    assert not ok
+
+    # 5. Low-risk reversible proposal
     reversible_proposal = {
         "proposal_type": ProposalType.EXPOSE_DELIVERY_ETA.value,
         "title": "Expose Delivery ETA in Discovery",
@@ -327,7 +340,7 @@ async def test_deterministic_risk_and_governance_classification():
     assert ok
     assert reason is None
 
-    # 5. Approval-required promotional proposal
+    # 6. Approval-required promotional proposal
     promo_proposal = {
         "proposal_type": ProposalType.SUGGEST_PROMOTIONAL_OFFER.value,
         "title": "10% Welcome Discount for First-Time Buyers",
@@ -963,6 +976,32 @@ async def test_observations_use_quote_cohorts_and_count_timed_out_payments(
     assert telemetry["quote_conversion_rate"].value == 0.0
     assert telemetry["quote_conversion_rate"].sample_size == 0
     assert telemetry["failed_payments_count"].value == 1
+
+
+@pytest.mark.asyncio
+async def test_quote_conversion_uses_settlements_matured_by_observation_end(
+    db_session: AsyncSession, setup_two_merchants_with_history
+):
+    """A settlement after a window ends cannot change that historical cohort metric."""
+    m1 = setup_two_merchants_with_history["m1"]
+    quote = (
+        await db_session.execute(select(PriceQuote).where(PriceQuote.merchant_id == m1.id))
+    ).scalar_one()
+    order = (await db_session.execute(select(Order).where(Order.merchant_id == m1.id))).scalar_one()
+    observation_end = datetime.now(UTC) - timedelta(minutes=30)
+    quote.created_at = observation_end - timedelta(minutes=15)
+    order.updated_at = observation_end + timedelta(minutes=1)
+    await db_session.commit()
+
+    snapshot = await MerchantAgentService.build_authoritative_observations(
+        session=db_session,
+        merchant_id=m1.id,
+        window_days=30,
+        end_at=observation_end,
+    )
+    telemetry = {item.metric_name: item for item in snapshot.telemetry}
+    assert telemetry["total_quotes_generated"].value == 1
+    assert telemetry["quote_conversion_rate"].value == 0.0
 
 
 @pytest.mark.asyncio

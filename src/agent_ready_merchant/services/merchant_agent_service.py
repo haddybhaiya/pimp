@@ -158,6 +158,10 @@ class MerchantAgentService:
                 PriceQuote.merchant_id == merchant_id,
                 PriceQuote.created_at >= start_window,
                 PriceQuote.created_at < now,
+                # Reconstruct the cohort as it stood at this window's end.
+                # Otherwise older baseline quotes collect later settlements
+                # when the post-experiment window is evaluated.
+                Order.updated_at < now,
             )
         )
         quote_cohort_orders = list(
@@ -312,7 +316,10 @@ class MerchantAgentService:
                 unit="percentage",
                 sample_size=total_quotes,
                 window_days=window_days,
-                description="Percentage of issued quotes converted into settled orders.",
+                description=(
+                    "Percentage of issued quotes converted into settled orders "
+                    "by the observation-window endpoint."
+                ),
             ),
             ObservationTelemetryItem(
                 category=ObservationCategory.DERIVED,
@@ -533,7 +540,7 @@ class MerchantAgentService:
         )
 
         def has_prohibited_structured_action(value: Any) -> bool:
-            """Reject typed action intents without trusting an LLM's declared proposal type."""
+            """Reject hidden financial/governance intent in untrusted structured fields."""
             action_keys = {"action", "operation", "tool", "command", "intent", "kind", "type"}
             prohibited_actions = (
                 "refund",
@@ -553,6 +560,16 @@ class MerchantAgentService:
             if isinstance(value, dict):
                 for key, nested_value in value.items():
                     normalized_key = str(key).lower()
+                    # All scalar metadata remains untrusted. An LLM must not
+                    # hide a prohibited action under a neutral label such as
+                    # {"feature": "refund"}.
+                    if not isinstance(nested_value, (dict, list)):
+                        scalar_text = f"{normalized_key} {nested_value}".lower()
+                        if any(
+                            re.search(rf"\b{re.escape(term)}\b", scalar_text)
+                            for term in prohibited_actions
+                        ):
+                            return True
                     if normalized_key in action_keys or normalized_key in prohibited_actions:
                         action_value = json.dumps(nested_value, sort_keys=True, default=str).lower()
                         if any(

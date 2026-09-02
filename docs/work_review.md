@@ -31,6 +31,19 @@
 
 ---
 
+# Phase 7 Structured-Governance and Conversion-Cohort Remediation Log
+
+> **Reviewed on:** 2026-09-02
+> **Scope:** Hidden structured prohibited actions and historical quote-conversion maturity.
+> **Status:** **RESOLVED & VERIFIED**
+
+1. **P1 — Neutral-key governance bypass:** Governance now examines every scalar within untrusted metadata, variations, and structured actions. A value such as `{"feature": "refund"}` is deterministically `PROHIBITED`; safety does not rely on an LLM-supplied key name.
+2. **P1 — Unequally matured conversion cohorts:** Quote conversion now counts only orders whose authoritative status was updated before the same observation endpoint as their quote cohort. A later settlement cannot revise a prior baseline window or bias a post-experiment result.
+
+**Verified by:** `tests/test_phase7_merchant_agent.py`.
+
+---
+
 # Deferred Phase 5 Follow-ups — Remediation Log
 
 > **Reviewed on:** 2026-09-01
