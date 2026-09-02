@@ -53,7 +53,8 @@
   - Prohibits unauthorized actions (`PROHIBITED`): attempts to alter policy, modify floor prices, grant capabilities, or execute direct payments/refunds.
   - Classifies low-risk reversible proposals as `LOW_RISK_REVERSIBLE` and promotional offers as `APPROVAL_REQUIRED`.
 - [x] **Approval-First Experiment Framework (`MerchantExperiment`, `MerchantExperimentResult`):**
-  - Durable database models and migrations `008_merchant_agent_and_experiments.py` and `009_merchant_agent_runs.py`.
+  - Durable database models and migrations `008_merchant_agent_and_experiments.py`, `009_merchant_agent_runs.py`, and `010_phase7_integrity.py`.
+  - Composite tenant foreign keys keep proposal-to-run and result-to-experiment links within the same merchant; server-owned demo-product provenance cannot be set through catalog input.
   - Complete lifecycle: `DRAFT` / `PROPOSED` $\to$ `APPROVAL_REQUIRED` $\to$ `APPROVED` $\to$ `COMPLETED` / `ROLLED_BACK`.
   - Phase 7 does NOT autonomously execute production changes (strictly reserved for Phase 8).
 - [x] **Deterministic Experiment Measurement Engine:**
@@ -66,6 +67,9 @@
   - Full API endpoints (`/api/v1/merchant/agent/*`, `/api/v1/merchant/experiments/*`) protected by `_require_merchant_auth`.
 - [x] **Cryptographic Audit Ledger Linkage:**
   - Logs immutable SHA-256 audit events for `MERCHANT_AGENT_RUN_COMPLETED`, `MERCHANT_PROPOSAL_REVIEWED`, `MERCHANT_EXPERIMENT_CREATED`, `MERCHANT_EXPERIMENT_APPROVED`, `MERCHANT_EXPERIMENT_EVALUATED`.
+- [x] **Review Remediation Boundaries:**
+  - Phase 7 mutations use durable idempotency receipts; the audit ledger uses keyset pagination to avoid duplicates or omissions while new events arrive.
+  - Malformed structured model payloads degrade to no new intelligence action, and telemetry uses bounded, cohort-consistent observations.
 - [x] **Comprehensive Test Suite & Quality Gate Compliance:**
-  - 10 comprehensive tests in `tests/test_phase7_merchant_agent.py` covering multi-tenant scoping, evidence validation, adversarial prompt injection safety, proposal governance, and deterministic experiment evaluation.
+  - 15 comprehensive tests in `tests/test_phase7_merchant_agent.py` covering multi-tenant scoping, evidence validation, adversarial prompt injection safety, proposal governance, deterministic experiment evaluation, bounded windows, and replay-safe mutations.
   - 100% clean passes on Ruff, Mypy strict, Vitest, and Pytest.

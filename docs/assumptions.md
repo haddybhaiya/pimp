@@ -150,6 +150,14 @@
 - **STATUS:** **VERIFIED (PASS)**
 - **MITIGATION:** Unsupported diagnoses/proposals are discarded rather than remapped to unrelated metrics; experiment baselines are server-computed at approval, evaluation is blocked until its fixed 30-day post-approval window closes, approval/evaluation rows are locked, and duplicate result rows are database-constrained.
 
+### 16. Phase 7 Tenant Linkage, Replay Safety, and Demo Isolation
+- **ASSUMPTION:** Durable merchant-agent records, demo simulations, and merchant control-plane mutations remain safe only if database relations enforce tenant ownership, demos identify sandbox products through server-owned provenance, and retried mutations replay their original result.
+- **EVIDENCE:** Migration `010_phase7_integrity` applied successfully to the configured InsForge PostgreSQL database; focused portal, demo, migration, and Phase 7 tests pass.
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** A cross-tenant proposal/result link, duplicate experiment mutation, or caller-labelled live product could corrupt merchant reporting, inventory, or audit history.
+- **MITIGATION:** Composite foreign keys bind proposal runs and experiment results to the same merchant; `products.is_demo_sandbox_product` is a server-only column populated only for canonical seeded SKUs; Phase 7 POST handlers use merchant-scoped idempotency receipts; and audit history pages by stable `(created_at, id)` cursors.
+
 
 
 

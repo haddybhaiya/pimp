@@ -179,8 +179,8 @@ graph LR
 
 ## 4. Phase 7 Merchant Agent Verification Results Summary
 
-- **Total Backend Pytest Tests:** 279 passed, 3 skipped (live sandbox testmode skipped in CI)
-- **Total Frontend Vitest Tests:** 27 passed across 7 test suites
+- **Total Backend Pytest Tests:** 286 passed, 3 skipped (optional live-provider / live-sandbox tests)
+- **Total Frontend Vitest Tests:** 31 passed across 8 test suites
 - **Frontend Production Build:** 100% clean TypeScript compilation and Vite bundling
 - **Ruff Lint & Format:** 100% clean (0 issues)
 - **Mypy Static Typing:** 100% strict compliance (0 errors)
@@ -190,4 +190,11 @@ graph LR
 - **Server-Authoritative Measurement:** Experiment outcomes computed deterministically from PostgreSQL telemetry; recommendations (`KEEP`, `ROLLBACK`, `INCONCLUSIVE`) adhere strictly to sample size and delta thresholds.
 - **Multi-Tenant Isolation:** Cross-tenant proposal access and review attempts fail closed with HTTP 404.
 - **Phase Gate Status:** **PASS (100% SIGNED OFF)**
+
+### Phase 7 Review Remediation Verification (2026-09-02)
+
+- **Migration:** `py -m alembic upgrade head` applied `010_phase7_integrity` successfully; `py -m alembic current` reports `010_phase7_integrity (head)`.
+- **Backend gate:** `py -m ruff format --check .`, `py -m ruff check .`, `py -m mypy src tests`, and `py -m pytest` all pass.
+- **Frontend gate:** `npm test` passes 31 tests; `npm run build` passes. Vite reports only the existing large-chunk advisory.
+- **Focused regressions:** 38 portal/demo/Phase 7/migration tests pass, including tenant-linked records, server-owned demo provenance, stable audit cursors, safe malformed model output, and idempotent Phase 7 mutations.
 

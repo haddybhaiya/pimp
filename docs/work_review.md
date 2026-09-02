@@ -2,7 +2,7 @@
 
 ---
 
-# Review 12: Phase 7 Measurement, Governance, and Rollback Safeguards
+# Phase 7 Measurement, Governance, and Rollback Safeguards — Remediation Log
 
 > **Reviewed on:** 2026-09-02
 > **Scope:** Fixed-duration experiment evaluation, structured prohibited-action detection, and merchant-scoped AgentRun downgrade safety.
@@ -16,7 +16,22 @@
 
 ---
 
-# Review 11: Validated Deferred Phase 5 Follow-ups
+# Service, Telemetry, and Replay-Safety Follow-up Remediation Log
+
+> **Reviewed on:** 2026-09-02
+> **Scope:** Phase 5 demo isolation, Phase 5 audit paging, and Phase 7 observation/API mutation safety.
+> **Status:** **RESOLVED & VERIFIED**
+
+1. **P1 — Demo sandbox provenance and rejected-SKU side effects:** Sandbox products now use the server-owned `products.is_demo_sandbox_product` marker introduced by migration 010; it is not accepted from merchant catalog payloads. A requested SKU is checked against the canonical demo set before any seed/reset work occurs, so a rejected live SKU cannot create demo products, reset policies, append demo audit events, or settle production inventory.
+2. **P2 — Observation fidelity:** Payment friction counts both `FAILED` and `TIMED_OUT` attempts. Quote conversion uses a consistent quote-created cohort for both numerator and denominator, and its confidence sample size is the quote count. Every bounded observation query honours both window boundaries. Valid JSON with a non-object or non-list top-level agent payload degrades to no new intelligence action.
+3. **P2 — Stable audit pagination:** `/api/v1/merchant/audit` now uses keyset pagination. The response returns `next_cursor` (`created_at`, `id`); callers request older entries with the paired `before_created_at` and `before_id` parameters, avoiding duplicates/skips as events are appended.
+4. **P2 — Phase 7 mutation retries:** Proposal review and experiment create/approve/evaluate now require `X-Idempotency-Key`, claim/replay a durable merchant mutation receipt, and persist the receipt response in the same transaction as the domain mutation and audit event.
+
+**Verified by:** `tests/test_phase5_2_merchant_control_plane.py`, `tests/test_phase5_3_demo_and_security_hardening.py`, and `tests/test_phase7_merchant_agent.py`.
+
+---
+
+# Deferred Phase 5 Follow-ups — Remediation Log
 
 > **Reviewed on:** 2026-09-01
 > **Scope:** Validated Phase 5 findings. Remediated on 2026-09-01 with regression coverage.
@@ -27,7 +42,7 @@
 
 [`demo_simulator_service.py`](../src/agent_ready_merchant/services/demo_simulator_service.py): `execute_simulation` selects from all active merchant products, including a caller-supplied live SKU, when demo products have not first been seeded. The real settlement flow then deducts the selected inventory.
 
-**Resolution:** `execute_simulation` now filters exclusively to `attributes.demo_seeded == true`, seeds only that isolated catalog when necessary, and rejects every other SKU. `test_demo_rejects_live_catalog_sku_without_mutating_inventory` proves a normal catalog item cannot be settled or decremented by the sandbox.
+**Resolution:** `execute_simulation` now filters exclusively to the server-owned `is_demo_sandbox_product` marker, seeds only the canonical sandbox catalog when necessary, and rejects every other SKU before it can cause seed side effects. `test_demo_rejects_live_catalog_sku_without_mutating_inventory` proves a normal catalog item cannot be settled or decremented by the sandbox.
 
 ### 2. P2 — Audit viewer cannot retrieve older ledger entries — RESOLVED
 
