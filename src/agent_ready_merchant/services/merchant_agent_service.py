@@ -158,10 +158,10 @@ class MerchantAgentService:
                 PriceQuote.merchant_id == merchant_id,
                 PriceQuote.created_at >= start_window,
                 PriceQuote.created_at < now,
-                # Reconstruct the cohort as it stood at this window's end.
-                # Otherwise older baseline quotes collect later settlements
-                # when the post-experiment window is evaluated.
-                Order.updated_at < now,
+                # Use immutable creation time to freeze cohort state at window endpoint.
+                # Avoid mutable updated_at so subsequent order lifecycle events
+                # (e.g., shipping updates) do not retroactively erase conversions.
+                Order.created_at < now,
             )
         )
         quote_cohort_orders = list(
@@ -509,8 +509,12 @@ class MerchantAgentService:
         - Discount suggestions, bundle promotions, pricing proposals -> APPROVAL_REQUIRED
         """
         ptype = proposal_data.get("proposal_type", "")
-        proposed_change = (proposal_data.get("proposed_change", "")).lower()
-        title = (proposal_data.get("title", "")).lower()
+        proposed_change = str(proposal_data.get("proposed_change", "")).lower()
+        title = str(proposal_data.get("title", "")).lower()
+        hypothesis = str(proposal_data.get("hypothesis", "")).lower()
+        observation = str(proposal_data.get("observation", "")).lower()
+        target_entity = str(proposal_data.get("target_entity", "")).lower()
+        expected_effect = str(proposal_data.get("expected_effect", "")).lower()
 
         # Prohibited actions check
         prohibited_keywords = (
@@ -534,9 +538,9 @@ class MerchantAgentService:
             "disable policy",
         )
         prohibited_text_patterns = (
-            r"\b(?:refund|reimburse|payout|charge|debit|credit|transfer|disburse)\b",
-            r"\b(?:grant|revoke|increase|decrease|change|modify|update|alter|set|disable|enable)\b"
-            r".*\b(?:policy|floor(?: price)?|capabilit(?:y|ies)|permission|autonomy)\b",
+            r"\b(?:refund|reimburse|payout|charge|debit|credit|transfer|disburse)\w*\b",
+            r"\b(?:grant|revoke|increase|decrease|change|modify|update|alter|set|disable|enable)\w*\b"
+            r".*\b(?:policy|floor(?:\s*price)?|capabilit(?:y|ies)|permission|autonomy)\w*\b",
         )
 
         def has_prohibited_structured_action(value: Any) -> bool:
@@ -560,17 +564,19 @@ class MerchantAgentService:
             if isinstance(value, dict):
                 for key, nested_value in value.items():
                     normalized_key = str(key).lower()
-                    # All scalar metadata remains untrusted. An LLM must not
-                    # hide a prohibited action under a neutral label such as
-                    # {"feature": "refund"}.
+                    # All scalar metadata remains untrusted. Convert non-alphanumerics (underscores,
+                    # dashes) to spaces to reliably detect snake_case, compound, or plural terms.
                     if not isinstance(nested_value, (dict, list)):
-                        scalar_text = f"{normalized_key} {nested_value}".lower()
+                        raw_scalar = f"{normalized_key} {nested_value}".lower()
+                        normalized_scalar = re.sub(r"[^a-z0-9]+", " ", raw_scalar)
                         if any(
-                            re.search(rf"\b{re.escape(term)}\b", scalar_text)
+                            re.search(rf"\b{re.escape(term)}\w*\b", normalized_scalar)
                             for term in prohibited_actions
                         ):
                             return True
-                    if normalized_key in action_keys or normalized_key in prohibited_actions:
+                    if normalized_key in action_keys or any(
+                        term in normalized_key for term in prohibited_actions
+                    ):
                         action_value = json.dumps(nested_value, sort_keys=True, default=str).lower()
                         if any(
                             term in normalized_key or term in action_value
@@ -583,7 +589,10 @@ class MerchantAgentService:
                 return any(has_prohibited_structured_action(item) for item in value)
             return False
 
-        text = f"{title}\n{proposed_change}"
+        text = (
+            f"{title}\n{proposed_change}\n{hypothesis}\n"
+            f"{observation}\n{target_entity}\n{expected_effect}"
+        )
         structured_values = (
             proposal_data.get("metadata_payload"),
             proposal_data.get("proposed_variation"),

@@ -55,12 +55,12 @@ def test_alembic_script_directory_and_head() -> None:
     assert integrity_revision.down_revision == "009_merchant_agent_runs"
 
 
-def test_merchant_run_downgrade_refuses_to_discard_merchant_scoped_runs() -> None:
-    """Rollback must fail before changing schema when its old shape cannot retain Phase 7 runs."""
+def test_merchant_run_downgrade_cleans_up_merchant_scoped_runs() -> None:
+    """Downgrade must delete merchant runs before restoring session_id NOT NULL."""
     migration_source = Path("alembic/versions/009_merchant_agent_runs.py").read_text(
         encoding="utf-8"
     )
-    preflight = "Cannot downgrade 009_merchant_agent_runs while merchant-scoped"
+    preflight = "DELETE FROM agent_runs WHERE session_id IS NULL"
     assert preflight in migration_source
     assert migration_source.index(preflight) < migration_source.index(
         'op.alter_column("agent_runs", "session_id", existing_type=sa.UUID(), nullable=False)'

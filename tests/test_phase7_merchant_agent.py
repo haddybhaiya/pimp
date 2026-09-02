@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -1118,3 +1119,113 @@ async def test_experiment_evaluation_uses_equal_fixed_measurement_windows(
         (start_time - timedelta(days=window_days), start_time, window_days),
         (start_time, start_time + timedelta(days=window_days), window_days),
     ]
+
+
+@pytest.mark.asyncio
+async def test_neutral_keys_with_snake_case_and_inflected_prohibited_actions_rejected():
+    """Prohibited actions in snake_case, compound, or plural forms must be PROHIBITED."""
+    active_policies = {"AUTONOMY_LEVEL": {"autonomy_level": 1}}
+
+    evasive_proposals: list[dict[str, Any]] = [
+        {
+            "proposal_type": "IMPROVE_PRODUCT_DESCRIPTION",
+            "title": "Enhance description",
+            "proposed_change": "Improve copy",
+            "metadata_payload": {"feature": "refund_request"},
+        },
+        {
+            "proposal_type": "IMPROVE_PRODUCT_DESCRIPTION",
+            "title": "Enhance description",
+            "proposed_change": "Improve copy",
+            "metadata_payload": {"setting": "floor_price"},
+        },
+        {
+            "proposal_type": "IMPROVE_PRODUCT_DESCRIPTION",
+            "title": "Enhance description",
+            "proposed_change": "Improve copy",
+            "metadata_payload": {"param": "refunds"},
+        },
+        {
+            "proposal_type": "IMPROVE_PRODUCT_DESCRIPTION",
+            "title": "Enhance description",
+            "proposed_change": "Improve copy",
+            "hypothesis": "We should payout users directly",
+        },
+    ]
+
+    for p_data in evasive_proposals:
+        risk, allowed, reason = MerchantAgentService.govern_and_classify_proposal(
+            proposal_data=p_data,
+            active_policies=active_policies,
+        )
+        assert risk == ProposalRiskLevel.PROHIBITED
+        assert allowed is False
+        assert reason is not None
+
+
+@pytest.mark.asyncio
+async def test_historical_quote_conversion_preserves_orders_with_later_updated_at(
+    db_session: AsyncSession,
+    setup_two_merchants_with_history,
+):
+    """Orders with updated_at past window endpoint remain counted if created in window."""
+    m1 = setup_two_merchants_with_history["m1"]
+    base_time = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    window_end = base_time + timedelta(days=30)
+
+    # 1. Create a session and quote in the window
+    sess = BuyerAgentSession(
+        merchant_id=m1.id,
+        buyer_agent_identifier="test-buyer-agent",
+        auth_token_hash="testhash123",
+        status="ACTIVE",
+        created_at=base_time + timedelta(days=5),
+        expires_at=base_time + timedelta(days=6),
+    )
+    db_session.add(sess)
+    await db_session.flush()
+
+    quote = PriceQuote(
+        merchant_id=m1.id,
+        session_id=sess.id,
+        status="ACCEPTED",
+        subtotal_paise=500000,
+        discount_paise=0,
+        shipping_paise=0,
+        total_paise=500000,
+        idempotency_key=f"quote-cohort-test-{uuid.uuid4()}",
+        created_at=base_time + timedelta(days=5),
+        expires_at=base_time + timedelta(days=6),
+    )
+    db_session.add(quote)
+    await db_session.flush()
+
+    # 2. Create order created inside the window (day 5) but updated outside the window (day 35)
+    order = Order(
+        merchant_id=m1.id,
+        quote_id=quote.id,
+        buyer_email="buyer.cohort@example.com",
+        amount_paise=500000,
+        currency="INR",
+        status="PAID",
+        created_at=base_time + timedelta(days=5),
+        updated_at=base_time + timedelta(days=35),  # e.g. shipping tracking updated on day 35
+    )
+    db_session.add(order)
+    await db_session.commit()
+
+    # 3. Build snapshot for the Day 0 - Day 30 window
+    snapshot = await MerchantAgentService.build_authoritative_observations(
+        session=db_session,
+        merchant_id=m1.id,
+        window_days=30,
+        start_at=base_time,
+        end_at=window_end,
+    )
+
+    conversion_metric = next(
+        (t for t in snapshot.telemetry if t.metric_name == "quote_conversion_rate"),
+        None,
+    )
+    assert conversion_metric is not None
+    assert conversion_metric.value == 100.0
