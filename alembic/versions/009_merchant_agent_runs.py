@@ -35,8 +35,22 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Safely delete merchant-scoped agent runs before restoring NOT NULL constraint on session_id
-    op.execute(sa.text("DELETE FROM agent_runs WHERE session_id IS NULL"))
+    # A downgrade cannot restore the old non-null session contract while
+    # durable merchant-only runs exist. Refuse before any schema mutation
+    # rather than silently deleting auditable history.
+    op.execute(
+        sa.text(
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT 1 FROM agent_runs WHERE session_id IS NULL) THEN
+                    RAISE EXCEPTION
+                        'Cannot downgrade 009: merchant-scoped AgentRuns exist';
+                END IF;
+            END $$;
+            """
+        )
+    )
     op.drop_constraint("ck_agent_runs_session_or_merchant_required", "agent_runs", type_="check")
     op.alter_column("agent_runs", "session_id", existing_type=sa.UUID(), nullable=False)
     op.drop_index("ix_agent_runs_merchant_id", table_name="agent_runs")

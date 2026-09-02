@@ -31,6 +31,7 @@ from agent_ready_merchant.models.product import Product, ProductVariant
 from agent_ready_merchant.models.proposal import MerchantProposal
 from agent_ready_merchant.models.quote import PriceQuote
 from agent_ready_merchant.models.session import BuyerAgentSession
+from agent_ready_merchant.models.transaction import TransactionRecord
 from agent_ready_merchant.schemas.merchant_agent import (
     DiagnosisPattern,
     ExperimentCreateRequest,
@@ -167,6 +168,17 @@ async def setup_two_merchants_with_history(db_session: AsyncSession):
         status="CAPTURED",
     )
     db_session.add(pay1)
+    await db_session.flush()
+    db_session.add(
+        TransactionRecord(
+            payment_attempt_id=pay1.id,
+            merchant_id=m1.id,
+            entry_type="CREDIT",
+            amount_paise=o1.amount_paise,
+            status="COMMITTED",
+            settlement_ref="pay_alpha_001",
+        )
+    )
 
     # Merchant Beta
     m2 = Merchant(
@@ -989,9 +1001,15 @@ async def test_quote_conversion_uses_settlements_matured_by_observation_end(
         await db_session.execute(select(PriceQuote).where(PriceQuote.merchant_id == m1.id))
     ).scalar_one()
     order = (await db_session.execute(select(Order).where(Order.merchant_id == m1.id))).scalar_one()
+    settlement = (
+        await db_session.execute(
+            select(TransactionRecord).where(TransactionRecord.merchant_id == m1.id)
+        )
+    ).scalar_one()
     observation_end = datetime.now(UTC) - timedelta(minutes=30)
     quote.created_at = observation_end - timedelta(minutes=15)
     order.updated_at = observation_end + timedelta(minutes=1)
+    settlement.created_at = observation_end + timedelta(minutes=1)
     await db_session.commit()
 
     snapshot = await MerchantAgentService.build_authoritative_observations(
@@ -1149,6 +1167,24 @@ async def test_neutral_keys_with_snake_case_and_inflected_prohibited_actions_rej
             "proposal_type": "IMPROVE_PRODUCT_DESCRIPTION",
             "title": "Enhance description",
             "proposed_change": "Improve copy",
+            "metadata_payload": {"actions": ["refund_request"]},
+        },
+        {
+            "proposal_type": "IMPROVE_PRODUCT_DESCRIPTION",
+            "title": "Enhance description",
+            "proposed_change": "Improve copy",
+            "metadata_payload": {"feature": "refundRequest"},
+        },
+        {
+            "proposal_type": "IMPROVE_PRODUCT_DESCRIPTION",
+            "title": "Enhance description",
+            "proposed_change": "Improve copy",
+            "metadata_payload": {"floorPrice": 1},
+        },
+        {
+            "proposal_type": "IMPROVE_PRODUCT_DESCRIPTION",
+            "title": "Enhance description",
+            "proposed_change": "Improve copy",
             "hypothesis": "We should payout users directly",
         },
     ]
@@ -1161,6 +1197,28 @@ async def test_neutral_keys_with_snake_case_and_inflected_prohibited_actions_rej
         assert risk == ProposalRiskLevel.PROHIBITED
         assert allowed is False
         assert reason is not None
+
+    benign_proposals: list[dict[str, Any]] = [
+        {
+            "proposal_type": "IMPROVE_PRODUCT_DESCRIPTION",
+            "title": "Explain loyalty credits",
+            "proposed_change": "Clarify how loyaltyCredits are earned.",
+            "metadata_payload": {"feature": "loyalty_credits"},
+        },
+        {
+            "proposal_type": "EXPOSE_DELIVERY_ETA",
+            "title": "Explain shipping charges",
+            "proposed_change": "Expose shipping_charges before checkout.",
+            "metadata_payload": {"feature": "refundable", "signal": "credit_score"},
+        },
+    ]
+    for p_data in benign_proposals:
+        risk, allowed, _ = MerchantAgentService.govern_and_classify_proposal(
+            proposal_data=p_data,
+            active_policies=active_policies,
+        )
+        assert risk == ProposalRiskLevel.LOW_RISK_REVERSIBLE
+        assert allowed is True
 
 
 @pytest.mark.asyncio
@@ -1212,6 +1270,27 @@ async def test_historical_quote_conversion_preserves_orders_with_later_updated_a
         updated_at=base_time + timedelta(days=35),  # e.g. shipping tracking updated on day 35
     )
     db_session.add(order)
+    await db_session.flush()
+    payment_attempt = PaymentAttempt(
+        order_id=order.id,
+        rzp_order_id="order_cohort_historical_001",
+        rzp_payment_id="pay_cohort_historical_001",
+        amount_paise=order.amount_paise,
+        status="CAPTURED",
+    )
+    db_session.add(payment_attempt)
+    await db_session.flush()
+    db_session.add(
+        TransactionRecord(
+            payment_attempt_id=payment_attempt.id,
+            merchant_id=m1.id,
+            entry_type="CREDIT",
+            amount_paise=order.amount_paise,
+            status="COMMITTED",
+            settlement_ref="pay_cohort_historical_001",
+            created_at=base_time + timedelta(days=6),
+        )
+    )
     await db_session.commit()
 
     # 3. Build snapshot for the Day 0 - Day 30 window

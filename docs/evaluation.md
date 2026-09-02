@@ -179,7 +179,7 @@ graph LR
 
 ## 4. Phase 7 Merchant Agent Verification Results Summary
 
-- **Total Backend Pytest Tests:** 287 passed, 3 skipped (optional live-provider / live-sandbox tests)
+- **Total Backend Pytest Tests:** 289 passed, 3 skipped (optional live-provider / live-sandbox tests)
 - **Total Frontend Vitest Tests:** 31 passed across 8 test suites
 - **Frontend Production Build:** 100% clean TypeScript compilation and Vite bundling
 - **Ruff Lint & Format:** 100% clean (0 issues)

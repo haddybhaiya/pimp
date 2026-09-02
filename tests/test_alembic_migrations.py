@@ -55,16 +55,17 @@ def test_alembic_script_directory_and_head() -> None:
     assert integrity_revision.down_revision == "009_merchant_agent_runs"
 
 
-def test_merchant_run_downgrade_cleans_up_merchant_scoped_runs() -> None:
-    """Downgrade must delete merchant runs before restoring session_id NOT NULL."""
+def test_merchant_run_downgrade_refuses_to_discard_merchant_scoped_runs() -> None:
+    """Downgrade must preserve durable history rather than deleting merchant-only runs."""
     migration_source = Path("alembic/versions/009_merchant_agent_runs.py").read_text(
         encoding="utf-8"
     )
-    preflight = "DELETE FROM agent_runs WHERE session_id IS NULL"
+    preflight = "Cannot downgrade 009: merchant-scoped AgentRuns exist"
     assert preflight in migration_source
     assert migration_source.index(preflight) < migration_source.index(
         'op.alter_column("agent_runs", "session_id", existing_type=sa.UUID(), nullable=False)'
     )
+    assert "DELETE FROM agent_runs WHERE session_id IS NULL" not in migration_source
 
 
 def test_phase7_integrity_migration_adds_tenant_and_audit_linkage_constraints() -> None:

@@ -29,6 +29,7 @@ from agent_ready_merchant.models.product import Product, ProductVariant
 from agent_ready_merchant.models.proposal import MerchantProposal
 from agent_ready_merchant.models.quote import PriceQuote
 from agent_ready_merchant.models.session import BuyerAgentSession
+from agent_ready_merchant.models.transaction import TransactionRecord
 from agent_ready_merchant.schemas.merchant_agent import (
     ExperimentCreateRequest,
     ExperimentResponse,
@@ -150,26 +151,32 @@ class MerchantAgentService:
         # linked to a quote issued in this same observation window; filtering
         # orders by their own creation time can otherwise compare different
         # populations around a window boundary.
-        quote_cohort_orders_stmt = (
-            select(Order)
+        settled_quote_cohort_order_ids_stmt = (
+            select(Order.id)
             .join(PriceQuote, PriceQuote.id == Order.quote_id)
+            .join(PaymentAttempt, PaymentAttempt.order_id == Order.id)
+            .join(
+                TransactionRecord,
+                TransactionRecord.payment_attempt_id == PaymentAttempt.id,
+            )
             .where(
                 Order.merchant_id == merchant_id,
                 PriceQuote.merchant_id == merchant_id,
                 PriceQuote.created_at >= start_window,
                 PriceQuote.created_at < now,
-                # Use immutable creation time to freeze cohort state at window endpoint.
-                # Avoid mutable updated_at so subsequent order lifecycle events
-                # (e.g., shipping updates) do not retroactively erase conversions.
-                Order.created_at < now,
+                TransactionRecord.merchant_id == merchant_id,
+                TransactionRecord.entry_type == "CREDIT",
+                TransactionRecord.status == "COMMITTED",
+                # Append-only settlement evidence fixes conversion as-of this
+                # endpoint without relying on mutable Order.updated_at.
+                TransactionRecord.created_at < now,
             )
+            .distinct()
         )
-        quote_cohort_orders = list(
-            (await session.execute(quote_cohort_orders_stmt)).scalars().all()
+        settled_quote_cohort_order_ids = list(
+            (await session.execute(settled_quote_cohort_order_ids_stmt)).scalars().all()
         )
-        completed_quote_cohort_orders = sum(
-            1 for order in quote_cohort_orders if order.status in ("PAID", "SETTLED", "COMPLETED")
-        )
+        completed_quote_cohort_orders = len(settled_quote_cohort_order_ids)
 
         # 7. Payment Attempts & Failures
         pay_stmt = (
@@ -538,7 +545,11 @@ class MerchantAgentService:
             "disable policy",
         )
         prohibited_text_patterns = (
-            r"\b(?:refund|reimburse|payout|charge|debit|credit|transfer|disburse)\w*\b",
+            r"\brefunds?\b",
+            r"\breimburse(?:ment|ments)?\b",
+            r"\bpayouts?\b",
+            r"\bdisburse(?:ment|ments)?\b",
+            r"\b(?:charge|debit|credit|transfer)\s+(?:card|payment|customer|buyer|funds?|money)\b",
             r"\b(?:grant|revoke|increase|decrease|change|modify|update|alter|set|disable|enable)\w*\b"
             r".*\b(?:policy|floor(?:\s*price)?|capabilit(?:y|ies)|permission|autonomy)\w*\b",
         )
@@ -546,47 +557,74 @@ class MerchantAgentService:
         def has_prohibited_structured_action(value: Any) -> bool:
             """Reject hidden financial/governance intent in untrusted structured fields."""
             action_keys = {"action", "operation", "tool", "command", "intent", "kind", "type"}
-            prohibited_actions = (
+            neutral_value_patterns = (
+                r"\brefunds?(?:\s+request)?\b",
+                r"\breimburse(?:ment|ments)?\b",
+                r"\bpayouts?\b",
+                r"\bdisburse(?:ment|ments)?\b",
+                r"\bfloor\s+price\b",
+                r"\b(?:grant|revoke|increase|decrease|change|modify|update|alter|set|disable|enable)\w*\s+"
+                r"(?:policy|floor(?:\s+price)?|capabilit(?:y|ies)|permission|autonomy)\b",
+                r"\b(?:charge|debit|credit|transfer)\s+(?:card|payment|customer|buyer|funds?|money)\b",
+            )
+            direct_action_values = {
                 "refund",
+                "refunds",
+                "refund request",
                 "reimburse",
+                "reimbursement",
                 "payout",
+                "payouts",
                 "charge",
                 "debit",
                 "credit",
                 "transfer",
+                "disburse",
                 "payment",
                 "policy",
-                "floor",
+                "floor price",
                 "capability",
                 "permission",
                 "autonomy",
-            )
+            }
+
+            def normalize_structured_text(raw_value: Any) -> str:
+                """Normalize separators and camelCase without broad substring matching."""
+                with_word_breaks = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(raw_value))
+                return re.sub(r"[^a-z0-9]+", " ", with_word_breaks.lower()).strip()
+
+            def has_prohibited_scalar(raw_value: Any) -> bool:
+                normalized_value = normalize_structured_text(raw_value)
+                return any(
+                    re.search(pattern, normalized_value) for pattern in neutral_value_patterns
+                )
+
             if isinstance(value, dict):
                 for key, nested_value in value.items():
                     normalized_key = str(key).lower()
-                    # All scalar metadata remains untrusted. Convert non-alphanumerics (underscores,
-                    # dashes) to spaces to reliably detect snake_case, compound, or plural terms.
+                    # All scalar metadata remains untrusted. Normalize snake_case
+                    # before checking explicit prohibited phrases, without treating
+                    # unrelated commerce language (for example loyalty credits) as
+                    # a financial command.
                     if not isinstance(nested_value, (dict, list)):
-                        raw_scalar = f"{normalized_key} {nested_value}".lower()
-                        normalized_scalar = re.sub(r"[^a-z0-9]+", " ", raw_scalar)
-                        if any(
-                            re.search(rf"\b{re.escape(term)}\w*\b", normalized_scalar)
-                            for term in prohibited_actions
-                        ):
+                        if has_prohibited_scalar(f"{key} {nested_value}"):
                             return True
-                    if normalized_key in action_keys or any(
-                        term in normalized_key for term in prohibited_actions
-                    ):
+                        if normalized_key in action_keys:
+                            action_value = normalize_structured_text(nested_value)
+                            if action_value in direct_action_values:
+                                return True
+                    if normalized_key in action_keys and isinstance(nested_value, (dict, list)):
                         action_value = json.dumps(nested_value, sort_keys=True, default=str).lower()
                         if any(
-                            term in normalized_key or term in action_value
-                            for term in prohibited_actions
+                            re.search(pattern, action_value) for pattern in neutral_value_patterns
                         ):
                             return True
                     if has_prohibited_structured_action(nested_value):
                         return True
             elif isinstance(value, list):
                 return any(has_prohibited_structured_action(item) for item in value)
+            elif isinstance(value, (str, int, float, bool)):
+                return has_prohibited_scalar(value)
             return False
 
         text = (

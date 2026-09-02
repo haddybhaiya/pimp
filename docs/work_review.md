@@ -37,8 +37,8 @@
 > **Scope:** Hidden structured prohibited actions and historical quote-conversion maturity.
 > **Status:** **RESOLVED & VERIFIED**
 
-1. **P1 — Neutral-key governance bypass:** Governance now examines every scalar within untrusted metadata, variations, and structured actions. A value such as `{"feature": "refund"}` is deterministically `PROHIBITED`; safety does not rely on an LLM-supplied key name.
-2. **P1 — Unequally matured conversion cohorts:** Quote conversion now counts only orders whose authoritative status was updated before the same observation endpoint as their quote cohort. A later settlement cannot revise a prior baseline window or bias a post-experiment result.
+1. **P1 — Neutral-key governance bypass:** Governance recursively normalizes scalar and list values in metadata, variations, and structured actions before matching explicit prohibited command forms. Values such as `{"feature": "refund_request"}`, `{"actions": ["refundRequest"]}`, and `{"setting": "floor_price"}` are deterministically `PROHIBITED`; benign terms such as `loyalty_credits` and `shipping_charges` remain reviewable.
+2. **P1 — Unequally matured conversion cohorts:** Quote conversion is derived from append-only committed `TransactionRecord` credit entries created before the same observation endpoint as the quote cohort. A later settlement cannot revise a prior window, while a later fulfillment update cannot erase a conversion that already settled.
 
 **Verified by:** `tests/test_phase7_merchant_agent.py`.
 
