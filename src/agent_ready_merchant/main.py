@@ -7,6 +7,7 @@ import logging
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ from agent_ready_merchant.integrations.razorpay.exceptions import (
     WebhookReplayError,
     WebhookTimestampError,
 )
+from agent_ready_merchant.llm.base import BaseLLMProvider
 from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.services.payment_service import PaymentService
 
@@ -168,6 +170,8 @@ def create_app() -> FastAPI:
         "/audit",
         "/settings",
         "/demo",
+        "/agent",
+        "/experiments",
         "/unauthorized",
     ]:
 
@@ -1280,13 +1284,31 @@ def create_app() -> FastAPI:
     )
     async def get_audit_ledger_endpoint(
         limit: int = 50,
+        before_created_at: datetime | None = None,
+        before_id: uuid.UUID | None = None,
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> AuditLedgerResponse:
         await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
-        return await MerchantPortalService.get_audit_ledger(db, x_merchant_id, limit=limit)
+        if not 1 <= limit <= 100:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Audit pagination must use a limit from 1 to 100.",
+            )
+        if (before_created_at is None) != (before_id is None):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Audit cursor requires both before_created_at and before_id.",
+            )
+        return await MerchantPortalService.get_audit_ledger(
+            db,
+            x_merchant_id,
+            limit=limit,
+            before_created_at=before_created_at,
+            before_id=before_id,
+        )
 
     # =========================================================================
     # Interactive Demo & Sandbox Simulator Endpoints (Phase 5.3)
@@ -1352,6 +1374,344 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    # =========================================================================
+    # Phase 7 — Merchant Agent & Experiment Framework Endpoints
+    # =========================================================================
+    import json
+
+    from agent_ready_merchant.schemas.merchant_agent import (
+        ExperimentCreateRequest,
+        ExperimentResponse,
+        ExperimentResultResponse,
+        MerchantAgentAnalyzeResponse,
+        MerchantObservationSnapshot,
+        MerchantProposalResponse,
+        MerchantProposalReviewRequest,
+    )
+    from agent_ready_merchant.services.merchant_agent_service import MerchantAgentService
+
+    @app.get(
+        "/api/v1/merchant/agent/snapshot",
+        summary="Retrieve Authoritative Merchant Observation Snapshot",
+        tags=["Merchant Agent"],
+        response_model=MerchantObservationSnapshot,
+    )
+    async def get_agent_snapshot_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        window_days: int = 30,
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> MerchantObservationSnapshot:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            return await MerchantAgentService.build_authoritative_observations(
+                session=db, merchant_id=x_merchant_id, window_days=window_days
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/merchant/agent/analyze",
+        summary="Execute Bounded Merchant Agent Optimization Turn",
+        tags=["Merchant Agent"],
+        response_model=MerchantAgentAnalyzeResponse,
+    )
+    async def run_agent_analysis_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> MerchantAgentAnalyzeResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            receipt, replay = await MerchantMutationIdempotencyService.claim_or_replay(
+                db,
+                merchant_id=x_merchant_id,
+                operation="merchant_agent.analyze",
+                idempotency_key=x_idempotency_key,
+                payload={},
+            )
+            if replay is not None:
+                return MerchantAgentAnalyzeResponse.model_validate(replay)
+
+            # Provider initialization
+            llm_instance: BaseLLMProvider | None
+            if current_settings.is_testing:
+                from agent_ready_merchant.llm.mock_provider import MockLLMProvider
+
+                mock_response_payload = {
+                    "diagnoses": [
+                        {
+                            "pattern": "REPEATED_DELIVERY_QUESTIONS",
+                            "summary": "Buyer agents frequently inquire about delivery timeline.",
+                            "severity": "MEDIUM",
+                            "evidence_references": [
+                                "total_buyer_sessions",
+                                "quote_conversion_rate",
+                            ],
+                            "affected_entities": ["discovery_metadata"],
+                        }
+                    ],
+                    "proposals": [
+                        {
+                            "proposal_type": "EXPOSE_DELIVERY_ETA",
+                            "title": "Expose Delivery ETA in Discovery Response",
+                            "observation": "Delivery-timeline questions appear in the snapshot.",
+                            "evidence": ["total_buyer_sessions", "quote_conversion_rate"],
+                            "hypothesis": "Clear ETA will reduce hesitation and boost conversion.",
+                            "proposed_change": "Include delivery window in discovery response.",
+                            "target_entity": "discovery_metadata",
+                            "expected_effect": "Quote conversion rate may improve.",
+                            "expected_metric": "quote_conversion_rate",
+                            "confidence": 0.85,
+                            "estimated_cost_paise": 0,
+                        }
+                    ],
+                }
+                llm_instance = MockLLMProvider(responses=[json.dumps(mock_response_payload)])
+            elif not current_settings.GROQ_API_KEY.get_secret_value():
+                # Missing provider configuration must never turn into fabricated
+                # intelligence. The service returns the authoritative snapshot only.
+                llm_instance = None
+            else:
+                from agent_ready_merchant.llm.groq_provider import GroqProvider
+
+                llm_instance = GroqProvider(
+                    api_key=current_settings.GROQ_API_KEY.get_secret_value(),
+                    model=current_settings.LLM_MODEL_NAME,
+                )
+
+            result = await MerchantAgentService.execute_agent_run(
+                session=db,
+                merchant_id=x_merchant_id,
+                llm_provider=llm_instance,
+                settings=current_settings,
+            )
+            assert receipt is not None
+            await MerchantMutationIdempotencyService.complete(
+                db, receipt, result.model_dump(mode="json")
+            )
+            return result
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/merchant/agent/proposals",
+        summary="List Merchant Agent Optimization Proposals",
+        tags=["Merchant Agent"],
+        response_model=list[MerchantProposalResponse],
+    )
+    async def list_proposals_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        status_filter: str | None = None,
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> list[MerchantProposalResponse]:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        return await MerchantAgentService.list_proposals(
+            session=db, merchant_id=x_merchant_id, status=status_filter
+        )
+
+    @app.post(
+        "/api/v1/merchant/agent/proposals/{proposal_id}/review",
+        summary="Review, Approve, or Reject Merchant Proposal",
+        tags=["Merchant Agent"],
+        response_model=MerchantProposalResponse,
+    )
+    async def review_proposal_endpoint(
+        proposal_id: uuid.UUID,
+        req: MerchantProposalReviewRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> MerchantProposalResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            receipt, replay = await MerchantMutationIdempotencyService.claim_or_replay(
+                db,
+                merchant_id=x_merchant_id,
+                operation="merchant_agent.proposal.review",
+                idempotency_key=x_idempotency_key,
+                payload={"proposal_id": str(proposal_id), **req.model_dump(mode="json")},
+            )
+            if replay is not None:
+                return MerchantProposalResponse.model_validate(replay)
+            result = await MerchantAgentService.review_proposal(
+                session=db,
+                merchant_id=x_merchant_id,
+                proposal_id=proposal_id,
+                review_req=req,
+                reviewer_id="merchant_admin",
+                commit=False,
+            )
+            assert receipt is not None
+            await MerchantMutationIdempotencyService.complete(
+                db, receipt, result.model_dump(mode="json")
+            )
+            return result
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/merchant/experiments",
+        summary="Register Structured Merchant Optimization Experiment",
+        tags=["Merchant Experiments"],
+        response_model=ExperimentResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_experiment_endpoint(
+        req: ExperimentCreateRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> ExperimentResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            receipt, replay = await MerchantMutationIdempotencyService.claim_or_replay(
+                db,
+                merchant_id=x_merchant_id,
+                operation="merchant_experiment.create",
+                idempotency_key=x_idempotency_key,
+                payload=req.model_dump(mode="json"),
+            )
+            if replay is not None:
+                return ExperimentResponse.model_validate(replay)
+            result = await MerchantAgentService.create_experiment(
+                session=db,
+                merchant_id=x_merchant_id,
+                req=req,
+                creator_id="merchant_admin",
+                commit=False,
+            )
+            assert receipt is not None
+            await MerchantMutationIdempotencyService.complete(
+                db, receipt, result.model_dump(mode="json"), response_status=status.HTTP_201_CREATED
+            )
+            return result
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/merchant/experiments",
+        summary="List Merchant Optimization Experiments",
+        tags=["Merchant Experiments"],
+        response_model=list[ExperimentResponse],
+    )
+    async def list_experiments_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> list[ExperimentResponse]:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        return await MerchantAgentService.list_experiments(session=db, merchant_id=x_merchant_id)
+
+    @app.post(
+        "/api/v1/merchant/experiments/{experiment_id}/approve",
+        summary="Approve Merchant Experiment",
+        tags=["Merchant Experiments"],
+        response_model=ExperimentResponse,
+    )
+    async def approve_experiment_endpoint(
+        experiment_id: uuid.UUID,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> ExperimentResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            receipt, replay = await MerchantMutationIdempotencyService.claim_or_replay(
+                db,
+                merchant_id=x_merchant_id,
+                operation="merchant_experiment.approve",
+                idempotency_key=x_idempotency_key,
+                payload={"experiment_id": str(experiment_id)},
+            )
+            if replay is not None:
+                return ExperimentResponse.model_validate(replay)
+            result = await MerchantAgentService.approve_experiment(
+                session=db,
+                merchant_id=x_merchant_id,
+                experiment_id=experiment_id,
+                approver_id="merchant_admin",
+                commit=False,
+            )
+            assert receipt is not None
+            await MerchantMutationIdempotencyService.complete(
+                db, receipt, result.model_dump(mode="json")
+            )
+            return result
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/merchant/experiments/{experiment_id}/evaluate",
+        summary="Evaluate Experiment Deterministically from Observed Metrics",
+        tags=["Merchant Experiments"],
+        response_model=ExperimentResultResponse,
+    )
+    async def evaluate_experiment_endpoint(
+        experiment_id: uuid.UUID,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> ExperimentResultResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            receipt, replay = await MerchantMutationIdempotencyService.claim_or_replay(
+                db,
+                merchant_id=x_merchant_id,
+                operation="merchant_experiment.evaluate",
+                idempotency_key=x_idempotency_key,
+                payload={"experiment_id": str(experiment_id)},
+            )
+            if replay is not None:
+                return ExperimentResultResponse.model_validate(replay)
+            result = await MerchantAgentService.evaluate_experiment_results(
+                session=db,
+                merchant_id=x_merchant_id,
+                experiment_id=experiment_id,
+                commit=False,
+            )
+            assert receipt is not None
+            await MerchantMutationIdempotencyService.complete(
+                db, receipt, result.model_dump(mode="json")
+            )
+            return result
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     return app
 

@@ -8,17 +8,22 @@ import { AuditLedger, AuditEventItem } from '@/types/portal';
 import { formatRelativeTime } from '@/lib/utils';
 import { FileText, ShieldCheck, ShieldAlert } from 'lucide-react';
 
+const PAGE_SIZE = 50;
+
 export const AuditPage: React.FC = () => {
   const [ledger, setLedger] = useState<AuditLedger | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [paginationError, setPaginationError] = useState<string | null>(null);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   useEffect(() => {
     const fetchAudit = async () => {
       try {
-        const data = await api.getAuditLedger(50);
+        const data = await api.getAuditLedger(PAGE_SIZE);
         setLedger(data);
         setError(null);
+        setPaginationError(null);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Unable to load the audit ledger.');
       } finally {
@@ -27,6 +32,21 @@ export const AuditPage: React.FC = () => {
     };
     fetchAudit();
   }, []);
+
+  const loadOlder = async () => {
+    if (!ledger || isLoadingMore) return;
+    if (!ledger.next_cursor) return;
+    setIsLoadingMore(true);
+    try {
+      const next = await api.getAuditLedger(PAGE_SIZE, ledger.next_cursor);
+      setLedger({ ...next, events: [...ledger.events, ...next.events] });
+      setPaginationError(null);
+    } catch (err: unknown) {
+      setPaginationError(err instanceof Error ? err.message : 'Unable to load older audit events.');
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -57,7 +77,7 @@ export const AuditPage: React.FC = () => {
         <div className="space-y-3">
           {[1, 2, 3].map((i) => <Skeleton key={i} className="h-20 w-full" />)}
         </div>
-      ) : error ? (
+      ) : error && !ledger ? (
         <EmptyState icon={<ShieldAlert className="h-10 w-10" />} title="Audit ledger unavailable" description={error} />
       ) : !ledger || ledger.events.length === 0 ? (
         <EmptyState
@@ -89,10 +109,25 @@ export const AuditPage: React.FC = () => {
           ))}
         </div>
       )}
-      {ledger && ledger.total_count > ledger.events.length && (
-        <p className="text-center text-xs text-muted-foreground">
-          Showing the latest {ledger.events.length} of {ledger.total_count} immutable audit events.
-        </p>
+      {ledger && ledger.next_cursor && (
+        <div className="space-y-2 text-center">
+          <p className="text-xs text-muted-foreground">
+            Showing {ledger.events.length} of {ledger.total_count} immutable audit events.
+          </p>
+          <button
+            type="button"
+            onClick={loadOlder}
+            disabled={isLoadingMore}
+            className="text-xs font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isLoadingMore ? 'Loading older events…' : 'Load older events'}
+          </button>
+          {paginationError && (
+            <p className="text-xs text-destructive" role="alert">
+              {paginationError}
+            </p>
+          )}
+        </div>
       )}
     </div>
   );

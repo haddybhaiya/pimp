@@ -134,6 +134,31 @@
 - **FAILURE IF WRONG:** Legitimate merchants cannot establish a session, or an identity could be incorrectly linked.
 - **MITIGATION:** Fail closed on every token verification failure, require signup email equality with the verified identity, enforce a unique `merchants.auth_user_id`, and retain the existing secure cookie boundary for control-plane access.
 
+---
+
+### 14. Merchant Agent Intelligence Separation & Server-Authoritative Experiment Measurement
+- **ASSUMPTION:** The Merchant Agent must never have direct authority to alter financial policies, change floor prices, grant capabilities, or execute financial transactions. All optimization proposals must pass server-authoritative risk governance, require human merchant review, and experiment outcomes must be computed deterministically from PostgreSQL telemetry rather than LLM generation.
+- **EVIDENCE:** Verified via `tests/test_phase7_merchant_agent.py` (all 10 multi-tenant scoping, evidence validation, adversarial prompt injection defense, proposal governance, and deterministic measurement tests passing).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Model hallucinations could alter live pricing, bypass merchant floor limits, fabricate experiment results, or execute unapproved production mutations.
+- **MITIGATION:** Explicit `OBSERVE → DIAGNOSE → FORM HYPOTHESIS → PROPOSE → ESTIMATE → MEASURE` lifecycle; server-authoritative `govern_and_classify_proposal()` marking price/policy changes `PROHIBITED`; approval-first experiment registration (`approval_status = "PENDING"`); and deterministic PostgreSQL formula evaluation of experiment deltas and recommendations (`KEEP`, `ROLLBACK`, `INCONCLUSIVE`).
+
+### 15. Merchant Agent Evidence and Experiment Windows
+- **ASSUMPTION:** A merchant-agent finding is meaningful only when every cited evidence key exists in the bounded authoritative snapshot, and an experiment recommendation is meaningful only when equal, fixed baseline and post-approval observation windows are compared.
+- **EVIDENCE:** `tests/test_phase7_merchant_agent.py` rejects hallucinated evidence, requires approval before evaluation, rejects early evaluation, and proves deterministic evaluation uses contiguous equal-duration windows.
+- **STATUS:** **VERIFIED (PASS)**
+- **MITIGATION:** Unsupported diagnoses/proposals are discarded rather than remapped to unrelated metrics; normalized untrusted structured values are screened for explicit prohibited commands without treating benign commerce language as authority escalation; experiment baselines are server-computed at approval; conversion cohorts use append-only credit-ledger timestamps as-of matching observation endpoints; approval/evaluation rows are locked; and duplicate result rows are database-constrained.
+
+### 16. Phase 7 Tenant Linkage, Replay Safety, and Demo Isolation
+- **ASSUMPTION:** Durable merchant-agent records, demo simulations, and merchant control-plane mutations remain safe only if database relations enforce tenant ownership, demos identify sandbox products through server-owned provenance, and retried mutations replay their original result.
+- **EVIDENCE:** Migration `010_phase7_integrity` applied successfully to the configured InsForge PostgreSQL database; focused portal, demo, migration, and Phase 7 tests pass.
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** A cross-tenant proposal/result link, duplicate experiment mutation, or caller-labelled live product could corrupt merchant reporting, inventory, or audit history.
+- **MITIGATION:** Composite foreign keys bind proposal runs and experiment results to the same merchant; `products.is_demo_sandbox_product` is a server-only column populated only for canonical seeded SKUs; Phase 7 POST handlers use merchant-scoped idempotency receipts; and audit history pages by stable `(created_at, id)` cursors.
+
+
 
 
 

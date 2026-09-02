@@ -254,6 +254,15 @@ class AuditEventResponse(BaseModel):
     created_at: datetime
 
 
+class AuditLedgerCursor(BaseModel):
+    """Stable keyset cursor for fetching older immutable audit events."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    created_at: datetime
+    id: uuid.UUID
+
+
 class AuditLedgerResponse(BaseModel):
     """Full audit trail response with cryptographic chain validity badge."""
 
@@ -263,3 +272,4 @@ class AuditLedgerResponse(BaseModel):
     total_count: int
     chain_valid: bool
     chain_error: str | None = None
+    next_cursor: AuditLedgerCursor | None = None

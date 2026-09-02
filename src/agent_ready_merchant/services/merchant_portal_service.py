@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent_ready_merchant.constants import PLATFORM_MAX_SINGLE_TRANSACTION_PAISE
 from agent_ready_merchant.gateway.constants import COMMERCE_PROTOCOL_VERSION
 from agent_ready_merchant.models.approval import MerchantApproval
 from agent_ready_merchant.models.audit import AuditEvent
@@ -32,6 +33,7 @@ from agent_ready_merchant.schemas.merchant_auth import PolicySummaryItem
 from agent_ready_merchant.schemas.merchant_portal import (
     ApprovalItemResponse,
     AuditEventResponse,
+    AuditLedgerCursor,
     AuditLedgerResponse,
     DashboardSummaryResponse,
     InventoryAdjustRequest,
@@ -541,6 +543,18 @@ class MerchantPortalService:
         if exp < now:
             approval.status = "EXPIRED"
             await session.flush()
+            await AuditEvent.create_event(
+                session=session,
+                merchant_id=merchant_id,
+                actor_type="SYSTEM",
+                event_type="APPROVAL_EXPIRED",
+                payload={
+                    "approval_id": str(approval.id),
+                    "quote_id": str(approval.quote_id) if approval.quote_id else None,
+                    "status": approval.status,
+                    "expires_at": exp.isoformat(),
+                },
+            )
             raise ValueError("Approval ticket has expired.")
 
         validated_counter_discount: int | None = None
@@ -765,6 +779,8 @@ class MerchantPortalService:
             raise ValueError(
                 "Autonomy level must be 0 (Read-Only), 1 (Bounded), or 2 (Supervised)."
             )
+        if not 100 <= max_tx_paise <= PLATFORM_MAX_SINGLE_TRANSACTION_PAISE:
+            raise ValueError("Maximum transaction limit exceeds the platform governance ceiling.")
 
         rules_stmt = select(PolicyRule).where(PolicyRule.merchant_id == merchant_id)
         existing_rules = {
@@ -814,16 +830,31 @@ class MerchantPortalService:
 
     @classmethod
     async def get_audit_ledger(
-        cls, session: AsyncSession, merchant_id: uuid.UUID, limit: int = 50
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+        limit: int = 50,
+        before_created_at: datetime | None = None,
+        before_id: uuid.UUID | None = None,
     ) -> AuditLedgerResponse:
         """Fetches immutable audit event trail and verifies cryptographic SHA-256 chain."""
         stmt = (
             select(AuditEvent)
             .where(AuditEvent.merchant_id == merchant_id)
-            .order_by(AuditEvent.created_at.desc())
-            .limit(limit)
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
         )
-        events = list((await session.execute(stmt)).scalars().all())
+        if before_created_at is not None and before_id is not None:
+            stmt = stmt.where(
+                or_(
+                    AuditEvent.created_at < before_created_at,
+                    and_(
+                        AuditEvent.created_at == before_created_at,
+                        AuditEvent.id < before_id,
+                    ),
+                )
+            )
+        page_rows = list((await session.execute(stmt.limit(limit + 1))).scalars().all())
+        events = page_rows[:limit]
 
         count_stmt = select(func.count(AuditEvent.id)).where(AuditEvent.merchant_id == merchant_id)
         total_count = (await session.execute(count_stmt)).scalar_one() or 0
@@ -846,11 +877,20 @@ class MerchantPortalService:
             for e in events
         ]
 
+        next_cursor: AuditLedgerCursor | None = None
+        if len(page_rows) > limit and events:
+            last_event = events[-1]
+            next_cursor = AuditLedgerCursor(
+                created_at=last_event.created_at,
+                id=last_event.id,
+            )
+
         return AuditLedgerResponse(
             events=event_responses,
             total_count=total_count,
             chain_valid=is_chain_valid,
             chain_error=chain_error,
+            next_cursor=next_cursor,
         )
 
     @classmethod

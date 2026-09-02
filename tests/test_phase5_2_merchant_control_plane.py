@@ -568,22 +568,49 @@ async def test_policy_governance_update_and_bounds(setup_test_merchants):
 
 
 @pytest.mark.asyncio
-async def test_audit_ledger_cryptographic_verification(setup_test_merchants):
+async def test_audit_ledger_cryptographic_verification(
+    setup_test_merchants, db_session: AsyncSession
+):
     """Verifies audit ledger retrieval and SHA-256 hash chain integrity."""
     m1 = setup_test_merchants["m1"]
     token1 = setup_test_merchants["token1"]
+    for index in range(3):
+        await AuditEvent.create_event(
+            session=db_session,
+            merchant_id=m1.id,
+            actor_type="SYSTEM",
+            event_type=f"PAGINATION_TEST_{index}",
+            payload={"index": index},
+        )
+    await db_session.commit()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get(
-            "/api/v1/merchant/audit?limit=20",
+            "/api/v1/merchant/audit?limit=2",
             headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
         )
         assert resp.status_code == 200
         data = resp.json()
         assert data["chain_valid"] is True
         assert data["total_count"] >= 1
-        assert len(data["events"]) >= 1
-        assert data["events"][0]["event_type"] in ["MERCHANT_INITIALIZED", "POLICIES_UPDATED"]
+        assert len(data["events"]) == 2
+        assert data["next_cursor"] is not None
+
+        next_cursor = data["next_cursor"]
+        second_resp = await client.get(
+            "/api/v1/merchant/audit",
+            params={
+                "limit": 2,
+                "before_created_at": next_cursor["created_at"],
+                "before_id": next_cursor["id"],
+            },
+            headers={"X-Merchant-ID": str(m1.id), "X-Auth-Token": token1},
+        )
+        assert second_resp.status_code == 200
+        second_page = second_resp.json()
+        first_ids = {event["id"] for event in data["events"]}
+        second_ids = {event["id"] for event in second_page["events"]}
+        assert first_ids.isdisjoint(second_ids)
 
 
 @pytest.mark.asyncio

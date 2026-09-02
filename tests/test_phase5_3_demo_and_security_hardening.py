@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_ready_merchant.config import get_settings
 from agent_ready_merchant.main import app
+from agent_ready_merchant.models.audit import AuditEvent
 from agent_ready_merchant.models.inventory import InventoryItem
 from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.models.order import Order
@@ -482,6 +483,80 @@ async def test_demo_checkout_insufficient_inventory_fails_closed(setup_two_merch
         )
         assert res.status_code == 400
         assert "insufficient inventory stock" in res.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_demo_rejects_live_catalog_sku_without_mutating_inventory(
+    setup_two_merchants, db_session: AsyncSession
+):
+    """The sandbox must never settle a merchant-owned production catalog SKU."""
+    data = setup_two_merchants
+    m1 = data["m1"]
+    token1 = data["token1"]
+    live_product = Product(
+        merchant_id=m1.id,
+        sku="LIVE-ONLY-01",
+        title="Live Production Product",
+        description="Ordinary merchant catalog item",
+        category="GENERAL",
+        base_price_paise=100_000,
+        floor_price_paise=90_000,
+        is_active=True,
+        attributes={"demo_seeded": False},
+    )
+    db_session.add(live_product)
+    await db_session.flush()
+    live_variant = ProductVariant(
+        product_id=live_product.id,
+        sku=live_product.sku,
+        title="Standard",
+    )
+    db_session.add(live_variant)
+    await db_session.flush()
+    live_inventory = InventoryItem(
+        variant_id=live_variant.id,
+        available_quantity=7,
+        reserved_quantity=0,
+    )
+    db_session.add(live_inventory)
+    await db_session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post(
+            "/api/v1/merchant/demo/simulate",
+            headers={
+                "X-Merchant-ID": str(m1.id),
+                "X-Auth-Token": token1,
+                "X-Idempotency-Key": str(uuid.uuid4()),
+            },
+            json={"scenario": "STANDARD_AUTO_COMMERCE", "sku": live_product.sku, "quantity": 1},
+        )
+    assert res.status_code == 400
+    assert "demo sku" in res.json()["detail"].lower()
+    await db_session.refresh(live_inventory)
+    assert live_inventory.available_quantity == 7
+    demo_products = list(
+        (
+            await db_session.execute(
+                select(Product).where(
+                    Product.merchant_id == m1.id,
+                    Product.is_demo_sandbox_product.is_(True),
+                )
+            )
+        ).scalars()
+    )
+    demo_audits = list(
+        (
+            await db_session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.merchant_id == m1.id,
+                    AuditEvent.event_type == "DEMO_STATE_INITIALIZED",
+                )
+            )
+        ).scalars()
+    )
+    assert demo_products == []
+    assert demo_audits == []
 
 
 @pytest.mark.asyncio

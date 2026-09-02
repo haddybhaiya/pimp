@@ -12,9 +12,17 @@ import {
   ResolveApprovalPayload,
   PolicyGovernance,
   AuditLedger,
+  AuditCursor,
   DemoSimulationStepRequest,
   DemoSimulationStepResponse,
   DemoSeedResponse,
+  MerchantObservationSnapshot,
+  MerchantProposalItem,
+  MerchantProposalReviewPayload,
+  MerchantExperimentItem,
+  MerchantExperimentResultItem,
+  ExperimentCreatePayload,
+  MerchantAgentAnalyzeResponse,
 } from '@/types/portal';
 
 export class ApiError extends Error {
@@ -322,8 +330,13 @@ export class ApiClient {
     });
   }
 
-  async getAuditLedger(limit = 50): Promise<AuditLedger> {
-    return this.request<AuditLedger>(`/api/v1/merchant/audit?limit=${limit}`);
+  async getAuditLedger(limit = 50, before?: AuditCursor): Promise<AuditLedger> {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (before) {
+      query.set('before_created_at', before.created_at);
+      query.set('before_id', before.id);
+    }
+    return this.request<AuditLedger>(`/api/v1/merchant/audit?${query.toString()}`);
   }
 
   async seedDemoState(): Promise<DemoSeedResponse> {
@@ -337,6 +350,60 @@ export class ApiClient {
       method: 'POST',
       headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
       body: JSON.stringify(payload),
+    });
+  }
+
+  // =========================================================================
+  // Phase 7 — Merchant Agent & Experiment Methods
+  // =========================================================================
+
+  async getAgentSnapshot(windowDays = 30): Promise<MerchantObservationSnapshot> {
+    return this.request<MerchantObservationSnapshot>(`/api/v1/merchant/agent/snapshot?window_days=${windowDays}`);
+  }
+
+  async runAgentAnalysis(): Promise<MerchantAgentAnalyzeResponse> {
+    return this.request<MerchantAgentAnalyzeResponse>('/api/v1/merchant/agent/analyze', {
+      method: 'POST',
+      headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
+    });
+  }
+
+  async listProposals(status?: string): Promise<MerchantProposalItem[]> {
+    const query = status ? `?status_filter=${status}` : '';
+    return this.request<MerchantProposalItem[]>(`/api/v1/merchant/agent/proposals${query}`);
+  }
+
+  async reviewProposal(proposalId: string, payload: MerchantProposalReviewPayload): Promise<MerchantProposalItem> {
+    return this.request<MerchantProposalItem>(`/api/v1/merchant/agent/proposals/${proposalId}/review`, {
+      method: 'POST',
+      headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async createExperiment(payload: ExperimentCreatePayload): Promise<MerchantExperimentItem> {
+    return this.request<MerchantExperimentItem>('/api/v1/merchant/experiments', {
+      method: 'POST',
+      headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async listExperiments(): Promise<MerchantExperimentItem[]> {
+    return this.request<MerchantExperimentItem[]>('/api/v1/merchant/experiments');
+  }
+
+  async approveExperiment(experimentId: string): Promise<MerchantExperimentItem> {
+    return this.request<MerchantExperimentItem>(`/api/v1/merchant/experiments/${experimentId}/approve`, {
+      method: 'POST',
+      headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
+    });
+  }
+
+  async evaluateExperiment(experimentId: string): Promise<MerchantExperimentResultItem> {
+    return this.request<MerchantExperimentResultItem>(`/api/v1/merchant/experiments/${experimentId}/evaluate`, {
+      method: 'POST',
+      headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
     });
   }
 

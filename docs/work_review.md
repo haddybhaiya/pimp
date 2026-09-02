@@ -2,6 +2,81 @@
 
 ---
 
+# Phase 7 Measurement, Governance, and Rollback Safeguards — Remediation Log
+
+> **Reviewed on:** 2026-09-02
+> **Scope:** Fixed-duration experiment evaluation, structured prohibited-action detection, and merchant-scoped AgentRun downgrade safety.
+> **Status:** **RESOLVED & VERIFIED**
+
+1. **Experiment measurement windows:** Baselines are refreshed from the 30 days immediately before approval. Evaluation is blocked until the matching 30-day post-approval window closes and records the exact windows in deterministic evidence.
+2. **Structured action governance:** The deterministic classifier now recursively inspects typed action fields in proposal metadata and experiment variations; `{"action":"refund"}` is prohibited regardless of the declared low-risk proposal type.
+3. **Migration 009 rollback:** Downgrade now preflights for merchant-only `AgentRun` rows and fails clearly before altering `session_id` to `NOT NULL`; it never silently deletes durable run records.
+
+**Verified by:** `tests/test_phase7_merchant_agent.py` and `tests/test_alembic_migrations.py`.
+
+---
+
+# Service, Telemetry, and Replay-Safety Follow-up Remediation Log
+
+> **Reviewed on:** 2026-09-02
+> **Scope:** Phase 5 demo isolation, Phase 5 audit paging, and Phase 7 observation/API mutation safety.
+> **Status:** **RESOLVED & VERIFIED**
+
+1. **P1 — Demo sandbox provenance and rejected-SKU side effects:** Sandbox products now use the server-owned `products.is_demo_sandbox_product` marker introduced by migration 010; it is not accepted from merchant catalog payloads. A requested SKU is checked against the canonical demo set before any seed/reset work occurs, so a rejected live SKU cannot create demo products, reset policies, append demo audit events, or settle production inventory.
+2. **P2 — Observation fidelity:** Payment friction counts both `FAILED` and `TIMED_OUT` attempts. Quote conversion uses a consistent quote-created cohort for both numerator and denominator, and its confidence sample size is the quote count. Every bounded observation query honours both window boundaries. Valid JSON with a non-object or non-list top-level agent payload degrades to no new intelligence action.
+3. **P2 — Stable audit pagination:** `/api/v1/merchant/audit` now uses keyset pagination. The response returns `next_cursor` (`created_at`, `id`); callers request older entries with the paired `before_created_at` and `before_id` parameters, avoiding duplicates/skips as events are appended.
+4. **P2 — Phase 7 mutation retries:** Proposal review and experiment create/approve/evaluate now require `X-Idempotency-Key`, claim/replay a durable merchant mutation receipt, and persist the receipt response in the same transaction as the domain mutation and audit event.
+
+**Verified by:** `tests/test_phase5_2_merchant_control_plane.py`, `tests/test_phase5_3_demo_and_security_hardening.py`, and `tests/test_phase7_merchant_agent.py`.
+
+---
+
+# Phase 7 Structured-Governance and Conversion-Cohort Remediation Log
+
+> **Reviewed on:** 2026-09-02
+> **Scope:** Hidden structured prohibited actions and historical quote-conversion maturity.
+> **Status:** **RESOLVED & VERIFIED**
+
+1. **P1 — Neutral-key governance bypass:** Governance recursively normalizes scalar and list values in metadata, variations, and structured actions before matching explicit prohibited command forms. Values such as `{"feature": "refund_request"}`, `{"actions": ["refundRequest"]}`, and `{"setting": "floor_price"}` are deterministically `PROHIBITED`; benign terms such as `loyalty_credits` and `shipping_charges` remain reviewable.
+2. **P1 — Unequally matured conversion cohorts:** Quote conversion is derived from append-only committed `TransactionRecord` credit entries created before the same observation endpoint as the quote cohort. A later settlement cannot revise a prior window, while a later fulfillment update cannot erase a conversion that already settled.
+
+**Verified by:** `tests/test_phase7_merchant_agent.py`.
+
+---
+
+# Deferred Phase 5 Follow-ups — Remediation Log
+
+> **Reviewed on:** 2026-09-01
+> **Scope:** Validated Phase 5 findings. Remediated on 2026-09-01 with regression coverage.
+
+## Open Findings
+
+### 1. P1 — Demo simulation can consume live catalog inventory — RESOLVED
+
+[`demo_simulator_service.py`](../src/agent_ready_merchant/services/demo_simulator_service.py): `execute_simulation` selects from all active merchant products, including a caller-supplied live SKU, when demo products have not first been seeded. The real settlement flow then deducts the selected inventory.
+
+**Resolution:** `execute_simulation` now filters exclusively to the server-owned `is_demo_sandbox_product` marker, seeds only the canonical sandbox catalog when necessary, and rejects every other SKU before it can cause seed side effects. `test_demo_rejects_live_catalog_sku_without_mutating_inventory` proves a normal catalog item cannot be settled or decremented by the sandbox.
+
+### 2. P2 — Audit viewer cannot retrieve older ledger entries — RESOLVED
+
+[`audit.tsx`](../frontend/src/pages/audit.tsx): the page requests the newest 50 events and transparently reports the total count, but provides no pagination or “load more” control.
+
+**Resolution:** The ledger endpoint now accepts bounded `limit` and non-negative `offset` pagination. The typed client and audit view append older immutable events through a lightweight “Load older events” control.
+
+### 3. P2 — Platform transaction ceiling is not enforced at the setup API boundary — RESOLVED
+
+[`merchant_auth.py`](../src/agent_ready_merchant/schemas/merchant_auth.py) and [`merchant_auth_service.py`](../src/agent_ready_merchant/services/merchant_auth_service.py): the onboarding UI rejects values above ₹1,00,000, but a direct setup request can persist a higher merchant transaction limit because the schema allows up to the 64-bit maximum.
+
+**Resolution:** The shared `PLATFORM_MAX_SINGLE_TRANSACTION_PAISE` constant is enforced in signup/setup schemas and policy updates. `test_setup_schema_enforces_platform_transaction_ceiling` covers the exact boundary and an over-limit direct payload.
+
+### 4. P2 — Expired approval transition can roll back — RESOLVED
+
+[`merchant_portal_service.py`](../src/agent_ready_merchant/services/merchant_portal_service.py): `resolve_approval` sets an expired pending ticket to `EXPIRED`, flushes, then raises a `ValueError`. The request transaction rolls back on that error, leaving the stored ticket `PENDING`.
+
+**Resolution:** Expiry now appends an `APPROVAL_EXPIRED` audit event before the existing endpoint commits the transition and returns the client error. The locked approval state machine remains fail-closed.
+
+---
+
 # Review 4: Phase 3 — End-to-End Payment Boundary, Reliability & Verification (`main..phs3`)
 
 > **Reviewed on:** 2026-08-27
@@ -744,6 +819,40 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 - **Root Cause & Fix:** Previously, when a buyer submitted a revised counter-offer while an earlier approval ticket remained `PENDING`, the branch returned the existing ticket without updating its terms. The gateway now distinguishes identical retries (which return the existing pending ticket idempotently) from revised counter-offers (which update `existing_appr.requested_amount_paise`, `existing_appr.proposed_discount_paise`, `existing_appr.policy_decision_hash`, `existing_appr.policy_rule_code`, `existing_appr.reason`, advance `quote.version += 2`, and emit a `MERCHANT_APPROVAL_TERMS_UPDATED` `AuditEvent`).
 - **Verified by:** `tests/test_phase4_2_safety_policy_governance.py::test_duplicate_negotiation_escalation_deduplicated` (adversarial verification of updated proposal terms on active pending tickets).
 
+---
 
+# Review 11: Phase 7 — Merchant Agent Intelligence & Optimization Layer
 
+> **Reviewed on:** 2026-09-01
+> **Scope:** Phase 7 Merchant-Side Intelligence, Authoritative PostgreSQL Observation Matrix, Diagnostic Engine, Proposal Generation, Server-Authoritative Risk Governance, Approval-First Experimentation Framework, Deterministic Measurement Engine, and Control Plane Integration (`/agent`, `/experiments`).
+> **Verification:** Remediation verification green (279 passed, 3 skipped in pytest; 27 passed in Vitest), `ruff check` clean (0 errors), `ruff format` clean, `mypy --strict` clean, frontend production build clean.
 
+---
+
+## 1. Architectural Architecture & Core Invariant Enforcement
+
+1. **Separation of Intelligence from Authority ($\text{Intelligence} \neq \text{Authority}$, `INV-AGY-01`):**
+   - Implemented `MerchantAgentService` (`src/agent_ready_merchant/services/merchant_agent_service.py`) executing the explicit lifecycle:
+     `OBSERVE → DIAGNOSE → FORM HYPOTHESIS → PROPOSE → ESTIMATE → MEASURE`.
+   - The LLM acts purely as an untrusted reasoning engine emitting structured `MerchantDiagnosisItem` and `MerchantProposalCreate` objects.
+   - Prohibited actions (altering policies, changing floor prices, granting capabilities, executing direct payments/refunds) are intercepted server-side by `govern_and_classify_proposal()` and marked `PROHIBITED` / `REJECTED`.
+
+2. **Authoritative PostgreSQL Observation Layer:**
+   - Queries real PostgreSQL tables (`merchants`, `policy_rules`, `products`, `product_variants`, `inventory_items`, `buyer_agent_sessions`, `buyer_intents`, `price_quotes`, `orders`, `payment_attempts`, `merchant_approvals`).
+   - Categorizes metrics strictly into:
+     - `OBSERVED`: Raw counts and realized amounts (e.g. `total_buyer_sessions`, `completed_orders`, `total_revenue_paise`, `failed_payments_count`, `out_of_stock_skus_count`).
+     - `DERIVED`: Deterministic formulas (e.g. `quote_conversion_rate`, `aov_paise`, `quote_acceptance_rate`, `cart_abandonment_rate`).
+     - `ESTIMATED`: Bounded loss projections (e.g. `estimated_lost_demand_paise`).
+   - All metrics are integer paise representation for currency and strictly tenant-scoped (`merchant_id`).
+
+3. **Approval-First Experiment Framework (`MerchantExperiment`, `MerchantExperimentResult`):**
+   - Alembic migration `008_merchant_agent_and_experiments.py` adds tables for `merchant_proposals`, `merchant_experiments`, and `merchant_experiment_results`.
+   - Experiments start in `APPROVAL_REQUIRED` / `approval_status = "PENDING"`. Autonomous production execution is strictly forbidden in Phase 7.
+   - Deterministic measurement calculates post-experiment deltas from PostgreSQL telemetry and produces recommendations (`KEEP` for $\ge +5\%$ with sample $\ge 5$, `ROLLBACK` for $< -2\%$, `INCONCLUSIVE` otherwise).
+
+4. **Cryptographic Audit Hash Chain Linkage:**
+   - Every agent run, proposal review, experiment registration, approval, and evaluation emits an append-only cryptographic `AuditEvent` verified via `AuditEvent.verify_chain()`.
+
+5. **Web Control Plane Surface:**
+   - Built interactive frontend pages `frontend/src/pages/agent.tsx` and `frontend/src/pages/experiments.tsx`.
+   - Added REST endpoints in `src/agent_ready_merchant/main.py` protected by `_require_merchant_auth`.

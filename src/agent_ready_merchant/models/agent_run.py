@@ -3,7 +3,7 @@
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, Text
+from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agent_ready_merchant.db.base import GUID, Base, OptimisticLockMixin, TimestampMixin
@@ -31,6 +31,11 @@ class AgentRun(Base, TimestampMixin, OptimisticLockMixin):
             "total_tokens >= 0",
             name="ck_agent_runs_tokens_non_negative",
         ),
+        CheckConstraint(
+            "session_id IS NOT NULL OR merchant_id IS NOT NULL",
+            name="ck_agent_runs_session_or_merchant_required",
+        ),
+        UniqueConstraint("id", "merchant_id", name="uq_agent_runs_id_merchant"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -38,10 +43,16 @@ class AgentRun(Base, TimestampMixin, OptimisticLockMixin):
         primary_key=True,
         default=uuid.uuid4,
     )
-    session_id: Mapped[uuid.UUID] = mapped_column(
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(),
         ForeignKey("buyer_agent_sessions.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
+        index=True,
+    )
+    merchant_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(),
+        ForeignKey("merchants.id", ondelete="CASCADE"),
+        nullable=True,
         index=True,
     )
     status: Mapped[str] = mapped_column(
@@ -66,7 +77,7 @@ class AgentRun(Base, TimestampMixin, OptimisticLockMixin):
     )
 
     # Relationships
-    session: Mapped["BuyerAgentSession"] = relationship(
+    session: Mapped["BuyerAgentSession | None"] = relationship(
         "BuyerAgentSession",
         back_populates="agent_runs",
     )

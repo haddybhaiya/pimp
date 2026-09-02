@@ -168,6 +168,12 @@ export interface AuditLedger {
   total_count: number;
   chain_valid: boolean;
   chain_error?: string;
+  next_cursor?: AuditCursor | null;
+}
+
+export interface AuditCursor {
+  created_at: string;
+  id: string;
 }
 
 export interface SimulationTraceStep {
@@ -211,6 +217,134 @@ export interface DemoSeedResponse {
   merchant_id: string;
   products_seeded: number;
   policies_configured: boolean;
+  message: string;
+}
+
+export interface ObservationTelemetryItem {
+  category: 'OBSERVED' | 'DERIVED' | 'ESTIMATED';
+  metric_name: string;
+  value: number | string;
+  formatted_value: string;
+  unit: string;
+  sample_size: number;
+  window_days: number;
+  description: string;
+}
+
+export interface MerchantObservationSnapshot {
+  merchant_id: string;
+  store_name: string;
+  currency: string;
+  autonomy_level: number;
+  active_policies: Record<string, unknown>;
+  catalog_summary: Record<string, unknown>;
+  telemetry: ObservationTelemetryItem[];
+  signals: Array<{ signal_key: string; title: string; count: number; description: string }>;
+  recent_proposals: Array<{ id: string; type: string; title: string; status: string; risk_level: string }>;
+  recent_experiments: Array<{ id: string; title: string; target_metric: string; status: string; approval_status: string }>;
+  generated_at: string;
+}
+
+export interface MerchantDiagnosisItem {
+  pattern: string;
+  summary: string;
+  severity: 'LOW' | 'MEDIUM' | 'HIGH';
+  evidence_references: string[];
+  affected_entities: string[];
+}
+
+export interface MerchantProposalItem {
+  id: string;
+  merchant_id: string;
+  run_id?: string;
+  proposal_type: string;
+  title: string;
+  observation: string;
+  evidence: string[];
+  hypothesis: string;
+  proposed_change: string;
+  target_entity: string;
+  expected_effect: string;
+  expected_metric: string;
+  confidence: number;
+  risk_level: 'READ_ONLY' | 'LOW_RISK_REVERSIBLE' | 'APPROVAL_REQUIRED' | 'PROHIBITED';
+  status: 'PROPOSED' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'CONVERTED_TO_EXPERIMENT' | 'ARCHIVED';
+  rejection_reason?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+  metadata_payload: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MerchantProposalReviewPayload {
+  decision: 'APPROVE' | 'REJECT' | 'CONVERT_TO_EXPERIMENT';
+  rejection_reason?: string;
+}
+
+export interface MerchantExperimentResultItem {
+  id: string;
+  experiment_id: string;
+  merchant_id: string;
+  sample_size: number;
+  baseline_metric: number;
+  post_experiment_metric: number;
+  absolute_change: number;
+  percentage_change: number;
+  confidence_score: number;
+  limitations: string[];
+  recommendation: 'KEEP' | 'ROLLBACK' | 'INCONCLUSIVE';
+  deterministic_evidence: Record<string, unknown>;
+  recorded_at: string;
+}
+
+export interface MerchantExperimentItem {
+  id: string;
+  merchant_id: string;
+  proposal_id?: string;
+  title: string;
+  hypothesis: string;
+  target_metric: string;
+  baseline_value: number;
+  target_value: number;
+  proposed_variation: Record<string, unknown>;
+  risk_level: string;
+  status: string;
+  approval_status: string;
+  approved_by?: string;
+  approved_at?: string;
+  stopping_condition: Record<string, unknown>;
+  rollback_condition: Record<string, unknown>;
+  start_time?: string;
+  end_time?: string;
+  created_at: string;
+  updated_at: string;
+  results: MerchantExperimentResultItem[];
+}
+
+export interface ExperimentCreatePayload {
+  proposal_id?: string;
+  title: string;
+  hypothesis: string;
+  target_metric: string;
+  baseline_value: number;
+  target_value: number;
+  proposed_variation?: Record<string, unknown>;
+  stopping_condition?: Record<string, unknown>;
+  rollback_condition?: Record<string, unknown>;
+}
+
+export interface MerchantAgentAnalyzeResponse {
+  run_id: string;
+  merchant_id: string;
+  status: string;
+  snapshot: MerchantObservationSnapshot;
+  diagnoses: MerchantDiagnosisItem[];
+  proposals: MerchantProposalItem[];
+  step_count: number;
+  total_tokens: number;
+  execution_duration_ms: number;
+  executed_at: string;
   message: string;
 }
 

@@ -17,6 +17,8 @@ import {
   Menu,
   X,
   Database,
+  Bot,
+  FlaskConical,
 } from 'lucide-react';
 
 export interface AppShellProps {
@@ -34,6 +36,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
       title: 'OPERATE',
       items: [
         { label: 'Overview', path: '/dashboard', icon: LayoutDashboard },
+        { label: 'Merchant Agent', path: '/agent', icon: Bot, badge: 'AI' },
         { label: 'Approval Queue', path: '/approvals', icon: Clock },
         { label: 'Orders Ledger', path: '/orders', icon: ShoppingCart },
         { label: 'Payments', path: '/payments', icon: CreditCard },
@@ -50,6 +53,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
     {
       title: 'INSPECT',
       items: [
+        { label: 'Experiments', path: '/experiments', icon: FlaskConical },
         { label: 'Audit Trail (SHA-256)', path: '/audit', icon: FileText },
         { label: 'Simulation Sandbox', path: '/demo', icon: Sparkles, badge: 'Interactive' },
       ],
@@ -57,9 +61,9 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
   ];
 
   return (
-    <div className="portal-font flex min-h-screen bg-[#101113] text-[#f3f4f6]">
+    <div className="portal-font flex h-screen overflow-hidden bg-[#101113] text-[#f3f4f6]">
       {/* Desktop Sidebar */}
-      <aside className="hidden w-64 flex-col border-r border-white/10 bg-[#1b1c1e] lg:flex">
+      <aside className="hidden w-64 flex-col border-r border-white/10 bg-[#1b1c1e] lg:flex shrink-0 h-full">
         {/* Brand header */}
         <div
           className="flex h-16 cursor-pointer items-center gap-3 border-b border-white/10 px-5 transition hover:opacity-90"
@@ -76,7 +80,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
         </div>
 
         {/* Merchant Context Card */}
-        <div className="border-b border-white/[0.07] p-3">
+        <div className="border-b border-white/[0.07] p-3 shrink-0">
           <div className="rounded-md border border-white/10 bg-white/[0.035] p-3">
             <div className="flex items-center justify-between mb-1">
               <span className="text-[10px] uppercase font-mono tracking-wider text-brand-bright">
@@ -135,7 +139,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
         </nav>
 
         {/* Footer info & Logout */}
-        <div className="space-y-2 border-t border-white/10 bg-black/10 p-3">
+        <div className="space-y-2 border-t border-white/10 bg-black/10 p-3 shrink-0">
           <div className="flex items-center justify-between text-[10px] text-text-muted px-2 font-mono">
             <span>Autonomy Level</span>
             <span className="text-text-primary font-bold">L{merchant?.policies.autonomyLevel ?? 1}</span>
@@ -192,6 +196,17 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
             >
               <Sparkles className="h-3 w-3 text-brand-bright" />
               Sandbox
+            </Button>
+
+            <Button
+              onClick={logout}
+              variant="ghost"
+              size="sm"
+              aria-label="Sign out"
+              title="Sign out"
+              className="px-2 text-rose-400 hover:bg-rose-500/10 hover:text-rose-300 lg:hidden"
+            >
+              <LogOut className="h-4 w-4" />
             </Button>
           </div>
         </header>

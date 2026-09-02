@@ -111,8 +111,11 @@ class AgentRunStateMachine:
                 if k in cls.MUTABLE_FIELDS:
                     setattr(run, k, v)
 
-        # Explicitly load merchant_id from BuyerAgentSession
-        if run.session is not None:
+        # Merchant intelligence runs have no buyer session. Prefer the durable
+        # merchant scope when present, then resolve legacy buyer-session runs.
+        if run.merchant_id is not None:
+            merchant_id = run.merchant_id
+        elif run.session is not None:
             merchant_id = run.session.merchant_id
         else:
             session_stmt = select(BuyerAgentSession.merchant_id).where(
@@ -123,6 +126,7 @@ class AgentRunStateMachine:
         audit_payload = {
             "entity": "AgentRun",
             "entity_id": str(run.id),
+            "merchant_id": str(merchant_id),
             "session_id": str(run.session_id),
             "from_state": from_state,
             "to_state": target_state,
