@@ -137,6 +137,20 @@ async def setup_merchants_and_catalog(db_session: AsyncSession):
 
     await db_session.commit()
 
+    # Phase 8 defaults are deliberately disabled: tests explicitly model the
+    # merchant opting in before exercising autonomous execution.
+    rules = await ControlledAutonomyService.get_or_create_default_rules(db_session, m1.id)
+    for rule in rules:
+        await ControlledAutonomyService.update_autonomy_rule(
+            session=db_session,
+            merchant_id=m1.id,
+            action_type=rule.action_type,
+            req=AutonomyRuleUpdateRequest(is_enabled=True, expected_version=rule.version),
+            actor_type="MERCHANT_ADMIN",
+            actor_id=m1.id,
+        )
+    await db_session.commit()
+
     token1 = MerchantAuthService.generate_admin_token(m1.id, secret, m1.slug)
     token2 = MerchantAuthService.generate_admin_token(m2.id, secret, m2.slug)
 
@@ -148,6 +162,27 @@ async def setup_merchants_and_catalog(db_session: AsyncSession):
         "token1": token1,
         "token2": token2,
     }
+
+
+@pytest.mark.asyncio
+async def test_new_merchants_are_not_implicitly_opted_into_autonomy(
+    db_session: AsyncSession,
+) -> None:
+    """Default rules remain disabled until a merchant administrator enables them."""
+    merchant = Merchant(
+        name="No Auto Opt-In",
+        slug=f"no-auto-{uuid.uuid4().hex[:6]}",
+        currency="INR",
+        rzp_key_id="rzp_test_no_auto",
+        kill_switch_enabled=False,
+    )
+    db_session.add(merchant)
+    await db_session.flush()
+
+    rules = await ControlledAutonomyService.get_or_create_default_rules(db_session, merchant.id)
+
+    assert rules
+    assert all(rule.is_enabled is False for rule in rules)
 
 
 # =============================================================================
@@ -379,6 +414,90 @@ async def test_approval_required_actions_blocked_from_auto_execution(
             idempotency_key=f"idemp-{uuid.uuid4().hex}",
         )
     assert "APPROVAL_REQUIRED" in str(exc_info.value) or "approval" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_rejected_proposal_cannot_regain_execution_authority(
+    db_session: AsyncSession, setup_merchants_and_catalog: dict[str, Any]
+) -> None:
+    """A rejected proposal cannot be reactivated by directly calling Phase 8 execution."""
+    m1 = setup_merchants_and_catalog["m1"]
+    p1 = setup_merchants_and_catalog["p1"]
+    proposal = MerchantProposal(
+        merchant_id=m1.id,
+        proposal_type=AutonomyActionType.IMPROVE_PRODUCT_DESCRIPTION.value,
+        title="Rejected description update",
+        observation="Observation",
+        proposed_change="This must not execute",
+        hypothesis="Hypothesis",
+        target_entity=str(p1.id),
+        expected_metric="conversion_rate",
+        expected_effect="+5%",
+        evidence=["ev_1"],
+        risk_level="LOW_RISK_REVERSIBLE",
+        status="REJECTED",
+        metadata_payload={"target_product_id": str(p1.id)},
+    )
+    db_session.add(proposal)
+    await db_session.commit()
+
+    with pytest.raises(AutonomyExecutionError, match="not eligible"):
+        await ControlledAutonomyService.execute_autonomous_action(
+            session=db_session,
+            merchant_id=m1.id,
+            proposal_id=proposal.id,
+            expected_target_version=p1.version,
+            idempotency_key=f"rejected-proposal-{uuid.uuid4().hex}",
+        )
+
+
+@pytest.mark.asyncio
+async def test_experiment_cannot_start_until_merchant_approval(
+    db_session: AsyncSession, setup_merchants_and_catalog: dict[str, Any]
+) -> None:
+    """The bounded-experiment action preserves Phase 7 approval-first lifecycle."""
+    m1 = setup_merchants_and_catalog["m1"]
+    proposal = MerchantProposal(
+        merchant_id=m1.id,
+        proposal_type=AutonomyActionType.SUGGEST_BOUNDED_EXPERIMENT.value,
+        title="Experiment proposal",
+        observation="Observation",
+        proposed_change="Expose delivery ETA",
+        hypothesis="Hypothesis",
+        target_entity="general",
+        expected_metric="conversion_rate",
+        expected_effect="+5%",
+        evidence=["ev_1"],
+        risk_level="LOW_RISK_REVERSIBLE",
+        status="PROPOSED",
+        metadata_payload={},
+    )
+    db_session.add(proposal)
+    await db_session.flush()
+    experiment = MerchantExperiment(
+        merchant_id=m1.id,
+        proposal_id=proposal.id,
+        title="Pending experiment",
+        hypothesis="Hypothesis",
+        target_metric="conversion_rate",
+        baseline_value=0.0,
+        target_value=1.0,
+        proposed_variation={"description": "Expose delivery ETA"},
+        risk_level="LOW_RISK_REVERSIBLE",
+        status="APPROVAL_REQUIRED",
+        approval_status="PENDING",
+    )
+    db_session.add(experiment)
+    await db_session.commit()
+
+    with pytest.raises(AutonomyExecutionError, match="merchant-approved"):
+        await ControlledAutonomyService.execute_autonomous_action(
+            session=db_session,
+            merchant_id=m1.id,
+            proposal_id=proposal.id,
+            expected_target_version=experiment.version,
+            idempotency_key=f"pending-experiment-{uuid.uuid4().hex}",
+        )
 
 
 @pytest.mark.asyncio

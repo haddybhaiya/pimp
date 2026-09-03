@@ -71,6 +71,17 @@ class ControlledAutonomyService:
         cls, session: AsyncSession, merchant_id: uuid.UUID
     ) -> list[MerchantAutonomyRule]:
         """Ensures default server-authoritative autonomy rules exist for allowed actions."""
+        # Serialize first-time rule provisioning per merchant.  This makes the
+        # unique merchant/action constraint a defence in depth check rather than
+        # the normal concurrent-control path.
+        merchant = (
+            await session.execute(
+                select(Merchant).where(Merchant.id == merchant_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if merchant is None:
+            raise ValueError(f"Merchant '{merchant_id}' not found.")
+
         stmt = select(MerchantAutonomyRule).where(MerchantAutonomyRule.merchant_id == merchant_id)
         existing = list((await session.execute(stmt)).scalars().all())
         existing_types = {r.action_type for r in existing}
@@ -78,7 +89,7 @@ class ControlledAutonomyService:
         default_configs = [
             {
                 "action_type": AutonomyActionType.IMPROVE_PRODUCT_DESCRIPTION.value,
-                "is_enabled": True,
+                "is_enabled": False,
                 "classification": AutonomyClassification.AUTO_LOW_RISK.value,
                 "max_executions_per_hour": 5,
                 "max_executions_per_day": 20,
@@ -90,7 +101,7 @@ class ControlledAutonomyService:
             },
             {
                 "action_type": AutonomyActionType.IMPROVE_DISCOVERY_METADATA.value,
-                "is_enabled": True,
+                "is_enabled": False,
                 "classification": AutonomyClassification.AUTO_LOW_RISK.value,
                 "max_executions_per_hour": 5,
                 "max_executions_per_day": 20,
@@ -102,7 +113,7 @@ class ControlledAutonomyService:
             },
             {
                 "action_type": AutonomyActionType.REORDER_RECOMMENDATIONS.value,
-                "is_enabled": True,
+                "is_enabled": False,
                 "classification": AutonomyClassification.AUTO_LOW_RISK.value,
                 "max_executions_per_hour": 5,
                 "max_executions_per_day": 20,
@@ -114,7 +125,7 @@ class ControlledAutonomyService:
             },
             {
                 "action_type": AutonomyActionType.EXPOSE_DELIVERY_ETA.value,
-                "is_enabled": True,
+                "is_enabled": False,
                 "classification": AutonomyClassification.AUTO_LOW_RISK.value,
                 "max_executions_per_hour": 5,
                 "max_executions_per_day": 20,
@@ -126,7 +137,7 @@ class ControlledAutonomyService:
             },
             {
                 "action_type": AutonomyActionType.SUGGEST_BOUNDED_EXPERIMENT.value,
-                "is_enabled": True,
+                "is_enabled": False,
                 "classification": AutonomyClassification.AUTO_LOW_RISK.value,
                 "max_executions_per_hour": 2,
                 "max_executions_per_day": 10,
@@ -186,9 +197,13 @@ class ControlledAutonomyService:
         if action_type not in cls.ALLOWED_AUTONOMOUS_ACTIONS:
             raise ValueError(f"Action type '{action_type}' is not configurable.")
 
-        stmt = select(MerchantAutonomyRule).where(
-            MerchantAutonomyRule.merchant_id == merchant_id,
-            MerchantAutonomyRule.action_type == action_type,
+        stmt = (
+            select(MerchantAutonomyRule)
+            .where(
+                MerchantAutonomyRule.merchant_id == merchant_id,
+                MerchantAutonomyRule.action_type == action_type,
+            )
+            .with_for_update()
         )
         rule = (await session.execute(stmt)).scalar_one_or_none()
         if not rule:
@@ -235,6 +250,7 @@ class ControlledAutonomyService:
             "max_executions_per_day": rule.max_executions_per_day,
             "cooldown_seconds": rule.cooldown_seconds,
             "experiment_duration_limit_days": rule.experiment_duration_limit_days,
+            "experiment_exposure_limit": rule.experiment_exposure_limit,
             "rollback_required": rule.rollback_required,
             "approval_required": rule.approval_required,
             "policy_version": rule.policy_version,
@@ -278,7 +294,9 @@ class ControlledAutonomyService:
             raise AutonomySecurityError("Only merchant admin can toggle the kill switch.")
 
         merchant = (
-            await session.execute(select(Merchant).where(Merchant.id == merchant_id))
+            await session.execute(
+                select(Merchant).where(Merchant.id == merchant_id).with_for_update()
+            )
         ).scalar_one_or_none()
         if not merchant:
             raise ValueError(f"Merchant '{merchant_id}' not found.")
@@ -305,7 +323,7 @@ class ControlledAutonomyService:
                 MerchantExperiment.merchant_id == merchant_id,
                 MerchantExperiment.status == "RUNNING",
             )
-            running_exps = list((await session.execute(stmt)).scalars().all())
+            running_exps = list((await session.execute(stmt.with_for_update())).scalars().all())
             for exp in running_exps:
                 exp.status = "STOPPED"
                 cond = (
@@ -369,6 +387,16 @@ class ControlledAutonomyService:
         Raises AutonomyExecutionError if limits are reached or cooldown is active.
         Returns (hourly_consumed, daily_consumed) for the pending execution.
         """
+        # All autonomous executions for a merchant share this transaction lock.
+        # Aggregate counts alone cannot reserve a rate-limit slot under races.
+        merchant = (
+            await session.execute(
+                select(Merchant).where(Merchant.id == merchant_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if merchant is None:
+            raise AutonomyExecutionError(f"Merchant '{merchant_id}' does not exist.")
+
         now = utc_now()
         one_hour_ago = now - timedelta(hours=1)
         one_day_ago = now - timedelta(days=1)
@@ -459,7 +487,9 @@ class ControlledAutonomyService:
 
         # Gate 1: Authenticated merchant identity verification
         merchant = (
-            await session.execute(select(Merchant).where(Merchant.id == merchant_id))
+            await session.execute(
+                select(Merchant).where(Merchant.id == merchant_id).with_for_update()
+            )
         ).scalar_one_or_none()
         if not merchant:
             raise AutonomyExecutionError(f"Merchant '{merchant_id}' does not exist.")
@@ -477,9 +507,13 @@ class ControlledAutonomyService:
             )
 
         # Gate 2: Proposal tenant ownership
-        prop_stmt = select(MerchantProposal).where(
-            MerchantProposal.id == proposal_id,
-            MerchantProposal.merchant_id == merchant_id,
+        prop_stmt = (
+            select(MerchantProposal)
+            .where(
+                MerchantProposal.id == proposal_id,
+                MerchantProposal.merchant_id == merchant_id,
+            )
+            .with_for_update()
         )
         proposal = (await session.execute(prop_stmt)).scalar_one_or_none()
         if not proposal:
@@ -520,8 +554,17 @@ class ControlledAutonomyService:
             )
 
         # Gate 7: Autonomy rule lookup
-        rules = await cls.get_or_create_default_rules(session, merchant_id)
-        rule = next((r for r in rules if r.action_type == action_type), None)
+        await cls.get_or_create_default_rules(session, merchant_id)
+        rule = (
+            await session.execute(
+                select(MerchantAutonomyRule)
+                .where(
+                    MerchantAutonomyRule.merchant_id == merchant_id,
+                    MerchantAutonomyRule.action_type == action_type,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
         if not rule or not rule.is_enabled:
             raise AutonomyExecutionError(
                 f"Autonomy rule for '{action_type}' is disabled or not configured."
@@ -540,6 +583,7 @@ class ControlledAutonomyService:
             "max_executions_per_day": rule.max_executions_per_day,
             "cooldown_seconds": rule.cooldown_seconds,
             "experiment_duration_limit_days": rule.experiment_duration_limit_days,
+            "experiment_exposure_limit": rule.experiment_exposure_limit,
             "rollback_required": rule.rollback_required,
             "approval_required": rule.approval_required,
             "policy_version": rule.policy_version,
@@ -556,10 +600,18 @@ class ControlledAutonomyService:
             session, merchant_id, rule
         )
 
-        # Gate 11: Approval requirement
-        if rule.approval_required and proposal.status != "APPROVED":
+        # Gate 11: only a live auto-eligible proposal, or an explicitly approved
+        # proposal when the rule requires it, may enter the execution boundary.
+        # Rejected/archived proposals must never regain authority through an API
+        # call, and autonomous execution must not fabricate a human approval.
+        if rule.approval_required:
+            if proposal.status != "APPROVED":
+                raise AutonomyExecutionError(
+                    f"Action '{action_type}' requires explicit merchant approval before execution."
+                )
+        elif proposal.status not in {"PROPOSED", "APPROVED"}:
             raise AutonomyExecutionError(
-                f"Action '{action_type}' requires explicit merchant approval before execution."
+                f"Proposal status '{proposal.status}' is not eligible for autonomous execution."
             )
 
         # Gate 12 & 13: Target resource existence, ownership, and expected version
@@ -571,9 +623,13 @@ class ControlledAutonomyService:
         if action_type == AutonomyActionType.SUGGEST_BOUNDED_EXPERIMENT.value:
             target_entity_type = "merchant_experiment"
             # Find linked experiment
-            exp_stmt = select(MerchantExperiment).where(
-                MerchantExperiment.merchant_id == merchant_id,
-                MerchantExperiment.proposal_id == proposal.id,
+            exp_stmt = (
+                select(MerchantExperiment)
+                .where(
+                    MerchantExperiment.merchant_id == merchant_id,
+                    MerchantExperiment.proposal_id == proposal.id,
+                )
+                .with_for_update()
             )
             target_experiment = (await session.execute(exp_stmt)).scalar_one_or_none()
             if not target_experiment:
@@ -585,6 +641,21 @@ class ControlledAutonomyService:
                     f"current {target_experiment.version}."
                 )
                 raise OptimisticLockError(msg)
+            if (
+                target_experiment.status != "APPROVED"
+                or target_experiment.approval_status != "APPROVED"
+                or target_experiment.start_time is None
+            ):
+                raise AutonomyExecutionError(
+                    "Experiment must be merchant-approved before autonomous start."
+                )
+            # No deterministic variant router exists in the buyer/discovery path.
+            # Exposure-limited experiments therefore fail closed instead of
+            # claiming an unenforceable traffic percentage.
+            if rule.experiment_exposure_limit is not None:
+                raise AutonomyExecutionError(
+                    "Traffic exposure limits are not executable without deterministic routing."
+                )
         else:
             # Find target product by affected_entities or metadata
             product_id_str = None
@@ -603,7 +674,9 @@ class ControlledAutonomyService:
                 except ValueError:
                     target_prod_stmt = target_prod_stmt.where(Product.sku == str(product_id_str))
 
-            target_product = (await session.execute(target_prod_stmt.limit(1))).scalar_one_or_none()
+            target_product = (
+                await session.execute(target_prod_stmt.limit(1).with_for_update())
+            ).scalar_one_or_none()
             if not target_product:
                 raise AutonomyExecutionError(
                     "Target product for optimization does not exist or belong to merchant."
@@ -694,6 +767,9 @@ class ControlledAutonomyService:
                 "status": target_experiment.status,
             }
             target_experiment.status = "RUNNING"
+            target_experiment.end_time = utc_now() + timedelta(
+                days=rule.experiment_duration_limit_days
+            )
             target_experiment.version += 1
             after_version = target_experiment.version
             changed_state = {"status": "RUNNING"}
@@ -736,10 +812,6 @@ class ControlledAutonomyService:
             idempotency_key=idempotency_key,
         )
         session.add(action_record)
-
-        # Update proposal status
-        proposal.status = "APPROVED"
-        proposal.version += 1
 
         await session.flush()
 
@@ -841,9 +913,13 @@ class ControlledAutonomyService:
 
         assert receipt is not None
 
-        stmt = select(MerchantAutonomyAction).where(
-            MerchantAutonomyAction.id == action_id,
-            MerchantAutonomyAction.merchant_id == merchant_id,
+        stmt = (
+            select(MerchantAutonomyAction)
+            .where(
+                MerchantAutonomyAction.id == action_id,
+                MerchantAutonomyAction.merchant_id == merchant_id,
+            )
+            .with_for_update()
         )
         action = (await session.execute(stmt)).scalar_one_or_none()
         if not action:
@@ -880,9 +956,13 @@ class ControlledAutonomyService:
 
         current_target_version: int
         if action.target_entity_type == "product":
-            prod_stmt = select(Product).where(
-                Product.id == action.target_entity_id,
-                Product.merchant_id == merchant_id,
+            prod_stmt = (
+                select(Product)
+                .where(
+                    Product.id == action.target_entity_id,
+                    Product.merchant_id == merchant_id,
+                )
+                .with_for_update()
             )
             product = (await session.execute(prod_stmt)).scalar_one_or_none()
             if not product:
@@ -895,6 +975,19 @@ class ControlledAutonomyService:
                 action.stopping_reason = (
                     f"Rollback rejected: Product modified by newer change "
                     f"(version {product.version} > {action.target_version_after})."
+                )
+                await AuditEvent.create_event(
+                    session=session,
+                    merchant_id=merchant_id,
+                    actor_type="SYSTEM",
+                    event_type="MERCHANT_AUTONOMY_ROLLBACK_CONFLICT",
+                    payload={
+                        "action_id": str(action.id),
+                        "target_entity_type": action.target_entity_type,
+                        "target_entity_id": str(action.target_entity_id),
+                        "current_version": product.version,
+                        "expected_post_action_version": action.target_version_after,
+                    },
                 )
                 await session.flush()
                 msg = (
@@ -921,9 +1014,13 @@ class ControlledAutonomyService:
             current_target_version = product.version
 
         elif action.target_entity_type == "merchant_experiment":
-            exp_stmt = select(MerchantExperiment).where(
-                MerchantExperiment.id == action.target_entity_id,
-                MerchantExperiment.merchant_id == merchant_id,
+            exp_stmt = (
+                select(MerchantExperiment)
+                .where(
+                    MerchantExperiment.id == action.target_entity_id,
+                    MerchantExperiment.merchant_id == merchant_id,
+                )
+                .with_for_update()
             )
             exp = (await session.execute(exp_stmt)).scalar_one_or_none()
             if not exp:
@@ -931,6 +1028,23 @@ class ControlledAutonomyService:
 
             if exp.version > action.target_version_after:
                 action.rollback_status = RollbackStatus.CONFLICT_REJECTED.value
+                action.stopping_reason = (
+                    "Rollback rejected: experiment modified by newer change "
+                    f"(version {exp.version} > {action.target_version_after})."
+                )
+                await AuditEvent.create_event(
+                    session=session,
+                    merchant_id=merchant_id,
+                    actor_type="SYSTEM",
+                    event_type="MERCHANT_AUTONOMY_ROLLBACK_CONFLICT",
+                    payload={
+                        "action_id": str(action.id),
+                        "target_entity_type": action.target_entity_type,
+                        "target_entity_id": str(action.target_entity_id),
+                        "current_version": exp.version,
+                        "expected_post_action_version": action.target_version_after,
+                    },
+                )
                 await session.flush()
                 msg = (
                     f"Rollback rejected: experiment version ({exp.version}) "
