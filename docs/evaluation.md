@@ -202,13 +202,13 @@ graph LR
 
 ## 5. Phase 8 Controlled Autonomy Verification Results Summary
 
-- **Total Backend Pytest Tests:** 305 passed, 3 skipped (live Razorpay sandbox / testmode)
-- **Phase 8 Dedicated Tests (`test_phase8_controlled_autonomy.py`):** 19 passed (100%)
+- **Total Backend Pytest Tests:** 311 passed, 3 skipped (live Razorpay sandbox / testmode)
+- **Phase 8 Dedicated Tests (`test_phase8_controlled_autonomy.py`):** 21 passed (100%)
 - **Total Frontend Vitest Tests:** 31 passed across 8 test files
 - **Frontend Production Build:** 100% clean TypeScript compilation and Vite bundling (`npm run build`)
 - **Ruff Lint & Format:** 100% clean across 153 files (0 errors)
 - **Mypy Static Typing:** 100% strict compliance across 141 files (0 issues)
-- **Alembic Migration Chain:** Migration 011 (`011_phase8_controlled_autonomy.py`) verified head (`tests/test_alembic_migrations.py` passed)
+- **Alembic Migration Chain:** Migrations 011–012 (`011_phase8_controlled_autonomy.py`, `012_autonomy_proposal_tenant_integrity.py`) verified head (`tests/test_alembic_migrations.py` passed)
 - **Key Invariants Verified:**
   - `INV-AUT-01` (Scope Exclusivity): Autonomous execution limited strictly to allowed 5 reversible actions.
   - `INV-AUT-02` (Financial/Policy Immutability): Non-admin actors cannot modify rules; agent cannot alter floor prices, discounts, or policies.

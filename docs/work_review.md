@@ -52,7 +52,13 @@
    - Rollback conflicts persist `CONFLICT_REJECTED` and an audit event before HTTP 409. The Agent page retrieves the current product version rather than posting a hard-coded version, and its rollback dialog uses a stable close callback.
    - Verified by `test_new_merchants_are_not_implicitly_opted_into_autonomy`, `test_rejected_proposal_cannot_regain_execution_authority`, and `test_experiment_cannot_start_until_merchant_approval`.
 
-**Verified by:** `tests/test_phase8_controlled_autonomy.py` (16 passed), full pytest suite (305 passed), and frontend test suite (31 passed).
+7. **Target, rollback, and proposal-link integrity follow-up (Resolved):**
+   - Autonomous product mutations now reject proposals that lack an explicit target product; no fallback product selection is permitted.
+   - Experiment rollback now delegates to the linked executed autonomy action, restoring its captured snapshot and reconciling the experiment, action, rollback, and audit states.
+   - Migration 012 couples autonomy-action proposal links to the same merchant with a composite foreign key; inconsistent cross-tenant links fail at the database boundary.
+   - Verified by `test_targetless_product_proposal_fails_closed`, `test_experiment_rollback_reconciles_linked_autonomy_action`, and `test_phase8_autonomy_proposal_links_are_tenant_coupled`.
+
+**Verified by:** `tests/test_phase8_controlled_autonomy.py` (21 passed), migration tests (4 passed), full pytest suite (311 passed, 3 skipped), and frontend test suite (31 passed).
 
 ---
 
