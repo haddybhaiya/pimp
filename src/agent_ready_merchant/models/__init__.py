@@ -12,6 +12,7 @@ from agent_ready_merchant.models.autonomy import (
     AutonomyActionType,
     AutonomyClassification,
     MerchantAutonomyAction,
+    MerchantAutonomyFailure,
     MerchantAutonomyRule,
     RollbackStatus,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "MerchantExperimentResult",
     "MerchantAutonomyRule",
     "MerchantAutonomyAction",
+    "MerchantAutonomyFailure",
     "AutonomyActionType",
     "AutonomyClassification",
     "AutonomyActionStatus",

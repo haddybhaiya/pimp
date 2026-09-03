@@ -1964,8 +1964,14 @@ def create_app() -> FastAPI:
         except IdempotencyConflictError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except OptimisticLockError as exc:
+            # The service records a non-mutating, audited failure attempt after
+            # rolling back its savepoint.  Preserve that safety telemetry.
+            await db.commit()
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except AutonomyExecutionError as exc:
+            # A rejected autonomous attempt is evidence for the rolling anomaly
+            # circuit breaker, not a successful action ledger entry.
+            await db.commit()
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

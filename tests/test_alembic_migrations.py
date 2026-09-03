@@ -12,7 +12,7 @@ def test_alembic_script_directory_and_head() -> None:
     script = ScriptDirectory.from_config(config)
 
     head = script.get_current_head()
-    assert head == "013_autonomy_proposal_delete"
+    assert head == "014_autonomy_failure_telemetry"
 
     revision = script.get_revision("001_initial_schema")
     assert revision is not None
@@ -66,6 +66,10 @@ def test_alembic_script_directory_and_head() -> None:
     assert autonomy_proposal_delete is not None
     assert autonomy_proposal_delete.down_revision == "012_autonomy_proposal_integrity"
 
+    autonomy_failure_telemetry = script.get_revision("014_autonomy_failure_telemetry")
+    assert autonomy_failure_telemetry is not None
+    assert autonomy_failure_telemetry.down_revision == "013_autonomy_proposal_delete"
+
 
 def test_merchant_run_downgrade_refuses_to_discard_merchant_scoped_runs() -> None:
     """Downgrade must preserve durable history rather than deleting merchant-only runs."""
@@ -111,3 +115,14 @@ def test_phase8_proposal_deletion_preserves_autonomy_action_history() -> None:
 
     assert "ON DELETE SET NULL (proposal_id)" in migration_source
     assert '["proposal_id", "merchant_id"]' in migration_source
+
+
+def test_phase8_failure_telemetry_is_durable_and_tenant_scoped() -> None:
+    """Migration 014 must support the rolling autonomy failure circuit breaker."""
+    migration_source = Path("alembic/versions/014_autonomy_failure_telemetry.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "merchant_autonomy_failures" in migration_source
+    assert "ck_merchant_autonomy_failures_code_valid" in migration_source
+    assert "ix_merchant_autonomy_failures_merchant_created" in migration_source

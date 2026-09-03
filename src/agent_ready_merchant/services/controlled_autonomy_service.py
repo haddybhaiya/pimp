@@ -21,6 +21,7 @@ from agent_ready_merchant.models.autonomy import (
     AutonomyActionType,
     AutonomyClassification,
     MerchantAutonomyAction,
+    MerchantAutonomyFailure,
     MerchantAutonomyRule,
     RollbackStatus,
     compute_autonomy_rule_hash,
@@ -363,10 +364,9 @@ class ControlledAutonomyService:
 
         # Check for repeated failed actions in the past hour
         one_hour_ago = utc_now() - timedelta(hours=1)
-        failed_stmt = select(func.count(MerchantAutonomyAction.id)).where(
-            MerchantAutonomyAction.merchant_id == merchant_id,
-            MerchantAutonomyAction.status == AutonomyActionStatus.FAILED.value,
-            MerchantAutonomyAction.created_at >= one_hour_ago,
+        failed_stmt = select(func.count(MerchantAutonomyFailure.id)).where(
+            MerchantAutonomyFailure.merchant_id == merchant_id,
+            MerchantAutonomyFailure.created_at >= one_hour_ago,
         )
         failed_count = (await session.execute(failed_stmt)).scalar() or 0
         if failed_count >= 3:
@@ -455,6 +455,92 @@ class ControlledAutonomyService:
 
     @classmethod
     async def execute_autonomous_action(
+        cls,
+        session: AsyncSession,
+        *,
+        merchant_id: uuid.UUID,
+        proposal_id: uuid.UUID,
+        expected_target_version: int,
+        idempotency_key: str,
+        actor_id: uuid.UUID | str | None = None,
+    ) -> dict[str, Any]:
+        """Execute through a savepoint and durably record rejected attempts.
+
+        The nested transaction ensures a gate failure cannot leave a claimed
+        idempotency receipt, target edit, or partial ledger row behind.  The
+        failure telemetry and its audit event are then committed by the caller
+        in the enclosing request transaction.
+        """
+        try:
+            async with session.begin_nested():
+                return await cls._execute_autonomous_action(
+                    session=session,
+                    merchant_id=merchant_id,
+                    proposal_id=proposal_id,
+                    expected_target_version=expected_target_version,
+                    idempotency_key=idempotency_key,
+                    actor_id=actor_id,
+                )
+        except (AutonomyExecutionError, OptimisticLockError) as exc:
+            await cls._record_execution_failure(
+                session=session,
+                merchant_id=merchant_id,
+                proposal_id=proposal_id,
+                idempotency_key=idempotency_key,
+                failure_code=(
+                    "OPTIMISTIC_CONFLICT"
+                    if isinstance(exc, OptimisticLockError)
+                    else "PRECONDITION_REJECTED"
+                ),
+                actor_id=actor_id,
+            )
+            raise
+
+    @classmethod
+    async def _record_execution_failure(
+        cls,
+        *,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+        proposal_id: uuid.UUID,
+        idempotency_key: str,
+        failure_code: str,
+        actor_id: uuid.UUID | str | None,
+    ) -> None:
+        """Append non-mutating failure telemetry after a rejected execution gate."""
+        proposal = (
+            await session.execute(
+                select(MerchantProposal).where(
+                    MerchantProposal.id == proposal_id,
+                    MerchantProposal.merchant_id == merchant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        failure = MerchantAutonomyFailure(
+            merchant_id=merchant_id,
+            proposal_id=proposal.id if proposal else None,
+            action_type=proposal.proposal_type if proposal else None,
+            failure_code=failure_code,
+            idempotency_key=idempotency_key,
+        )
+        session.add(failure)
+        await session.flush()
+        await AuditEvent.create_event(
+            session=session,
+            merchant_id=merchant_id,
+            actor_type="MERCHANT_ADMIN",
+            event_type="AUTONOMOUS_ACTION_REJECTED",
+            payload={
+                "failure_id": str(failure.id),
+                "proposal_id": str(proposal_id),
+                "action_type": failure.action_type,
+                "failure_code": failure_code,
+                "actor_id": str(actor_id) if actor_id is not None else None,
+            },
+        )
+
+    @classmethod
+    async def _execute_autonomous_action(
         cls,
         session: AsyncSession,
         *,

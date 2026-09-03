@@ -33,6 +33,7 @@ from agent_ready_merchant.models.autonomy import (
     AutonomyActionType,
     AutonomyClassification,
     MerchantAutonomyAction,
+    MerchantAutonomyFailure,
     RollbackStatus,
 )
 from agent_ready_merchant.models.experiment import MerchantExperiment
@@ -630,6 +631,90 @@ async def test_stale_target_version_fails_closed(
             idempotency_key=f"idemp-stale-{uuid.uuid4().hex}",
         )
     assert "version mismatch: expected 99, current 1" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_rejected_execution_attempts_trip_durable_anomaly_circuit_breaker(
+    db_session: AsyncSession, setup_merchants_and_catalog: dict[str, Any]
+) -> None:
+    """Three rejected autonomous attempts must pause new autonomous work.
+
+    Failure telemetry is deliberately separate from the successful action
+    ledger: no target mutation or execution-budget consumption is fabricated.
+    """
+    m1 = setup_merchants_and_catalog["m1"]
+    p1 = setup_merchants_and_catalog["p1"]
+    proposal = MerchantProposal(
+        merchant_id=m1.id,
+        proposal_type=AutonomyActionType.IMPROVE_PRODUCT_DESCRIPTION.value,
+        title="Stale update",
+        observation="Observation",
+        proposed_change="A safe description change",
+        hypothesis="Hypothesis",
+        target_entity=str(p1.id),
+        expected_metric="conversion_rate",
+        expected_effect="+5%",
+        evidence=["ev_1"],
+        risk_level="LOW_RISK_REVERSIBLE",
+        status="PROPOSED",
+        metadata_payload={"target_product_id": str(p1.id)},
+    )
+    db_session.add(proposal)
+    await db_session.commit()
+
+    for _ in range(3):
+        with pytest.raises(OptimisticLockError):
+            await ControlledAutonomyService.execute_autonomous_action(
+                session=db_session,
+                merchant_id=m1.id,
+                proposal_id=proposal.id,
+                expected_target_version=p1.version + 1,
+                idempotency_key=f"anomaly-failure-{uuid.uuid4().hex}",
+            )
+        await db_session.commit()
+
+    failures = list(
+        (
+            await db_session.execute(
+                select(MerchantAutonomyFailure).where(MerchantAutonomyFailure.merchant_id == m1.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(failures) == 3
+    assert {failure.failure_code for failure in failures} == {"OPTIMISTIC_CONFLICT"}
+
+    action_count = (
+        (
+            await db_session.execute(
+                select(MerchantAutonomyAction).where(MerchantAutonomyAction.merchant_id == m1.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert action_count == []
+
+    anomaly_state, reasons = await ControlledAutonomyService.evaluate_anomaly_state(
+        db_session, m1.id
+    )
+    assert anomaly_state == AnomalyState.REQUIRE_HUMAN_REVIEW
+    assert "High failure frequency: 3 failures" in reasons[0]
+
+    rejected_events = list(
+        (
+            await db_session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.merchant_id == m1.id,
+                    AuditEvent.event_type == "AUTONOMOUS_ACTION_REJECTED",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rejected_events) == 3
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
-from agent_ready_merchant.db.base import GUID, Base, OptimisticLockMixin, TimestampMixin
+from agent_ready_merchant.db.base import GUID, Base, OptimisticLockMixin, TimestampMixin, utc_now
 
 if TYPE_CHECKING:
     from agent_ready_merchant.models.experiment import MerchantExperiment
@@ -391,4 +391,38 @@ class MerchantAutonomyAction(Base, TimestampMixin, OptimisticLockMixin):
         ),
         foreign_keys=[experiment_id, merchant_id],
         overlaps="autonomy_actions,merchant,proposal",
+    )
+
+
+class MerchantAutonomyFailure(Base):
+    """Durable, tenant-scoped record of a rejected autonomous execution attempt.
+
+    This is intentionally separate from ``MerchantAutonomyAction``: a failed
+    precondition must feed anomaly detection and the audit chain, but it must
+    not appear as a completed side effect or consume an execution budget.
+    """
+
+    __tablename__ = "merchant_autonomy_failures"
+
+    __table_args__ = (
+        CheckConstraint(
+            "failure_code IN ('PRECONDITION_REJECTED', 'OPTIMISTIC_CONFLICT')",
+            name="ck_merchant_autonomy_failures_code_valid",
+        ),
+        Index("ix_merchant_autonomy_failures_merchant_created", "merchant_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    merchant_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("merchants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    proposal_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True, index=True)
+    action_type: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    failure_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )

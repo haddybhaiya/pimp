@@ -907,4 +907,13 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 
 5. **Web Control Plane Surface:**
    - Built interactive frontend pages `frontend/src/pages/agent.tsx` and `frontend/src/pages/experiments.tsx`.
-   - Added REST endpoints in `src/agent_ready_merchant/main.py` protected by `_require_merchant_auth`.
+  - Added REST endpoints in `src/agent_ready_merchant/main.py` protected by `_require_merchant_auth`.
+
+---
+
+## Phase 8 P1 Remediation: Durable Failure Circuit Breaker (2026-09-03)
+
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** Rejected autonomous execution gates did not persist a failure record, so the three-failures-per-hour anomaly breaker could never reach `REQUIRE_HUMAN_REVIEW`.
+- **Resolution:** `execute_autonomous_action` now runs its gates inside a nested transaction. A rejected gate or optimistic conflict rolls back all tentative side effects and idempotency state, then appends a tenant-scoped `merchant_autonomy_failures` record plus an immutable `AUTONOMOUS_ACTION_REJECTED` audit event. The anomaly controller counts these non-mutating records; they neither consume autonomous-execution budget nor appear as successful actions.
+- **Verification:** `tests/test_phase8_controlled_autonomy.py::test_rejected_execution_attempts_trip_durable_anomaly_circuit_breaker` and the Alembic migration test suite.

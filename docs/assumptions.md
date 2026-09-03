@@ -160,13 +160,13 @@
 
 ---
 
-### 17. Controlled Autonomy Rate-Limiting, Kill Switch, and Deterministic Rollback Reversibility
+### 17. Controlled Autonomy Rate-Limiting, Kill Switch, Failure Circuit Breaker, and Deterministic Rollback Reversibility
 - **ASSUMPTION:** Autonomous agent execution on live store resources is safe ONLY when confined to reversible low-risk actions, bounded by strict hourly and daily rate limits, instantly halt-able via a merchant master kill switch, and reversible to pre-mutation states without clobbering intervening human merchant edits.
-- **EVIDENCE:** Verified via `tests/test_phase8_controlled_autonomy.py` (all 23 security, explicit opt-in, budget, cooldown, kill switch, approval-first experiment, E2E golden path, explicit/placeholder-target enforcement, experiment rollback reconciliation and conflict persistence, rollback conflict rejection, and tenant isolation tests passing deterministically).
+- **EVIDENCE:** Verified via `tests/test_phase8_controlled_autonomy.py`, including three durable rejected execution attempts that deterministically trigger the one-hour `REQUIRE_HUMAN_REVIEW` circuit breaker without creating a successful autonomy action.
 - **STATUS:** **VERIFIED (PASS)**
 - **CONFIDENCE:** 100%
 - **FAILURE IF WRONG:** Rogue agent execution could flood store changes, clobber human edits, alter live pricing, or persist harmful catalog modifications without an emergency stop or recovery path.
-- **MITIGATION:** 18-precondition deterministic gate pipeline; server-authoritative master kill switch with instant execution blocking and safe running experiment stopping; pre-mutation JSON snapshots; optimistic locking with `RollbackConflictError` when target version exceeds expected rollback version; and human-only administrative authority over rules and budgets.
+- **MITIGATION:** 18-precondition deterministic gate pipeline; rejected gates are rolled back to a savepoint, then recorded in the tenant-scoped failure ledger and audit chain for anomaly detection; server-authoritative master kill switch with instant execution blocking and safe running experiment stopping; pre-mutation JSON snapshots; optimistic locking with `RollbackConflictError` when target version exceeds expected rollback version; and human-only administrative authority over rules and budgets.
 
 
 

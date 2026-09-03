@@ -110,7 +110,7 @@ sequenceDiagram
 ### 4.3 Deterministic Rollback Conflict Rejection (Human Precedence)
 - **Trigger:** A human merchant modified the target product description or tags *after* an autonomous action was executed (`target.version > action.target_version_after`).
 - **Handling:** `rollback_action` checks whether the target entity was modified by an intervening human transaction.
-- **Resolution:** Rollback fails closed with `RollbackConflictError`. Action status transitions to `CONFLICT_REJECTED` in `merchant_autonomy_actions`, preserving the human merchant's edits without clobbering.
+- **Resolution:** Rollback fails closed with `RollbackConflictError`. The action remains `EXECUTED` while its `rollback_status` transitions to `CONFLICT_REJECTED`, preserving the human merchant's edits without clobbering.
 
 ### 4.4 Rate Limit, Quota & Cooldown Exhaustion
 - **Trigger:** Excessive autonomous executions attempting to exceed configured hourly limits (`hourly_count >= max_executions_per_hour`), daily limits (`daily_count >= max_executions_per_day`), or cooldown window (`elapsed < cooldown_seconds`).
@@ -119,6 +119,6 @@ sequenceDiagram
 
 ### 4.5 High Failure Anomaly Circuit Breaker
 - **Trigger:** 3 or more autonomous execution failures occur within the trailing 1-hour window.
-- **Handling:** `evaluate_anomaly_state` transitions store anomaly status to `REQUIRE_HUMAN_REVIEW`.
-- **Resolution:** Subsequent autonomous execution attempts require human intervention or resolution before resuming unattended runs.
+- **Handling:** Each rejected execution gate or optimistic-lock conflict rolls back its nested execution transaction, then appends a tenant-scoped `merchant_autonomy_failures` record and immutable `AUTONOMOUS_ACTION_REJECTED` audit event. `evaluate_anomaly_state` counts these durable records over the trailing hour.
+- **Resolution:** Subsequent autonomous execution attempts fail closed with `REQUIRE_HUMAN_REVIEW` while the rolling failure threshold is met. The state is intentionally derived rather than persisted, so it returns to `NORMAL` only after all qualifying failure records age out of the one-hour window.
 
