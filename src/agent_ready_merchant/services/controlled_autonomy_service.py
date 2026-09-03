@@ -666,7 +666,7 @@ class ControlledAutonomyService:
             if not product_id_str and proposal.target_entity:
                 product_id_str = proposal.target_entity
 
-            if not product_id_str:
+            if not product_id_str or str(product_id_str).strip().casefold() == "general":
                 raise AutonomyExecutionError("Proposal does not identify a target product.")
 
             target_prod_stmt = select(Product).where(Product.merchant_id == merchant_id)

@@ -666,6 +666,47 @@ async def test_targetless_product_proposal_fails_closed(
         )
 
 
+@pytest.mark.asyncio
+async def test_placeholder_product_target_fails_closed(
+    db_session: AsyncSession, setup_merchants_and_catalog: dict[str, Any]
+) -> None:
+    """The Phase 7 general placeholder must never select a product SKU."""
+    m1 = setup_merchants_and_catalog["m1"]
+    product = setup_merchants_and_catalog["p1"]
+    product.sku = "general"
+    await db_session.commit()
+
+    proposal = MerchantProposal(
+        merchant_id=m1.id,
+        proposal_type=AutonomyActionType.IMPROVE_PRODUCT_DESCRIPTION.value,
+        title="Placeholder description update",
+        observation="Observation",
+        proposed_change="No product may be selected by placeholder",
+        hypothesis="Hypothesis",
+        target_entity="general",
+        expected_metric="conversion_rate",
+        expected_effect="+5%",
+        evidence=["ev_1"],
+        risk_level="LOW_RISK_REVERSIBLE",
+        status="PROPOSED",
+        metadata_payload={},
+    )
+    db_session.add(proposal)
+    await db_session.commit()
+
+    with pytest.raises(AutonomyExecutionError, match="does not identify a target product"):
+        await ControlledAutonomyService.execute_autonomous_action(
+            session=db_session,
+            merchant_id=m1.id,
+            proposal_id=proposal.id,
+            expected_target_version=product.version,
+            idempotency_key=f"placeholder-target-{uuid.uuid4().hex}",
+        )
+
+    await db_session.refresh(product)
+    assert product.version == 1
+
+
 # =============================================================================
 # 3. Kill Switch and Anomaly Handling
 # =============================================================================
@@ -839,6 +880,77 @@ async def test_experiment_rollback_reconciles_linked_autonomy_action(
     assert action.status == AutonomyActionStatus.ROLLED_BACK.value
     assert action.rollback_status == RollbackStatus.ROLLED_BACK.value
     assert experiment.status == "ROLLED_BACK"
+
+
+@pytest.mark.asyncio
+async def test_experiment_rollback_conflict_is_persisted_before_http_409(
+    db_session: AsyncSession, setup_merchants_and_catalog: dict[str, Any]
+) -> None:
+    """Delegated experiment rollback keeps its conflict state and audit evidence."""
+    merchant = setup_merchants_and_catalog["m1"]
+    token = setup_merchants_and_catalog["token1"]
+    experiment = MerchantExperiment(
+        merchant_id=merchant.id,
+        title="Human-modified experiment",
+        hypothesis="Hypothesis",
+        target_metric="conversion_rate",
+        baseline_value=0.0,
+        target_value=1.0,
+        proposed_variation={"description": "Expose delivery ETA"},
+        risk_level="LOW_RISK_REVERSIBLE",
+        status="RUNNING",
+        approval_status="APPROVED",
+        start_time=utc_now(),
+        version=3,
+    )
+    db_session.add(experiment)
+    await db_session.flush()
+    action = MerchantAutonomyAction(
+        merchant_id=merchant.id,
+        experiment_id=experiment.id,
+        action_type=AutonomyActionType.SUGGEST_BOUNDED_EXPERIMENT.value,
+        target_entity_type="merchant_experiment",
+        target_entity_id=experiment.id,
+        target_version_before=1,
+        target_version_after=2,
+        deterministic_classification=AutonomyClassification.AUTO_LOW_RISK.value,
+        autonomy_rule_hash="a" * 64,
+        autonomy_rule_version=1,
+        hourly_budget_consumed=1,
+        daily_budget_consumed=1,
+        status=AutonomyActionStatus.EXECUTED.value,
+        rollback_snapshot={"original_state": {"status": "APPROVED"}},
+        rollback_status=RollbackStatus.AVAILABLE.value,
+        anomaly_state=AnomalyState.NORMAL.value,
+        idempotency_key=f"experiment-conflict-{uuid.uuid4().hex}",
+    )
+    db_session.add(action)
+    await db_session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            f"/api/v1/merchant/experiments/{experiment.id}/rollback",
+            headers={
+                "X-Merchant-ID": str(merchant.id),
+                "X-Auth-Token": token,
+                "X-Idempotency-Key": f"experiment-conflict-rollback-{uuid.uuid4().hex}",
+            },
+            json={"reason": "A newer merchant change must take precedence"},
+        )
+
+    assert response.status_code == 409
+    await db_session.refresh(action)
+    assert action.rollback_status == RollbackStatus.CONFLICT_REJECTED.value
+    conflict_event = (
+        await db_session.execute(
+            select(AuditEvent).where(
+                AuditEvent.merchant_id == merchant.id,
+                AuditEvent.event_type == "MERCHANT_AUTONOMY_ROLLBACK_CONFLICT",
+            )
+        )
+    ).scalar_one_or_none()
+    assert conflict_event is not None
 
 
 # =============================================================================

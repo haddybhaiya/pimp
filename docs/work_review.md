@@ -58,7 +58,13 @@
    - Migration 012 couples autonomy-action proposal links to the same merchant with a composite foreign key; inconsistent cross-tenant links fail at the database boundary.
    - Verified by `test_targetless_product_proposal_fails_closed`, `test_experiment_rollback_reconciles_linked_autonomy_action`, and `test_phase8_autonomy_proposal_links_are_tenant_coupled`.
 
-**Verified by:** `tests/test_phase8_controlled_autonomy.py` (21 passed), migration tests (4 passed), full pytest suite (311 passed, 3 skipped), and frontend test suite (31 passed).
+8. **Placeholder target, rollback-conflict, and proposal-deletion follow-up (Resolved):**
+   - The Phase 7 `general` placeholder cannot be treated as a product SKU by autonomous execution; only explicit product identifiers are accepted.
+   - Delegated experiment rollback now commits `CONFLICT_REJECTED` and its linked audit event before responding with HTTP 409.
+   - Migration 013 retains the tenant-coupled proposal foreign key while using PostgreSQL `ON DELETE SET NULL (proposal_id)`, preserving autonomy-action history when an optional proposal is removed.
+   - Verified by `test_placeholder_product_target_fails_closed`, `test_experiment_rollback_conflict_is_persisted_before_http_409`, and `test_phase8_proposal_deletion_preserves_autonomy_action_history`.
+
+**Verified by:** `tests/test_phase8_controlled_autonomy.py` (23 passed), migration tests (5 passed), full pytest suite (314 passed, 3 skipped), and frontend test suite (31 passed).
 
 ---
 

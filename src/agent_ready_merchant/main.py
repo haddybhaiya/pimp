@@ -2049,6 +2049,11 @@ def create_app() -> FastAPI:
             return result
         except IdempotencyConflictError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except RollbackConflictError as exc:
+            # Persist the delegated rollback's conflict-rejected state and
+            # audit evidence before exposing its deterministic 409 outcome.
+            await db.commit()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
@@ -2083,6 +2088,11 @@ def create_app() -> FastAPI:
             await db.commit()
             return result
         except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except RollbackConflictError as exc:
+            # Preserve the action ledger and audit evidence when a newer
+            # merchant edit makes the delegated rollback unsafe.
+            await db.commit()
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
