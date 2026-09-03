@@ -348,3 +348,99 @@ export interface MerchantAgentAnalyzeResponse {
   message: string;
 }
 
+export type AutonomyActionType =
+  | 'IMPROVE_PRODUCT_DESCRIPTION'
+  | 'IMPROVE_DISCOVERY_METADATA'
+  | 'REORDER_RECOMMENDATIONS'
+  | 'EXPOSE_DELIVERY_ETA'
+  | 'SUGGEST_BOUNDED_EXPERIMENT';
+
+export type AutonomyClassification =
+  | 'READ_ONLY'
+  | 'AUTO_LOW_RISK'
+  | 'APPROVAL_REQUIRED'
+  | 'HUMAN_ONLY'
+  | 'PROHIBITED';
+
+export type AutonomyActionStatus = 'EXECUTED' | 'ROLLED_BACK' | 'STOPPED' | 'FAILED';
+
+export type RollbackStatus = 'AVAILABLE' | 'ROLLED_BACK' | 'EXPIRED' | 'CONFLICT_REJECTED';
+
+export type AnomalyState = 'NORMAL' | 'WARN' | 'PAUSE_AUTONOMY' | 'REQUIRE_HUMAN_REVIEW';
+
+export interface AutonomyRuleItem {
+  id: string;
+  merchant_id: string;
+  action_type: AutonomyActionType;
+  is_enabled: boolean;
+  classification: AutonomyClassification;
+  max_executions_per_hour: number;
+  max_executions_per_day: number;
+  cooldown_seconds: number;
+  experiment_duration_limit_days: number;
+  experiment_exposure_limit?: number | null;
+  rollback_required: boolean;
+  approval_required: boolean;
+  policy_version: number;
+  policy_hash: string;
+  bounded_monetary_limit_paise: number;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutonomyActionItem {
+  id: string;
+  merchant_id: string;
+  agent_run_id?: string | null;
+  proposal_id?: string | null;
+  experiment_id?: string | null;
+  action_type: AutonomyActionType;
+  target_entity_type: string;
+  target_entity_id: string;
+  target_version_before: number;
+  target_version_after: number;
+  deterministic_classification: string;
+  autonomy_rule_hash: string;
+  autonomy_rule_version: number;
+  hourly_budget_consumed: number;
+  daily_budget_consumed: number;
+  status: AutonomyActionStatus;
+  rollback_snapshot: Record<string, unknown>;
+  rollback_status: RollbackStatus;
+  rolled_back_at?: string | null;
+  rolled_back_by?: string | null;
+  stopping_reason?: string | null;
+  anomaly_state: AnomalyState;
+  idempotency_key: string;
+  created_at: string;
+}
+
+export interface AutonomyStatusResponse {
+  merchant_id: string;
+  kill_switch_enabled: boolean;
+  anomaly_state: AnomalyState;
+  anomaly_reasons: string[];
+  hourly_executions_count: number;
+  daily_executions_count: number;
+  recent_actions: AutonomyActionItem[];
+  rules: AutonomyRuleItem[];
+}
+
+export interface KillSwitchResponse {
+  kill_switch_enabled: boolean;
+  merchant_id: string;
+  updated_at: string;
+}
+
+export interface RollbackResponse {
+  action_id: string;
+  rollback_status: RollbackStatus;
+  target_entity_id: string;
+  target_entity_type: string;
+  target_version_reverted_to: number;
+  target_current_version: number;
+  rolled_back_at: string;
+  message: string;
+}
+

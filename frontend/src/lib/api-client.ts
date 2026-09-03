@@ -23,6 +23,11 @@ import {
   MerchantExperimentResultItem,
   ExperimentCreatePayload,
   MerchantAgentAnalyzeResponse,
+  AutonomyStatusResponse,
+  AutonomyRuleItem,
+  AutonomyActionItem,
+  KillSwitchResponse,
+  RollbackResponse,
 } from '@/types/portal';
 
 export class ApiError extends Error {
@@ -404,6 +409,112 @@ export class ApiClient {
     return this.request<MerchantExperimentResultItem>(`/api/v1/merchant/experiments/${experimentId}/evaluate`, {
       method: 'POST',
       headers: { 'X-Idempotency-Key': this.createIdempotencyKey() },
+    });
+  }
+
+  // =========================================================================
+  // Phase 8 — Controlled Autonomy & Deterministic Rollback Methods
+  // =========================================================================
+
+  async getAutonomyStatus(): Promise<AutonomyStatusResponse> {
+    return this.request<AutonomyStatusResponse>('/api/v1/merchant/autonomy/status');
+  }
+
+  async setKillSwitch(enabled: boolean, reason?: string): Promise<KillSwitchResponse> {
+    return this.request<KillSwitchResponse>('/api/v1/merchant/autonomy/kill-switch', {
+      method: 'POST',
+      body: JSON.stringify({
+        enabled,
+        reason: reason ?? 'Merchant administrative kill switch trigger',
+      }),
+    });
+  }
+
+  async getAutonomyRules(): Promise<AutonomyRuleItem[]> {
+    return this.request<AutonomyRuleItem[]>('/api/v1/merchant/autonomy/rules');
+  }
+
+  async updateAutonomyRule(
+    actionType: string,
+    payload: {
+      is_enabled?: boolean;
+      classification?: string;
+      max_executions_per_hour?: number;
+      max_executions_per_day?: number;
+      cooldown_seconds?: number;
+      experiment_duration_limit_days?: number;
+      rollback_required?: boolean;
+      approval_required?: boolean;
+      expected_version: number;
+    }
+  ): Promise<AutonomyRuleItem> {
+    return this.request<AutonomyRuleItem>(`/api/v1/merchant/autonomy/rules/${actionType}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getAutonomyActions(limit = 50, offset = 0): Promise<AutonomyActionItem[]> {
+    return this.request<AutonomyActionItem[]>(`/api/v1/merchant/autonomy/actions?limit=${limit}&offset=${offset}`);
+  }
+
+  async getAutonomyAction(actionId: string): Promise<AutonomyActionItem> {
+    return this.request<AutonomyActionItem>(`/api/v1/merchant/autonomy/actions/${actionId}`);
+  }
+
+  async executeAutonomyAction(
+    proposalId: string,
+    expectedTargetVersion: number,
+    idempotencyKey?: string
+  ): Promise<{ action: AutonomyActionItem; message: string; status: string }> {
+    return this.request('/api/v1/merchant/autonomy/execute', {
+      method: 'POST',
+      headers: { 'X-Idempotency-Key': idempotencyKey ?? this.createIdempotencyKey() },
+      body: JSON.stringify({
+        proposal_id: proposalId,
+        expected_target_version: expectedTargetVersion,
+      }),
+    });
+  }
+
+  async rollbackAutonomyAction(
+    actionId: string,
+    expectedTargetVersion: number,
+    reason: string,
+    idempotencyKey?: string
+  ): Promise<RollbackResponse> {
+    return this.request(`/api/v1/merchant/autonomy/actions/${actionId}/rollback`, {
+      method: 'POST',
+      headers: { 'X-Idempotency-Key': idempotencyKey ?? this.createIdempotencyKey() },
+      body: JSON.stringify({
+        expected_target_version: expectedTargetVersion,
+        reason,
+      }),
+    });
+  }
+
+  async stopExperiment(
+    experimentId: string,
+    reason: string,
+    requireRollback = false,
+    idempotencyKey?: string
+  ): Promise<{ experiment_id: string; status: string; reason: string; message: string }> {
+    return this.request(`/api/v1/merchant/experiments/${experimentId}/stop`, {
+      method: 'POST',
+      headers: { 'X-Idempotency-Key': idempotencyKey ?? this.createIdempotencyKey() },
+      body: JSON.stringify({ reason, require_rollback: requireRollback }),
+    });
+  }
+
+  async rollbackExperiment(
+    experimentId: string,
+    reason: string,
+    idempotencyKey?: string
+  ): Promise<{ experiment_id: string; status: string; reason: string; message: string }> {
+    return this.request(`/api/v1/merchant/experiments/${experimentId}/rollback`, {
+      method: 'POST',
+      headers: { 'X-Idempotency-Key': idempotencyKey ?? this.createIdempotencyKey() },
+      body: JSON.stringify({ reason }),
     });
   }
 

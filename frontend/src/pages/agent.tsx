@@ -11,6 +11,8 @@ import {
   MerchantProposalItem,
   MerchantDiagnosisItem,
   MerchantAgentAnalyzeResponse,
+  AutonomyStatusResponse,
+  AutonomyActionItem,
 } from '@/types/portal';
 import { formatRelativeTime } from '@/lib/utils';
 import {
@@ -26,15 +28,22 @@ import {
   Activity,
   Layers,
   ShieldCheck,
-  HelpCircle,
+  Power,
+  History,
+  RotateCcw,
+  Zap,
+  FileJson,
 } from 'lucide-react';
 
 export const AgentPage: React.FC = () => {
   const [snapshot, setSnapshot] = useState<MerchantObservationSnapshot | null>(null);
   const [proposals, setProposals] = useState<MerchantProposalItem[]>([]);
   const [diagnoses, setDiagnoses] = useState<MerchantDiagnosisItem[]>([]);
+  const [autonomyStatus, setAutonomyStatus] = useState<AutonomyStatusResponse | null>(null);
+  const [autonomyActions, setAutonomyActions] = useState<AutonomyActionItem[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+  const [isTogglingKillSwitch, setIsTogglingKillSwitch] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
@@ -44,6 +53,14 @@ export const AgentPage: React.FC = () => {
   const [rejectionReason, setRejectionReason] = useState<string>('');
   const [experimentTargetValue, setExperimentTargetValue] = useState<string>('');
   const [isReviewing, setIsReviewing] = useState<boolean>(false);
+
+  // Autonomous execution & Rollback state
+  const [executingProposalId, setExecutingProposalId] = useState<string | null>(null);
+  const [selectedRollbackAction, setSelectedRollbackAction] = useState<AutonomyActionItem | null>(null);
+  const [rollbackReason, setRollbackReason] = useState<string>('');
+  const [isRollingBack, setIsRollingBack] = useState<boolean>(false);
+  const [selectedSnapshot, setSelectedSnapshot] = useState<Record<string, unknown> | null>(null);
+
   const requestVersionRef = useRef(0);
 
   const closeReviewDialog = useCallback(() => {
@@ -58,13 +75,21 @@ export const AgentPage: React.FC = () => {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const [snapData, propData] = await Promise.all([
+      const [snapData, propData, statusData, actionsData] = await Promise.all([
         api.getAgentSnapshot(),
         api.listProposals(),
+        typeof api.getAutonomyStatus === 'function'
+          ? api.getAutonomyStatus().catch(() => null)
+          : Promise.resolve(null),
+        typeof api.getAutonomyActions === 'function'
+          ? api.getAutonomyActions(20).catch(() => [])
+          : Promise.resolve([]),
       ]);
       if (requestVersion === requestVersionRef.current) {
         setSnapshot(snapData);
         setProposals(propData);
+        if (statusData) setAutonomyStatus(statusData);
+        if (actionsData) setAutonomyActions(actionsData);
       }
     } catch (err: unknown) {
       if (requestVersion === requestVersionRef.current) {
@@ -80,6 +105,67 @@ export const AgentPage: React.FC = () => {
   useEffect(() => {
     void fetchData();
   }, []);
+
+  const handleToggleKillSwitch = async () => {
+    if (!autonomyStatus) return;
+    setIsTogglingKillSwitch(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    try {
+      const nextState = !autonomyStatus.kill_switch_enabled;
+      await api.setKillSwitch(
+        nextState,
+        nextState ? 'Admin activated kill switch' : 'Admin deactivated kill switch'
+      );
+      setSuccessMessage(
+        nextState
+          ? 'Autonomy Kill Switch ACTIVATED. All autonomous side effects paused.'
+          : 'Kill Switch deactivated. Controlled autonomy resumed.'
+      );
+      await fetchData();
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to toggle kill switch.');
+    } finally {
+      setIsTogglingKillSwitch(false);
+    }
+  };
+
+  const handleExecuteAutonomously = async (p: MerchantProposalItem) => {
+    setExecutingProposalId(p.id);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    try {
+      const res = await api.executeAutonomyAction(p.id, 1);
+      setSuccessMessage(`Proposal executed autonomously: Action ID ${res.action.id.slice(0, 8)}.`);
+      await fetchData();
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : 'Autonomous execution failed.');
+    } finally {
+      setExecutingProposalId(null);
+    }
+  };
+
+  const handleConfirmRollback = async () => {
+    if (!selectedRollbackAction || !rollbackReason) return;
+    setIsRollingBack(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    try {
+      await api.rollbackAutonomyAction(
+        selectedRollbackAction.id,
+        selectedRollbackAction.target_version_after,
+        rollbackReason
+      );
+      setSuccessMessage(`Action ${selectedRollbackAction.id.slice(0, 8)} rolled back successfully.`);
+      setSelectedRollbackAction(null);
+      setRollbackReason('');
+      await fetchData();
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : 'Rollback failed.');
+    } finally {
+      setIsRollingBack(false);
+    }
+  };
 
   const handleRunAnalysis = async () => {
     if (isAnalyzing) return;
@@ -108,105 +194,74 @@ export const AgentPage: React.FC = () => {
     const targetValue = Number(experimentTargetValue);
     if (
       action === 'CONVERT_TO_EXPERIMENT' &&
-      (!Number.isFinite(targetValue) || targetValue < 0)
+      (!Number.isFinite(targetValue) || targetValue <= 0)
     ) {
-      setErrorMessage('Enter a non-negative, finite target value before creating the experiment.');
+      setErrorMessage('A valid positive target value is required to convert a proposal to an experiment.');
       return;
     }
+
     setIsReviewing(true);
+    setErrorMessage(null);
     try {
-      await api.reviewProposal(proposal.id, {
-        decision: action,
-        rejection_reason: action === 'REJECT' ? rejectionReason : undefined,
-      });
       if (action === 'CONVERT_TO_EXPERIMENT') {
+        const baseline = 0.0;
+        const target = targetValue;
         await api.createExperiment({
           proposal_id: proposal.id,
-          title: proposal.title,
+          title: `Experiment: ${proposal.title}`,
           hypothesis: proposal.hypothesis,
           target_metric: proposal.expected_metric,
-          baseline_value: 0,
-          target_value: targetValue,
+          baseline_value: baseline,
+          target_value: target,
           proposed_variation: { description: proposal.proposed_change },
         });
-        setSuccessMessage('Proposal converted into an approval-first experiment.');
+        await api.reviewProposal(proposal.id, {
+          decision: 'CONVERT_TO_EXPERIMENT',
+        });
+        setSuccessMessage(`Proposal converted to structured experiment targeting ${proposal.expected_metric}.`);
+      } else {
+        await api.reviewProposal(proposal.id, {
+          decision: action,
+          rejection_reason: action === 'REJECT' ? rejectionReason : undefined,
+        });
+        setSuccessMessage(`Proposal ${action === 'APPROVE' ? 'approved' : 'rejected'} successfully.`);
       }
       closeReviewDialog();
       await fetchData();
     } catch (err: unknown) {
-      setErrorMessage(
-        err instanceof Error
-          ? err.message
-          : 'Failed to update proposal state.'
-      );
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to submit proposal review.');
     } finally {
       setIsReviewing(false);
     }
   };
 
-  const getRiskBadge = (risk: string) => {
-    switch (risk) {
-      case 'READ_ONLY':
-        return <Badge variant="secondary" className="text-[10px] font-mono">READ ONLY</Badge>;
-      case 'LOW_RISK_REVERSIBLE':
-        return <Badge variant="success" className="text-[10px] font-mono">LOW RISK (REVERSIBLE)</Badge>;
-      case 'APPROVAL_REQUIRED':
-        return <Badge variant="warning" className="text-[10px] font-mono">APPROVAL REQUIRED</Badge>;
-      case 'PROHIBITED':
-        return <Badge variant="destructive" className="text-[10px] font-mono">PROHIBITED</Badge>;
-      default:
-        return <Badge variant="outline" className="text-[10px] font-mono">{risk}</Badge>;
-    }
-  };
-
-  const getStatusBadge = (status: string) => {
-    switch (status) {
-      case 'APPROVED':
-        return <Badge variant="success" className="text-[10px] font-mono">APPROVED</Badge>;
-      case 'REJECTED':
-        return <Badge variant="destructive" className="text-[10px] font-mono">REJECTED</Badge>;
-      case 'CONVERTED_TO_EXPERIMENT':
-        return <Badge variant="default" className="text-[10px] font-mono bg-brand-bright/10 text-brand-bright border-brand-bright/30">EXPERIMENT</Badge>;
-      case 'UNDER_REVIEW':
-        return <Badge variant="warning" className="text-[10px] font-mono">UNDER REVIEW</Badge>;
-      case 'PROPOSED':
-        return <Badge variant="outline" className="text-[10px] font-mono">PROPOSED</Badge>;
-      default:
-        return <Badge variant="outline" className="text-[10px] font-mono">{status}</Badge>;
-    }
-  };
-
-  const openReviewDialog = (proposal: MerchantProposalItem, action: NonNullable<typeof reviewAction>) => {
+  const openReviewDialog = (
+    proposal: MerchantProposalItem,
+    action: 'APPROVE' | 'REJECT' | 'CONVERT_TO_EXPERIMENT'
+  ) => {
     setSelectedProposal(proposal);
     setReviewAction(action);
     setRejectionReason('');
-    if (action === 'CONVERT_TO_EXPERIMENT') {
-      const metric = snapshot?.telemetry.find((item) => item.metric_name === proposal.expected_metric);
-      setExperimentTargetValue(
-        typeof metric?.value === 'number' && Number.isFinite(metric.value)
-          ? String(metric.value)
-          : ''
-      );
-    }
+    setExperimentTargetValue('');
   };
 
   return (
     <div className="space-y-6">
-      {/* Top Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#1B1C1E] p-5 rounded-2xl border border-white/10 shadow-lg">
-        <div className="flex items-start gap-3.5">
-          <div className="h-10 w-10 rounded-xl bg-brand-bright/10 border border-brand-bright/30 flex items-center justify-center shrink-0">
-            <Bot className="h-5 w-5 text-brand-bright" />
+      {/* Header & Primary Action Bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-white/10 pb-5">
+        <div className="flex items-center gap-3">
+          <div className="h-10 w-10 rounded-xl bg-brand-bright/10 border border-brand-bright/30 flex items-center justify-center text-brand-bright">
+            <Bot className="h-5 w-5" />
           </div>
           <div>
             <div className="flex items-center gap-2.5">
               <h2 className="text-xl font-bold tracking-tight text-text-primary">Merchant Optimization Agent</h2>
               <Badge variant="outline" className="text-[10px] font-mono border-brand-bright/40 text-brand-bright">
-                Phase 7 Intelligence
+                Phase 8 Controlled Autonomy
               </Badge>
             </div>
             <p className="text-xs text-text-muted mt-1 max-w-xl">
-              Merchant-side intelligence engine. Observes live commerce telemetry, diagnoses demand friction, and formulates evidence-backed proposals for human review.
+              Merchant-side intelligence engine. Observes live commerce telemetry, diagnoses demand friction, and executes low-risk reversible optimizations autonomously.
             </p>
           </div>
         </div>
@@ -234,14 +289,83 @@ export const AgentPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Controlled Autonomy & Kill Switch Panel */}
+      <Card className="p-4 bg-[#171A1C] border-white/10">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div
+              className={`p-2.5 rounded-xl border ${
+                autonomyStatus?.kill_switch_enabled
+                  ? 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+                  : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+              }`}
+            >
+              <Power className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-sm text-text-primary">Master Autonomy Kill Switch</span>
+                <Badge
+                  variant={autonomyStatus?.kill_switch_enabled ? 'destructive' : 'default'}
+                  className="text-[10px] font-mono"
+                >
+                  {autonomyStatus?.kill_switch_enabled ? 'KILL SWITCH ACTIVE' : 'AUTONOMY ENGAGED'}
+                </Badge>
+                {autonomyStatus?.anomaly_state && autonomyStatus.anomaly_state !== 'NORMAL' && (
+                  <Badge variant="outline" className="text-[10px] font-mono border-amber-500/40 text-amber-400">
+                    ANOMALY: {autonomyStatus.anomaly_state}
+                  </Badge>
+                )}
+              </div>
+              <p className="text-xs text-text-muted mt-0.5">
+                {autonomyStatus?.kill_switch_enabled
+                  ? 'All autonomous mutations paused. System operates strictly in manual approval mode.'
+                  : 'Allows autonomous execution of low-risk reversible optimizations within configured hourly/daily budgets.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <div className="text-right font-mono text-[11px] text-text-muted">
+              <div>
+                Hourly Budget:{' '}
+                <span className="text-text-primary font-bold">
+                  {autonomyStatus?.hourly_executions_count ?? 0}
+                </span>{' '}
+                used
+              </div>
+              <div>
+                Daily Budget:{' '}
+                <span className="text-text-primary font-bold">
+                  {autonomyStatus?.daily_executions_count ?? 0}
+                </span>{' '}
+                used
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant={autonomyStatus?.kill_switch_enabled ? 'primary' : 'destructive'}
+              isLoading={isTogglingKillSwitch}
+              onClick={handleToggleKillSwitch}
+              className="text-xs font-semibold shrink-0"
+            >
+              <Power className="h-3.5 w-3.5 mr-1.5" />
+              {autonomyStatus?.kill_switch_enabled ? 'Deactivate Kill Switch' : 'Trigger Kill Switch'}
+            </Button>
+          </div>
+        </div>
+      </Card>
+
       {/* Safety & Invariant Indicator */}
       <div className="flex items-center justify-between px-4 py-2.5 bg-[#171A1C] rounded-xl border border-emerald-500/20 text-xs">
         <div className="flex items-center gap-2 text-emerald-400">
           <ShieldCheck className="h-4 w-4 shrink-0" />
-          <span><strong>Safety Principle:</strong> Intelligence ≠ Authority. The Merchant Agent cannot mutate prices, alter financial policy, or grant capabilities directly.</span>
+          <span>
+            <strong>Safety Principle:</strong> Intelligence ≠ Authority. The Merchant Agent cannot mutate prices, alter financial policy, or bypass deterministic rollback gates.
+          </span>
         </div>
         <div className="flex items-center gap-2 text-text-muted font-mono text-[11px]">
-          <span>Autonomy: Level {snapshot?.autonomy_level ?? 1} (Bounded)</span>
+          <span>Autonomy: Level {snapshot?.autonomy_level ?? 1} (Controlled)</span>
         </div>
       </div>
 
@@ -279,69 +403,59 @@ export const AgentPage: React.FC = () => {
               <Skeleton key={i} className="h-24 w-full rounded-xl bg-[#202426]" />
             ))}
           </div>
-        ) : snapshot?.telemetry ? (
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+        ) : snapshot?.telemetry && snapshot.telemetry.length > 0 ? (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {snapshot.telemetry.map((t) => (
-              <Card key={t.metric_name} className="bg-[#202426] border-white/10 p-3.5 rounded-xl hover:border-brand-bright/30 transition-all">
-                <div className="flex items-center justify-between gap-1 mb-1.5">
-                  <span className="text-[10px] font-mono text-text-muted uppercase truncate">
-                    {t.metric_name.replace(/_/g, ' ')}
-                  </span>
-                  <Badge
-                    variant={
-                      t.category === 'OBSERVED'
-                        ? 'default'
-                        : t.category === 'DERIVED'
-                        ? 'secondary'
-                        : 'warning'
-                    }
-                    className="text-[9px] font-mono px-1.5 py-0"
-                  >
-                    {t.category}
+              <Card key={t.metric_name} className="p-3.5 bg-[#171A1C] border-white/10">
+                <div className="flex items-center justify-between text-[11px] font-mono text-text-muted mb-1">
+                  <span>{t.category}</span>
+                  <Badge variant="outline" className="text-[9px] px-1 py-0 border-white/10">
+                    N={t.sample_size}
                   </Badge>
                 </div>
-                <div className="text-lg font-bold text-text-primary font-mono tracking-tight">
+                <div className="text-xl font-bold font-mono text-text-primary mt-1">
                   {t.formatted_value}
                 </div>
-                <p className="text-[10px] text-text-muted mt-1 truncate" title={t.description}>
+                <div className="text-xs text-text-secondary mt-1 font-medium truncate">
                   {t.description}
-                </p>
+                </div>
               </Card>
             ))}
           </div>
         ) : (
           <EmptyState
-            icon={<HelpCircle className="h-8 w-8" />}
-            title="No telemetry data recorded"
-            description="Commerce events and buyer interactions will populate this live observation matrix."
+            icon={<Search className="h-10 w-10 text-brand-bright" />}
+            title="No telemetry signals available"
+            description="Run agent analysis or seed simulated commerce traffic to observe telemetry."
           />
         )}
       </div>
 
-      {/* 2. Diagnostic Findings */}
+      {/* 2. Structured Diagnoses */}
       {diagnoses.length > 0 && (
-        <div className="space-y-3">
-          <div className="flex items-center gap-2">
-            <Search className="h-4 w-4 text-amber-400" />
+        <div>
+          <div className="flex items-center gap-2 mb-3">
+            <Search className="h-4 w-4 text-brand-bright" />
             <h3 className="text-sm font-bold tracking-tight text-text-primary uppercase font-mono">
-              Diagnostic Findings & Evidence Links
+              Diagnostic Findings ({diagnoses.length})
             </h3>
           </div>
-
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {diagnoses.map((d, idx) => (
-              <Card key={idx} className="bg-[#202426] border-amber-500/20 p-4 rounded-xl">
+              <Card key={idx} className="p-3.5 bg-[#171A1C] border-white/10">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="font-mono text-xs text-amber-400 font-semibold">{d.pattern}</span>
-                  <Badge variant={d.severity === 'HIGH' ? 'destructive' : 'warning'} className="text-[10px]">
-                    {d.severity} SEVERITY
+                  <span className="font-mono text-xs font-bold text-text-primary">{d.pattern}</span>
+                  <Badge
+                    variant={d.severity === 'HIGH' ? 'destructive' : d.severity === 'MEDIUM' ? 'default' : 'secondary'}
+                    className="text-[10px] font-mono"
+                  >
+                    {d.severity}
                   </Badge>
                 </div>
-                <p className="text-xs text-text-secondary leading-relaxed mb-3">{d.summary}</p>
-                <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-white/10 text-[11px] font-mono text-text-muted">
-                  <span>Evidence:</span>
+                <p className="text-xs text-text-secondary mb-2.5 leading-relaxed">{d.summary}</p>
+                <div className="flex flex-wrap gap-1 mt-auto">
                   {d.evidence_references.map((ev, i) => (
-                    <span key={i} className="px-1.5 py-0.5 rounded bg-[#202426] text-brand-bright text-[10px]">
+                    <span key={i} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#0C0F11] border border-white/10 text-brand-bright">
                       {ev}
                     </span>
                   ))}
@@ -352,17 +466,17 @@ export const AgentPage: React.FC = () => {
         </div>
       )}
 
-      {/* 3. Optimization Proposals */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
+      {/* 3. Formulated Optimization Proposals */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <Layers className="h-4 w-4 text-brand-bright" />
             <h3 className="text-sm font-bold tracking-tight text-text-primary uppercase font-mono">
-              Optimization Proposals ({proposals.length})
+              Proposals ({proposals.length})
             </h3>
           </div>
           <span className="text-[11px] font-mono text-text-muted">
-            Approval-First Governance
+            Evidence-Backed & Risk Classified
           </span>
         </div>
 
@@ -374,27 +488,41 @@ export const AgentPage: React.FC = () => {
           </div>
         ) : proposals.length === 0 ? (
           <EmptyState
-            icon={<Sparkles className="h-10 w-10 text-brand-bright" />}
+            icon={<Bot className="h-10 w-10 text-brand-bright" />}
             title="No optimization proposals formulated"
-            description="Run the Merchant Agent Analysis to discover friction points and generate actionable proposals."
+            description="Run an analysis turn to evaluate current store observations and formulate proposals."
           />
         ) : (
           <div className="space-y-3">
             {proposals.map((p) => {
               const isPending = p.status === 'PROPOSED' || p.status === 'UNDER_REVIEW';
+              const canAutoExecute =
+                p.risk_level === 'LOW_RISK_REVERSIBLE' &&
+                isPending &&
+                !autonomyStatus?.kill_switch_enabled;
+
               return (
-                <Card key={p.id} className="bg-[#1B1C1E] border-white/10 p-5 rounded-2xl hover:border-brand-bright/40 transition-all">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
-                    <div className="flex items-center gap-2.5">
-                      <span className="font-mono text-xs text-brand-bright font-bold">
-                        {p.proposal_type}
-                      </span>
-                      {getRiskBadge(p.risk_level)}
-                      {getStatusBadge(p.status)}
+                <Card key={p.id} className="p-4 bg-[#171A1C] border-white/10">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-mono font-bold text-brand-bright">{p.proposal_type}</span>
+                      <Badge
+                        variant={
+                          p.risk_level === 'PROHIBITED'
+                            ? 'destructive'
+                            : p.risk_level === 'APPROVAL_REQUIRED'
+                            ? 'default'
+                            : 'secondary'
+                        }
+                        className="text-[10px] font-mono"
+                      >
+                        {p.risk_level}
+                      </Badge>
+                      <Badge variant="outline" className="text-[10px] font-mono border-white/10 text-text-muted">
+                        {p.status}
+                      </Badge>
                     </div>
-                    <span className="text-[11px] font-mono text-text-muted">
-                      {formatRelativeTime(p.created_at)}
-                    </span>
+                    <span className="text-[11px] font-mono text-text-muted">{formatRelativeTime(p.created_at)}</span>
                   </div>
 
                   <h4 className="text-base font-bold text-text-primary mb-1.5">{p.title}</h4>
@@ -429,7 +557,7 @@ export const AgentPage: React.FC = () => {
 
                   {/* Review Action Footer */}
                   {isPending && p.risk_level !== 'PROHIBITED' && (
-                    <div className="flex justify-end gap-2.5 pt-3 border-t border-white/10">
+                    <div className="flex flex-wrap justify-end gap-2.5 pt-3 border-t border-white/10">
                       <Button
                         variant="outline"
                         size="sm"
@@ -451,8 +579,21 @@ export const AgentPage: React.FC = () => {
                         onClick={() => openReviewDialog(p, 'APPROVE')}
                         className="text-xs font-semibold bg-emerald-500 text-slate-950 hover:bg-emerald-400"
                       >
-                        <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Approve Proposal
+                        <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Approve
                       </Button>
+
+                      {/* Phase 8 Autonomous Execution Button */}
+                      {canAutoExecute && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          isLoading={executingProposalId === p.id}
+                          onClick={() => handleExecuteAutonomously(p)}
+                          className="text-xs font-semibold border-brand-bright/40 text-brand-bright hover:bg-brand-bright/10"
+                        >
+                          <Zap className="h-3.5 w-3.5 mr-1" /> Execute Autonomously
+                        </Button>
+                      )}
                     </div>
                   )}
 
@@ -468,7 +609,88 @@ export const AgentPage: React.FC = () => {
         )}
       </div>
 
-      {/* Review Dialog */}
+      {/* 4. Autonomous Actions Ledger & Deterministic Rollback */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <History className="h-4 w-4 text-brand-bright" />
+            <h3 className="text-sm font-bold tracking-tight text-text-primary uppercase font-mono">
+              Autonomous Actions Ledger ({autonomyActions.length})
+            </h3>
+          </div>
+          <span className="text-[11px] font-mono text-text-muted">
+            Immutable Audit Linkage & Rollback Snapshots
+          </span>
+        </div>
+
+        {autonomyActions.length === 0 ? (
+          <EmptyState
+            icon={<History className="h-10 w-10 text-brand-bright" />}
+            title="No autonomous actions recorded"
+            description="Autonomous mutations will appear here with version-checked deterministic rollback snapshots."
+          />
+        ) : (
+          <div className="space-y-2.5">
+            {autonomyActions.map((act) => (
+              <Card
+                key={act.id}
+                className="p-3.5 bg-[#171A1C] border-white/10 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs"
+              >
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-text-primary font-mono">{act.action_type}</span>
+                    <Badge
+                      variant={act.status === 'EXECUTED' ? 'default' : 'secondary'}
+                      className="text-[10px] font-mono"
+                    >
+                      {act.status}
+                    </Badge>
+                    <Badge variant="outline" className="text-[10px] font-mono border-white/10 text-text-muted">
+                      Rollback: {act.rollback_status}
+                    </Badge>
+                  </div>
+                  <div className="text-[11px] text-text-muted font-mono">
+                    Target: {act.target_entity_type} ({act.target_entity_id.slice(0, 8)}) | Version: v
+                    {act.target_version_before} → v{act.target_version_after} |{' '}
+                    {formatRelativeTime(act.created_at)}
+                  </div>
+                  {act.stopping_reason && (
+                    <div className="text-[11px] text-amber-300 italic">
+                      Reason: {act.stopping_reason}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setSelectedSnapshot(act.rollback_snapshot)}
+                    className="text-[11px] border-white/10 bg-[#0C0F11] hover:bg-[#202426]"
+                  >
+                    <FileJson className="h-3 w-3 mr-1" /> Snapshot
+                  </Button>
+                  {act.rollback_status === 'AVAILABLE' && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setSelectedRollbackAction(act);
+                        setRollbackReason('Merchant administrative rollback');
+                      }}
+                      className="text-[11px] text-amber-300 border-amber-500/30 hover:bg-amber-500/10"
+                    >
+                      <RotateCcw className="h-3 w-3 mr-1" /> Rollback
+                    </Button>
+                  )}
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Review Proposal Dialog */}
       <Dialog
         isOpen={selectedProposal !== null && reviewAction !== null}
         onClose={closeReviewDialog}
@@ -476,7 +698,7 @@ export const AgentPage: React.FC = () => {
           reviewAction === 'APPROVE'
             ? 'Approve Optimization Proposal'
             : reviewAction === 'REJECT'
-            ? 'Reject Proposal'
+            ? 'Reject Optimization Proposal'
             : 'Convert to Structured Experiment'
         }
         description={`Confirm action for "${selectedProposal?.title}".`}
@@ -515,17 +737,13 @@ export const AgentPage: React.FC = () => {
           ) : (
             <p className="text-text-secondary leading-relaxed">
               {reviewAction === 'APPROVE'
-                ? 'Approving this proposal registers merchant administrative consent. In Phase 7, all changes remain supervised.'
+                ? 'Approving this proposal registers merchant administrative consent. In Phase 8, low-risk actions can execute autonomously with deterministic rollback.'
                 : 'Converting this proposal into a structured experiment will register baseline metrics and allow deterministic measurement.'}
             </p>
           )}
         </div>
         <DialogFooter>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={closeReviewDialog}
-          >
+          <Button variant="outline" size="sm" onClick={closeReviewDialog}>
             Cancel
           </Button>
           <Button
@@ -539,6 +757,65 @@ export const AgentPage: React.FC = () => {
             }
           >
             Confirm
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* Rollback Confirmation Dialog */}
+      <Dialog
+        isOpen={selectedRollbackAction !== null}
+        onClose={() => setSelectedRollbackAction(null)}
+        title="Confirm Deterministic Rollback"
+        description={`Roll back autonomous action "${selectedRollbackAction?.action_type}" on ${selectedRollbackAction?.target_entity_type}?`}
+      >
+        <div className="space-y-3 py-2 text-xs">
+          <p className="text-text-secondary">
+            This will revert the target resource to its pre-mutation snapshot version (v
+            {selectedRollbackAction?.target_version_before}). If newer human changes were made, rollback will fail closed safely.
+          </p>
+          <div>
+            <label className="block text-[11px] font-mono text-text-muted uppercase mb-1">
+              Rollback Reason
+            </label>
+            <input
+              className="w-full bg-[#0C0F11] border border-white/10 rounded-lg p-2 text-xs text-text-primary focus:border-brand-bright focus:outline-none"
+              value={rollbackReason}
+              onChange={(e) => setRollbackReason(e.target.value)}
+              placeholder="e.g. Conversion drop or manual store preference"
+              required
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => setSelectedRollbackAction(null)}>
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            isLoading={isRollingBack}
+            onClick={handleConfirmRollback}
+            className="bg-amber-500 text-slate-950 hover:bg-amber-400"
+          >
+            Execute Rollback
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* Pre-Mutation Snapshot Dialog */}
+      <Dialog
+        isOpen={selectedSnapshot !== null}
+        onClose={() => setSelectedSnapshot(null)}
+        title="Pre-Mutation Rollback Snapshot"
+        description="Immutable snapshot captured prior to autonomous execution."
+      >
+        <div className="py-2 text-xs">
+          <pre className="p-3 bg-[#0C0F11] border border-white/10 rounded-xl overflow-x-auto text-[11px] font-mono text-brand-bright max-h-80">
+            {JSON.stringify(selectedSnapshot, null, 2)}
+          </pre>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => setSelectedSnapshot(null)}>
+            Close
           </Button>
         </DialogFooter>
       </Dialog>

@@ -17,6 +17,8 @@ import {
   Plus,
   ShieldCheck,
   Sliders,
+  RotateCcw,
+  StopCircle,
 } from 'lucide-react';
 
 export const ExperimentsPage: React.FC = () => {
@@ -110,6 +112,34 @@ export const ExperimentsPage: React.FC = () => {
       await fetchExperiments();
     } catch (err: unknown) {
       setErrorMessage(err instanceof Error ? err.message : 'Failed to evaluate experiment.');
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleStop = async (id: string) => {
+    setActionLoadingId(id);
+    setErrorMessage(null);
+    try {
+      await api.stopExperiment(id, 'Merchant requested stop');
+      setSuccessMessage('Experiment stopped successfully.');
+      await fetchExperiments();
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to stop experiment.');
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleRollback = async (id: string) => {
+    setActionLoadingId(id);
+    setErrorMessage(null);
+    try {
+      await api.rollbackExperiment(id, 'Merchant requested rollback');
+      setSuccessMessage('Experiment rolled back to baseline.');
+      await fetchExperiments();
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to roll back experiment.');
     } finally {
       setActionLoadingId(null);
     }
@@ -233,6 +263,15 @@ export const ExperimentsPage: React.FC = () => {
                       EXP-{exp.id.slice(0, 8)}
                     </span>
                     {getStatusBadge(exp.status)}
+                    {exp.risk_level === 'AUTO_LOW_RISK' || exp.risk_level === 'LOW_RISK_REVERSIBLE' ? (
+                      <Badge variant="outline" className="text-[10px] font-mono border-brand-bright/40 text-brand-bright">
+                        AUTO_ELIGIBLE
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-[10px] font-mono border-white/10 text-text-muted">
+                        APPROVAL_REQUIRED
+                      </Badge>
+                    )}
                     <Badge variant="outline" className="text-[10px] font-mono">
                       Risk: {exp.risk_level}
                     </Badge>
@@ -301,7 +340,7 @@ export const ExperimentsPage: React.FC = () => {
                 )}
 
                 {/* Action Footer */}
-                <div className="flex justify-end gap-2.5 pt-3 border-t border-white/10">
+                <div className="flex flex-wrap justify-end gap-2.5 pt-3 border-t border-white/10">
                   {isPendingApproval && (
                     <Button
                       size="sm"
@@ -311,6 +350,28 @@ export const ExperimentsPage: React.FC = () => {
                     >
                       <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Approve Experiment
                     </Button>
+                  )}
+                  {(exp.status === 'RUNNING' || exp.status === 'APPROVED') && (
+                    <>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        isLoading={actionLoadingId === exp.id}
+                        onClick={() => handleStop(exp.id)}
+                        className="text-xs text-rose-400 border-rose-500/30 hover:bg-rose-500/10"
+                      >
+                        <StopCircle className="h-3.5 w-3.5 mr-1" /> Stop Experiment
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        isLoading={actionLoadingId === exp.id}
+                        onClick={() => handleRollback(exp.id)}
+                        className="text-xs text-amber-400 border-amber-500/30 hover:bg-amber-500/10"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5 mr-1" /> Rollback
+                      </Button>
+                    </>
                   )}
                   {exp.status === 'APPROVED' && (
                     <Button

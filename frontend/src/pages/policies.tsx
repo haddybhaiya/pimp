@@ -2,17 +2,20 @@ import React, { useEffect, useState } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api-client';
 import { useAuth } from '@/lib/auth-store';
-import { PolicyGovernance } from '@/types/portal';
-import { ShieldCheck, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { PolicyGovernance, AutonomyRuleItem } from '@/types/portal';
+import { ShieldCheck, CheckCircle2, AlertTriangle, Sliders } from 'lucide-react';
 
 export const PoliciesPage: React.FC = () => {
   const { updateProfile } = useAuth();
   const [policyData, setPolicyData] = useState<PolicyGovernance | null>(null);
+  const [autonomyRules, setAutonomyRules] = useState<AutonomyRuleItem[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [togglingAction, setTogglingAction] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,8 +27,14 @@ export const PoliciesPage: React.FC = () => {
   const fetchPolicies = async () => {
     setIsLoading(true);
     try {
-      const data = await api.getPolicies();
+      const [data, rules] = await Promise.all([
+        api.getPolicies(),
+        typeof api.getAutonomyRules === 'function'
+          ? api.getAutonomyRules().catch(() => [])
+          : Promise.resolve([]),
+      ]);
       setPolicyData(data);
+      setAutonomyRules(rules);
       setAutonomyLevel(data.autonomy_level);
       setMaxDiscountPct(data.max_discount_percentage);
       setMinMarginPct(data.min_margin_percentage);
@@ -35,6 +44,26 @@ export const PoliciesPage: React.FC = () => {
       setError(err instanceof Error ? err.message : 'Unable to load policy rules.');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleToggleRule = async (rule: AutonomyRuleItem) => {
+    setTogglingAction(rule.action_type);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      const updated = await api.updateAutonomyRule(rule.action_type, {
+        is_enabled: !rule.is_enabled,
+        expected_version: rule.version,
+      });
+      setAutonomyRules((prev) =>
+        prev.map((r) => (r.action_type === updated.action_type ? updated : r))
+      );
+      setSuccessMsg(`Autonomy rule for '${rule.action_type}' updated.`);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to update autonomy rule.');
+    } finally {
+      setTogglingAction(null);
     }
   };
 
@@ -99,7 +128,8 @@ export const PoliciesPage: React.FC = () => {
       {isLoading ? (
         <Skeleton className="h-96 w-full" />
       ) : policyData ? (
-        <form onSubmit={handleSave} className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="space-y-6">
+          <form onSubmit={handleSave} className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <Card className="lg:col-span-2 border-border bg-card/90">
             <CardHeader>
               <CardTitle className="text-base">Merchant Autonomy & Financial Bounds</CardTitle>
@@ -196,6 +226,66 @@ export const PoliciesPage: React.FC = () => {
             </Card>
           </div>
         </form>
+
+        {/* Controlled Autonomy Rules Section */}
+        <Card className="border-border bg-card/90">
+          <CardHeader>
+            <div className="flex items-center gap-2 text-primary">
+              <Sliders className="h-5 w-5" />
+              <CardTitle className="text-base">Controlled Autonomy Execution Rules</CardTitle>
+            </div>
+            <CardDescription>
+              Server-authoritative rules defining allowed autonomous optimization types, rate limits, and rollbacks.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="space-y-2">
+              {autonomyRules.map((rule) => (
+                <div
+                  key={rule.id}
+                  className="flex flex-col sm:flex-row sm:items-center justify-between p-3 rounded-lg border border-border bg-muted/20 gap-3 text-xs"
+                >
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-bold text-foreground">{rule.action_type}</span>
+                      <Badge
+                        variant={rule.classification === 'AUTO_LOW_RISK' ? 'default' : 'secondary'}
+                        className="text-[10px] font-mono"
+                      >
+                        {rule.classification}
+                      </Badge>
+                      <Badge
+                        variant={rule.is_enabled ? 'outline' : 'destructive'}
+                        className="text-[10px] font-mono"
+                      >
+                        {rule.is_enabled ? 'ENABLED' : 'DISABLED'}
+                      </Badge>
+                    </div>
+                    <div className="text-[11px] text-muted-foreground font-mono">
+                      Hourly Limit: {rule.max_executions_per_hour}/hr | Daily Limit: {rule.max_executions_per_day}/day | Cooldown: {rule.cooldown_seconds}s
+                    </div>
+                    <div className="text-[10px] text-muted-foreground font-mono truncate max-w-md">
+                      Hash: {rule.policy_hash}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Button
+                      size="sm"
+                      variant={rule.is_enabled ? 'outline' : 'primary'}
+                      isLoading={togglingAction === rule.action_type}
+                      onClick={() => handleToggleRule(rule)}
+                      className="text-xs"
+                    >
+                      {rule.is_enabled ? 'Disable' : 'Enable'}
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+        </div>
       ) : (
         <div className="rounded-lg border border-rose-400/30 bg-rose-400/10 p-4 text-sm text-rose-100">
           Policy controls are unavailable until the current server policy can be loaded.
