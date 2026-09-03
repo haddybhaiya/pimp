@@ -3,13 +3,14 @@
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, String
+from sqlalchemy import Boolean, CheckConstraint, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agent_ready_merchant.db.base import GUID, Base, OptimisticLockMixin, TimestampMixin
 
 if TYPE_CHECKING:
     from agent_ready_merchant.models.audit import AuditEvent
+    from agent_ready_merchant.models.autonomy import MerchantAutonomyAction, MerchantAutonomyRule
     from agent_ready_merchant.models.experiment import MerchantExperiment
     from agent_ready_merchant.models.order import Order
     from agent_ready_merchant.models.policy import PolicyRule
@@ -67,6 +68,11 @@ class Merchant(Base, TimestampMixin, OptimisticLockMixin):
         nullable=True,
         index=True,
     )
+    kill_switch_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
 
     # Relationships
     products: Mapped[list["Product"]] = relationship(
@@ -111,4 +117,15 @@ class Merchant(Base, TimestampMixin, OptimisticLockMixin):
         "MerchantExperiment",
         back_populates="merchant",
         cascade="all, delete-orphan",
+    )
+    autonomy_rules: Mapped[list["MerchantAutonomyRule"]] = relationship(
+        "MerchantAutonomyRule",
+        back_populates="merchant",
+        cascade="all, delete-orphan",
+    )
+    autonomy_actions: Mapped[list["MerchantAutonomyAction"]] = relationship(
+        "MerchantAutonomyAction",
+        back_populates="merchant",
+        cascade="all, delete-orphan",
+        overlaps="proposal",
     )

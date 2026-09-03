@@ -6,6 +6,16 @@ Exports all canonical domain entities defined in docs/domain-model.md and Phase 
 from agent_ready_merchant.models.agent_run import AgentRun
 from agent_ready_merchant.models.approval import MerchantApproval
 from agent_ready_merchant.models.audit import AuditEvent
+from agent_ready_merchant.models.autonomy import (
+    AnomalyState,
+    AutonomyActionStatus,
+    AutonomyActionType,
+    AutonomyClassification,
+    MerchantAutonomyAction,
+    MerchantAutonomyFailure,
+    MerchantAutonomyRule,
+    RollbackStatus,
+)
 from agent_ready_merchant.models.experiment import MerchantExperiment, MerchantExperimentResult
 from agent_ready_merchant.models.intent import BuyerIntent
 from agent_ready_merchant.models.inventory import InventoryItem
@@ -43,4 +53,12 @@ __all__ = [
     "MerchantProposal",
     "MerchantExperiment",
     "MerchantExperimentResult",
+    "MerchantAutonomyRule",
+    "MerchantAutonomyAction",
+    "MerchantAutonomyFailure",
+    "AutonomyActionType",
+    "AutonomyClassification",
+    "AutonomyActionStatus",
+    "RollbackStatus",
+    "AnomalyState",
 ]

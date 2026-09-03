@@ -543,28 +543,50 @@ class MerchantAgentService:
             "transfer money",
             "bypass approval",
             "disable policy",
+            "policy override",
+            "autonomy increase",
+            "capability grant",
+            "permission change",
+            "floor price change",
+            "refund request",
         )
         prohibited_text_patterns = (
-            r"\brefunds?\b",
-            r"\breimburse(?:ment|ments)?\b",
-            r"\bpayouts?\b",
-            r"\bdisburse(?:ment|ments)?\b",
+            r"\brefunds?(?:\s+requests?)?\b",
+            r"\breimburse(?:ments?|s|d|ing)?(?:\s+requests?)?\b",
+            r"\bpayouts?(?:\s+requests?)?\b",
+            r"\bdisburse(?:ments?|s|d|ing)?(?:\s+requests?)?\b",
             r"\b(?:charge|debit|credit|transfer)\s+(?:card|payment|customer|buyer|funds?|money)\b",
-            r"\b(?:grant|revoke|increase|decrease|change|modify|update|alter|set|disable|enable)\w*\b"
-            r".*\b(?:policy|floor(?:\s*price)?|capabilit(?:y|ies)|permission|autonomy)\w*\b",
+            r"\b(?:grant|revoke|increase|decrease|change|modify|update|alter|set|disable|enable|override|bypass|elevate|escalate|reset|remove)\w*\s+"
+            r"(?:policy|floor(?:\s*price)?|capabilit(?:y|ies)|permission|privilege|autonomy|role|rule)\w*\b",
+            r"\b(?:autonomy|policy|floor(?:\s*price)?|capabilit(?:y|ies)|permission|privilege|role|rule)\s+"
+            r"(?:increase|decrease|grant|revoke|change|modify|alter|override|bypass|disable|enable|elevate|escalate|set|reset|remove|elevation|escalation)\w*\b",
         )
 
         def has_prohibited_structured_action(value: Any) -> bool:
             """Reject hidden financial/governance intent in untrusted structured fields."""
-            action_keys = {"action", "operation", "tool", "command", "intent", "kind", "type"}
+            action_keys = {
+                "action",
+                "actions",
+                "operation",
+                "tool",
+                "command",
+                "intent",
+                "kind",
+                "type",
+                "feature",
+                "setting",
+                "change",
+            }
             neutral_value_patterns = (
-                r"\brefunds?(?:\s+request)?\b",
-                r"\breimburse(?:ment|ments)?\b",
-                r"\bpayouts?\b",
-                r"\bdisburse(?:ment|ments)?\b",
+                r"\brefunds?(?:\s+requests?)?\b",
+                r"\breimburse(?:ments?|s|d|ing)?(?:\s+requests?)?\b",
+                r"\bpayouts?(?:\s+requests?)?\b",
+                r"\bdisburse(?:ments?|s|d|ing)?(?:\s+requests?)?\b",
                 r"\bfloor\s+price\b",
-                r"\b(?:grant|revoke|increase|decrease|change|modify|update|alter|set|disable|enable)\w*\s+"
-                r"(?:policy|floor(?:\s+price)?|capabilit(?:y|ies)|permission|autonomy)\b",
+                r"\b(?:grant|revoke|increase|decrease|change|modify|update|alter|set|disable|enable|override|bypass|elevate|escalate|reset|remove)\w*\s+"
+                r"(?:policy|floor(?:\s+price)?|capabilit(?:y|ies)|permission|privilege|autonomy|role|rule)\w*\b",
+                r"\b(?:autonomy|policy|floor(?:\s*price)?|capabilit(?:y|ies)|permission|privilege|role|rule)\s+"
+                r"(?:increase|decrease|grant|revoke|change|modify|alter|override|bypass|disable|enable|elevate|escalate|set|reset|remove|elevation|escalation)\w*\b",
                 r"\b(?:charge|debit|credit|transfer)\s+(?:card|payment|customer|buyer|funds?|money)\b",
             )
             direct_action_values = {
@@ -586,41 +608,51 @@ class MerchantAgentService:
                 "capability",
                 "permission",
                 "autonomy",
+                "policy override",
+                "autonomy increase",
+                "capability grant",
+                "permission change",
+                "floor price change",
             }
 
             def normalize_structured_text(raw_value: Any) -> str:
                 """Normalize separators and camelCase without broad substring matching."""
-                with_word_breaks = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(raw_value))
+                with_word_breaks = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(raw_value))
                 return re.sub(r"[^a-z0-9]+", " ", with_word_breaks.lower()).strip()
 
             def has_prohibited_scalar(raw_value: Any) -> bool:
                 normalized_value = normalize_structured_text(raw_value)
-                return any(
-                    re.search(pattern, normalized_value) for pattern in neutral_value_patterns
+                return (
+                    any(re.search(pattern, normalized_value) for pattern in neutral_value_patterns)
+                    or normalized_value in direct_action_values
                 )
 
             if isinstance(value, dict):
                 for key, nested_value in value.items():
-                    normalized_key = str(key).lower()
-                    # All scalar metadata remains untrusted. Normalize snake_case
-                    # before checking explicit prohibited phrases, without treating
-                    # unrelated commerce language (for example loyalty credits) as
-                    # a financial command.
+                    normalized_key = normalize_structured_text(key)
                     if not isinstance(nested_value, (dict, list)):
-                        if has_prohibited_scalar(f"{key} {nested_value}"):
+                        if has_prohibited_scalar(f"{key} {nested_value}") or has_prohibited_scalar(
+                            nested_value
+                        ):
                             return True
                         if normalized_key in action_keys:
                             action_value = normalize_structured_text(nested_value)
-                            if action_value in direct_action_values:
+                            if action_value in direct_action_values or has_prohibited_scalar(
+                                action_value
+                            ):
                                 return True
-                    if normalized_key in action_keys and isinstance(nested_value, (dict, list)):
-                        action_value = json.dumps(nested_value, sort_keys=True, default=str).lower()
-                        if any(
-                            re.search(pattern, action_value) for pattern in neutral_value_patterns
-                        ):
+                    elif isinstance(nested_value, (dict, list)):
+                        if normalized_key in action_keys:
+                            action_value = json.dumps(
+                                nested_value, sort_keys=True, default=str
+                            ).lower()
+                            if any(
+                                re.search(pattern, action_value)
+                                for pattern in neutral_value_patterns
+                            ):
+                                return True
+                        if has_prohibited_structured_action(nested_value):
                             return True
-                    if has_prohibited_structured_action(nested_value):
-                        return True
             elif isinstance(value, list):
                 return any(has_prohibited_structured_action(item) for item in value)
             elif isinstance(value, (str, int, float, bool)):
@@ -649,6 +681,38 @@ class MerchantAgentService:
                     "or execute direct payments."
                 ),
             )
+
+        # Ambiguous, malformed, or unsupported structured action fail-closed check
+        structured_action = proposal_data.get("structured_action")
+        meta_dict = proposal_data.get("metadata")
+        if structured_action is None and isinstance(meta_dict, dict):
+            structured_action = meta_dict.get("structured_action")
+        meta_payload = proposal_data.get("metadata_payload")
+        if structured_action is None and isinstance(meta_payload, dict):
+            structured_action = meta_payload.get("structured_action")
+        if structured_action is not None:
+            if not isinstance(structured_action, dict) or not structured_action:
+                return (
+                    ProposalRiskLevel.PROHIBITED,
+                    False,
+                    "Malformed or empty structured action is prohibited.",
+                )
+            action_name = str(
+                structured_action.get("action") or structured_action.get("action_type") or ""
+            ).strip()
+            allowed_actions = {
+                "IMPROVE_PRODUCT_DESCRIPTION",
+                "IMPROVE_DISCOVERY_METADATA",
+                "REORDER_RECOMMENDATIONS",
+                "EXPOSE_DELIVERY_ETA",
+                "SUGGEST_BOUNDED_EXPERIMENT",
+            }
+            if not action_name or action_name not in allowed_actions:
+                return (
+                    ProposalRiskLevel.PROHIBITED,
+                    False,
+                    f"Unsupported or ambiguous structured action '{action_name}'.",
+                )
 
         if ptype in (
             ProposalType.SUGGEST_PROMOTIONAL_OFFER.value,

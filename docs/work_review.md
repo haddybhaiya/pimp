@@ -14,6 +14,58 @@
 
 **Verified by:** `tests/test_phase7_merchant_agent.py` and `tests/test_alembic_migrations.py`.
 
+
+---
+
+# Phase 8 Controlled Autonomy & Governance Hardening — Review & Remediation Log
+
+> **Reviewed on:** 2026-09-03  
+> **Scope:** Phase 8 Controlled Autonomy, entry gate governance hardening, master kill-switch, deterministic rollback engine, and human precedence safeguards.  
+> **Status:** **RESOLVED & VERIFIED**
+
+1. **Object-First Actions Governance (Resolved):**
+   - Normalized structured scalar matching now detects both verb-first (`change policy`, `increase autonomy`) and object-first patterns (`autonomy increase`, `policy override`, `capability grant`, `permission change`, `floor price change`).
+   - Recursively screens both `metadata` and `metadata_payload` structured action envelopes.
+   - Ambiguous and malformed structured action payloads fail closed to `PROHIBITED`.
+   - Verified by `test_object_first_and_inflected_actions_classified_prohibited` and `test_ambiguous_and_malformed_actions_fail_closed`.
+
+2. **Controlled Autonomy Rate Limiting & Cooldowns:**
+   - Implemented `ControlledAutonomyService.check_budget_and_cooldown` asserting hourly limits, daily limits, and non-negative cooldown periods fail-closed before execution.
+   - Verified by `test_budget_exhaustion_hourly_and_daily_fail_closed` and `test_cooldown_violations_fail_closed`.
+
+3. **Master Kill Switch Immediacy:**
+   - Enabling kill switch immediately prevents subsequent autonomous actions from executing and safely halts active running experiments with `stopped_by_kill_switch: True` and audit event logging.
+   - Verified by `test_kill_switch_blocks_pre_execution` and `test_kill_switch_stops_running_experiments_safely`.
+
+4. **Deterministic Reversible Rollback & Human Precedence:**
+   - Pre-mutation snapshot stored on every action.
+   - Reverts state version-checked; if human merchant modified entity post-execution (`current_version > action.target_version_after`), rollback fails closed with `RollbackConflictError` and records `CONFLICT_REJECTED`.
+   - Verified by `test_e2e_golden_path_scenario` and `test_rollback_after_human_modification_fails_closed`.
+
+5. **Migration 011:**
+   - Created `011_phase8_controlled_autonomy.py` adding `kill_switch_enabled` to merchants, `merchant_autonomy_rules`, and `merchant_autonomy_actions` with composite tenant constraints.
+   - Verified by `test_alembic_migrations.py`.
+
+6. **Phase 8 execution-boundary follow-up (Resolved):**
+   - Rules provision disabled until explicit merchant-admin opt-in. Merchant, rule, proposal, target, and rollback rows are locked at the authoritative boundary, serializing kill-switch, quota, conflict, and version checks.
+   - Rejected and archived proposals are ineligible; execution no longer fabricates merchant approval. Bounded experiments must already be merchant-approved before entering `RUNNING`, and configured traffic exposure fails closed until deterministic routing exists.
+   - Rollback conflicts persist `CONFLICT_REJECTED` and an audit event before HTTP 409. The Agent page retrieves the current product version rather than posting a hard-coded version, and its rollback dialog uses a stable close callback.
+   - Verified by `test_new_merchants_are_not_implicitly_opted_into_autonomy`, `test_rejected_proposal_cannot_regain_execution_authority`, and `test_experiment_cannot_start_until_merchant_approval`.
+
+7. **Target, rollback, and proposal-link integrity follow-up (Resolved):**
+   - Autonomous product mutations now reject proposals that lack an explicit target product; no fallback product selection is permitted.
+   - Experiment rollback now delegates to the linked executed autonomy action, restoring its captured snapshot and reconciling the experiment, action, rollback, and audit states.
+   - Migration 012 couples autonomy-action proposal links to the same merchant with a composite foreign key; inconsistent cross-tenant links fail at the database boundary.
+   - Verified by `test_targetless_product_proposal_fails_closed`, `test_experiment_rollback_reconciles_linked_autonomy_action`, and `test_phase8_autonomy_proposal_links_are_tenant_coupled`.
+
+8. **Placeholder target, rollback-conflict, and proposal-deletion follow-up (Resolved):**
+   - The Phase 7 `general` placeholder cannot be treated as a product SKU by autonomous execution; only explicit product identifiers are accepted.
+   - Delegated experiment rollback now commits `CONFLICT_REJECTED` and its linked audit event before responding with HTTP 409.
+   - Migration 013 retains the tenant-coupled proposal foreign key while using PostgreSQL `ON DELETE SET NULL (proposal_id)`, preserving autonomy-action history when an optional proposal is removed.
+   - Verified by `test_placeholder_product_target_fails_closed`, `test_experiment_rollback_conflict_is_persisted_before_http_409`, and `test_phase8_proposal_deletion_preserves_autonomy_action_history`.
+
+**Verified by:** `tests/test_phase8_controlled_autonomy.py` (23 passed), migration tests (5 passed), full pytest suite (314 passed, 3 skipped), and frontend test suite (31 passed).
+
 ---
 
 # Service, Telemetry, and Replay-Safety Follow-up Remediation Log
@@ -855,4 +907,13 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 
 5. **Web Control Plane Surface:**
    - Built interactive frontend pages `frontend/src/pages/agent.tsx` and `frontend/src/pages/experiments.tsx`.
-   - Added REST endpoints in `src/agent_ready_merchant/main.py` protected by `_require_merchant_auth`.
+  - Added REST endpoints in `src/agent_ready_merchant/main.py` protected by `_require_merchant_auth`.
+
+---
+
+## Phase 8 P1 Remediation: Durable Failure Circuit Breaker (2026-09-03)
+
+- **Status:** **RESOLVED & VERIFIED**
+- **Finding:** Rejected autonomous execution gates did not persist a failure record, so the three-failures-per-hour anomaly breaker could never reach `REQUIRE_HUMAN_REVIEW`.
+- **Resolution:** `execute_autonomous_action` now runs its gates inside a nested transaction. A rejected gate or optimistic conflict rolls back all tentative side effects and idempotency state, then appends a tenant-scoped `merchant_autonomy_failures` record plus an immutable `AUTONOMOUS_ACTION_REJECTED` audit event. The anomaly controller counts these non-mutating records; they neither consume autonomous-execution budget nor appear as successful actions.
+- **Verification:** `tests/test_phase8_controlled_autonomy.py::test_rejected_execution_attempts_trip_durable_anomaly_circuit_breaker` and the Alembic migration test suite.

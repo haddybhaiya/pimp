@@ -1,5 +1,24 @@
 """Domain validation schemas package."""
 
+from agent_ready_merchant.models.autonomy import (
+    AnomalyState,
+    AutonomyActionStatus,
+    AutonomyActionType,
+    AutonomyClassification,
+    RollbackStatus,
+)
+from agent_ready_merchant.schemas.controlled_autonomy import (
+    AutonomousExecutionRequest,
+    AutonomousExecutionResponse,
+    AutonomyActionResponse,
+    AutonomyRuleResponse,
+    AutonomyRuleUpdateRequest,
+    AutonomyStatusResponse,
+    KillSwitchResponse,
+    KillSwitchUpdateRequest,
+    RollbackRequest,
+    RollbackResponse,
+)
 from agent_ready_merchant.schemas.inventory import (
     InventoryItemBase,
     InventoryItemCreate,
@@ -78,4 +97,19 @@ __all__ = [
     "PolicyRuleBase",
     "PolicyRuleCreate",
     "PolicyRuleRead",
+    "AutonomyRuleResponse",
+    "AutonomyRuleUpdateRequest",
+    "AutonomyActionResponse",
+    "AutonomousExecutionRequest",
+    "AutonomousExecutionResponse",
+    "RollbackRequest",
+    "RollbackResponse",
+    "KillSwitchUpdateRequest",
+    "KillSwitchResponse",
+    "AutonomyStatusResponse",
+    "AutonomyActionType",
+    "AutonomyClassification",
+    "AutonomyActionStatus",
+    "RollbackStatus",
+    "AnomalyState",
 ]

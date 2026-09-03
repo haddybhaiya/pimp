@@ -12,7 +12,7 @@ def test_alembic_script_directory_and_head() -> None:
     script = ScriptDirectory.from_config(config)
 
     head = script.get_current_head()
-    assert head == "010_phase7_integrity"
+    assert head == "014_autonomy_failure_telemetry"
 
     revision = script.get_revision("001_initial_schema")
     assert revision is not None
@@ -54,6 +54,22 @@ def test_alembic_script_directory_and_head() -> None:
     assert integrity_revision is not None
     assert integrity_revision.down_revision == "009_merchant_agent_runs"
 
+    autonomy_revision = script.get_revision("011_phase8_controlled_autonomy")
+    assert autonomy_revision is not None
+    assert autonomy_revision.down_revision == "010_phase7_integrity"
+
+    autonomy_proposal_integrity = script.get_revision("012_autonomy_proposal_integrity")
+    assert autonomy_proposal_integrity is not None
+    assert autonomy_proposal_integrity.down_revision == "011_phase8_controlled_autonomy"
+
+    autonomy_proposal_delete = script.get_revision("013_autonomy_proposal_delete")
+    assert autonomy_proposal_delete is not None
+    assert autonomy_proposal_delete.down_revision == "012_autonomy_proposal_integrity"
+
+    autonomy_failure_telemetry = script.get_revision("014_autonomy_failure_telemetry")
+    assert autonomy_failure_telemetry is not None
+    assert autonomy_failure_telemetry.down_revision == "013_autonomy_proposal_delete"
+
 
 def test_merchant_run_downgrade_refuses_to_discard_merchant_scoped_runs() -> None:
     """Downgrade must preserve durable history rather than deleting merchant-only runs."""
@@ -78,3 +94,35 @@ def test_phase7_integrity_migration_adds_tenant_and_audit_linkage_constraints() 
     assert "uq_merchant_experiments_id_merchant" in migration_source
     assert "estimated_cost_paise" in migration_source
     assert "is_demo_sandbox_product" in migration_source
+
+
+def test_phase8_autonomy_proposal_links_are_tenant_coupled() -> None:
+    """Migration 012 must database-enforce action/proposal tenant ownership."""
+    migration_source = Path("alembic/versions/012_autonomy_proposal_tenant_integrity.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "uq_merchant_proposals_id_merchant" in migration_source
+    assert "fk_merchant_autonomy_actions_proposal_merchant" in migration_source
+    assert "cross-merchant autonomous action proposal links exist" in migration_source
+
+
+def test_phase8_proposal_deletion_preserves_autonomy_action_history() -> None:
+    """Migration 013 must clear only an optional proposal reference on delete."""
+    migration_source = Path("alembic/versions/013_autonomy_proposal_delete.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ON DELETE SET NULL (proposal_id)" in migration_source
+    assert '["proposal_id", "merchant_id"]' in migration_source
+
+
+def test_phase8_failure_telemetry_is_durable_and_tenant_scoped() -> None:
+    """Migration 014 must support the rolling autonomy failure circuit breaker."""
+    migration_source = Path("alembic/versions/014_autonomy_failure_telemetry.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "merchant_autonomy_failures" in migration_source
+    assert "ck_merchant_autonomy_failures_code_valid" in migration_source
+    assert "ix_merchant_autonomy_failures_merchant_created" in migration_source

@@ -76,3 +76,49 @@ sequenceDiagram
     Worker->>DB: COMMIT TRANSACTION
     Note over Worker,DB: Order state reconciled successfully
 ```
+
+---
+
+## 4. Controlled Autonomy Failure Modes & Recovery Sagas
+
+### 4.1 Master Kill Switch Trigger Saga
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Admin as Merchant Admin
+    participant Service as ControlledAutonomyService
+    participant DB as PostgreSQL
+    participant Audit as AuditEvent Ledger
+
+    Admin->>Service: POST /autonomy/kill-switch (enabled=True, reason)
+    Service->>DB: UPDATE merchants SET kill_switch_enabled=TRUE, version=version+1
+    Service->>Audit: Append AUTONOMY_KILL_SWITCH_TOGGLED
+    Service->>DB: SELECT * FROM merchant_experiments WHERE status='RUNNING'
+    loop For each running experiment
+        Service->>DB: UPDATE merchant_experiments SET status='STOPPED', stopping_condition['stopped_by_kill_switch']=TRUE
+        Service->>Audit: Append MERCHANT_EXPERIMENT_STOPPED
+    end
+    Service->>DB: COMMIT TRANSACTION
+    Note over Service,DB: All pending autonomous runs blocked; all active experiments safely halted
+```
+
+### 4.2 Optimistic Lock Version Conflict Failure
+- **Trigger:** Concurrent modification of target product/experiment by merchant human editor or concurrent worker between proposal formulation and autonomous execution.
+- **Handling:** Target version check `WHERE id = :target_id AND version = :expected_version` detects conflict.
+- **Resolution:** Transaction aborts immediately with `OptimisticLockError`. No domain mutation occurs, no ledger record is persisted, and request fails closed safely.
+
+### 4.3 Deterministic Rollback Conflict Rejection (Human Precedence)
+- **Trigger:** A human merchant modified the target product description or tags *after* an autonomous action was executed (`target.version > action.target_version_after`).
+- **Handling:** `rollback_action` checks whether the target entity was modified by an intervening human transaction.
+- **Resolution:** Rollback fails closed with `RollbackConflictError`. The action remains `EXECUTED` while its `rollback_status` transitions to `CONFLICT_REJECTED`, preserving the human merchant's edits without clobbering.
+
+### 4.4 Rate Limit, Quota & Cooldown Exhaustion
+- **Trigger:** Excessive autonomous executions attempting to exceed configured hourly limits (`hourly_count >= max_executions_per_hour`), daily limits (`daily_count >= max_executions_per_day`), or cooldown window (`elapsed < cooldown_seconds`).
+- **Handling:** Server queries committed ledger records in past 1 hour and 1 day.
+- **Resolution:** Rejects request fail-closed with `AutonomyExecutionError` detailing exhausted quota or remaining cooldown seconds. State remains unmutated.
+
+### 4.5 High Failure Anomaly Circuit Breaker
+- **Trigger:** 3 or more autonomous execution failures occur within the trailing 1-hour window.
+- **Handling:** Each rejected execution gate or optimistic-lock conflict rolls back its nested execution transaction, then appends a tenant-scoped `merchant_autonomy_failures` record and immutable `AUTONOMOUS_ACTION_REJECTED` audit event. `evaluate_anomaly_state` counts these durable records over the trailing hour.
+- **Resolution:** Subsequent autonomous execution attempts fail closed with `REQUIRE_HUMAN_REVIEW` while the rolling failure threshold is met. The state is intentionally derived rather than persisted, so it returns to `NORMAL` only after all qualifying failure records age out of the one-hour window.
+

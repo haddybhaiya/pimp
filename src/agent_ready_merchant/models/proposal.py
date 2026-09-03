@@ -16,6 +16,7 @@ from sqlalchemy import (
     Index,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -57,6 +58,7 @@ class MerchantProposal(Base, TimestampMixin, OptimisticLockMixin):
             "estimated_cost_paise >= 0",
             name="ck_merchant_proposals_estimated_cost_non_negative",
         ),
+        UniqueConstraint("id", "merchant_id", name="uq_merchant_proposals_id_merchant"),
         ForeignKeyConstraint(
             ["run_id", "merchant_id"],
             ["agent_runs.id", "agent_runs.merchant_id"],
