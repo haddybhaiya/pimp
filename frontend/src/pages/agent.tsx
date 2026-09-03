@@ -70,6 +70,11 @@ export const AgentPage: React.FC = () => {
     setExperimentTargetValue('');
   }, []);
 
+  const closeRollbackDialog = useCallback(() => {
+    setSelectedRollbackAction(null);
+    setRollbackReason('');
+  }, []);
+
   const fetchData = useCallback(async () => {
     const requestVersion = ++requestVersionRef.current;
     setIsLoading(true);
@@ -135,7 +140,18 @@ export const AgentPage: React.FC = () => {
     setErrorMessage(null);
     setSuccessMessage(null);
     try {
-      const res = await api.executeAutonomyAction(p.id, 1);
+      if (p.proposal_type === 'SUGGEST_BOUNDED_EXPERIMENT') {
+        throw new Error('Approved experiments are started from the Experiments page.');
+      }
+      const target = String(
+        p.metadata_payload.target_product_id ?? p.metadata_payload.product_id ?? p.target_entity
+      );
+      const products = await api.listProducts();
+      const product = products.find((item) => item.id === target || item.sku === target);
+      if (!product) {
+        throw new Error('The proposal target is no longer available for autonomous execution.');
+      }
+      const res = await api.executeAutonomyAction(p.id, product.version);
       setSuccessMessage(`Proposal executed autonomously: Action ID ${res.action.id.slice(0, 8)}.`);
       await fetchData();
     } catch (err: unknown) {
@@ -499,6 +515,7 @@ export const AgentPage: React.FC = () => {
               const canAutoExecute =
                 p.risk_level === 'LOW_RISK_REVERSIBLE' &&
                 isPending &&
+                p.proposal_type !== 'SUGGEST_BOUNDED_EXPERIMENT' &&
                 !autonomyStatus?.kill_switch_enabled;
 
               return (
@@ -764,7 +781,7 @@ export const AgentPage: React.FC = () => {
       {/* Rollback Confirmation Dialog */}
       <Dialog
         isOpen={selectedRollbackAction !== null}
-        onClose={() => setSelectedRollbackAction(null)}
+        onClose={closeRollbackDialog}
         title="Confirm Deterministic Rollback"
         description={`Roll back autonomous action "${selectedRollbackAction?.action_type}" on ${selectedRollbackAction?.target_entity_type}?`}
       >
@@ -787,7 +804,7 @@ export const AgentPage: React.FC = () => {
           </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" size="sm" onClick={() => setSelectedRollbackAction(null)}>
+          <Button variant="outline" size="sm" onClick={closeRollbackDialog}>
             Cancel
           </Button>
           <Button

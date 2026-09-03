@@ -46,6 +46,12 @@
    - Created `011_phase8_controlled_autonomy.py` adding `kill_switch_enabled` to merchants, `merchant_autonomy_rules`, and `merchant_autonomy_actions` with composite tenant constraints.
    - Verified by `test_alembic_migrations.py`.
 
+6. **Phase 8 execution-boundary follow-up (Resolved):**
+   - Rules provision disabled until explicit merchant-admin opt-in. Merchant, rule, proposal, target, and rollback rows are locked at the authoritative boundary, serializing kill-switch, quota, conflict, and version checks.
+   - Rejected and archived proposals are ineligible; execution no longer fabricates merchant approval. Bounded experiments must already be merchant-approved before entering `RUNNING`, and configured traffic exposure fails closed until deterministic routing exists.
+   - Rollback conflicts persist `CONFLICT_REJECTED` and an audit event before HTTP 409. The Agent page retrieves the current product version rather than posting a hard-coded version, and its rollback dialog uses a stable close callback.
+   - Verified by `test_new_merchants_are_not_implicitly_opted_into_autonomy`, `test_rejected_proposal_cannot_regain_execution_authority`, and `test_experiment_cannot_start_until_merchant_approval`.
+
 **Verified by:** `tests/test_phase8_controlled_autonomy.py` (16 passed), full pytest suite (305 passed), and frontend test suite (31 passed).
 
 ---

@@ -203,7 +203,7 @@ graph LR
 ## 5. Phase 8 Controlled Autonomy Verification Results Summary
 
 - **Total Backend Pytest Tests:** 305 passed, 3 skipped (live Razorpay sandbox / testmode)
-- **Phase 8 Dedicated Tests (`test_phase8_controlled_autonomy.py`):** 16 passed (100%)
+- **Phase 8 Dedicated Tests (`test_phase8_controlled_autonomy.py`):** 19 passed (100%)
 - **Total Frontend Vitest Tests:** 31 passed across 8 test files
 - **Frontend Production Build:** 100% clean TypeScript compilation and Vite bundling (`npm run build`)
 - **Ruff Lint & Format:** 100% clean across 153 files (0 errors)

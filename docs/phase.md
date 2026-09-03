@@ -93,6 +93,7 @@
   - Created `merchant_autonomy_actions` ledger with snapshot storage, composite foreign keys to `merchant_experiments(id, merchant_id)`, and idempotency indexing.
 - [x] **Authoritative 18-Precondition Gate Pipeline (`ControlledAutonomyService.execute_autonomous_action`):**
   - Pre-execution validation enforcing: (1) Actor authority, (2) Active merchant state, (3) Master kill-switch check, (4) Anomaly state evaluation, (5) Evidence-backed proposal existence and tenant ownership, (6) Typed action allowlist, (7) Rule enablement and `AUTO_LOW_RISK` classification, (8) Rule version & SHA-256 hash integrity, (9) Hourly rate limit budget, (10) Daily rate limit budget, (11) Cooldown period elapsed, (12) Target resource existence and tenant ownership, (13) Optimistic target version checking, (14) Pre-mutation JSON snapshot generation, (15) Idempotency claim receipt, (16) Target atomic domain mutation, (17) Ledger record persistence, (18) Cryptographic audit event append.
+  - Rules are provisioned disabled until an authenticated merchant administrator explicitly enables a typed action. Merchant, rule, proposal, target, and rollback rows are locked at the execution boundary to serialize kill-switch, quota, conflict, and target-version checks.
 - [x] **Master Kill Switch & Anomaly Controller:**
   - Fast-path kill-switch endpoint (`POST /api/v1/merchant/autonomy/kill-switch`) instantly blocking all autonomous mutations.
   - Safely halts all currently `RUNNING` experiments with `stopped_by_kill_switch: True` and appends immutable audit events.
@@ -100,6 +101,7 @@
 - [x] **Deterministic Reversible Rollback Engine (`rollback_action`):**
   - Reverts mutated resources back to exact pre-action snapshot state while asserting current target version equals expected post-action version.
   - Human Precedence Rule: If a human merchant modified the entity after autonomous execution, rollback fails closed with `RollbackConflictError` and records `rollback_status = CONFLICT_REJECTED`.
+  - The rejected conflict state and its audit event are committed before HTTP 409 is returned, so safety evidence is not lost to request rollback.
   - Idempotent: Repeated rollback calls return the cached rollback receipt safely.
 - [x] **Web Control Plane Integration:**
   - Master Kill Switch card on Agent page with live status indicator and emergency trigger.
@@ -107,7 +109,7 @@
   - Autonomous Actions Ledger on Agent page with snapshot inspector dialog and one-click deterministic rollback dialog.
   - Experiments workbench `AUTO_ELIGIBLE` badge, Stop Experiment, and Rollback Variation controls.
 - [x] **Comprehensive Test Suite & Quality Gate Compliance:**
-  - 16 dedicated integration tests in `tests/test_phase8_controlled_autonomy.py` covering authority boundaries, prohibited attacks, object-first intent, benign commerce preservation, ambiguous action failure, budget/cooldown enforcement, optimistic locking, kill switch pre-execution and running experiment halting, E2E Golden Path, rollback conflict rejection, tenant isolation, idempotency replay, and REST endpoints.
+  - 19 dedicated integration tests in `tests/test_phase8_controlled_autonomy.py` covering authority boundaries, prohibited attacks, explicit opt-in defaults, rejected-proposal execution blocking, approval-first experiment starts, budget/cooldown enforcement, optimistic locking, kill switch pre-execution and running experiment halting, E2E Golden Path, rollback conflict rejection, tenant isolation, idempotency replay, and REST endpoints.
   - 100% clean passes: 305 pytest tests passing, 31 frontend vitest tests passing, 0 Mypy errors across 141 source files, 0 Ruff errors.
 - [x] **Phase Stop Boundary Enforced:**
   - Project execution stopped cleanly after Phase 8. Phase 9 (Discovery Network) is strictly OUT OF SCOPE.
