@@ -12,7 +12,7 @@ def test_alembic_script_directory_and_head() -> None:
     script = ScriptDirectory.from_config(config)
 
     head = script.get_current_head()
-    assert head == "010_phase7_integrity"
+    assert head == "011_phase8_controlled_autonomy"
 
     revision = script.get_revision("001_initial_schema")
     assert revision is not None
@@ -53,6 +53,10 @@ def test_alembic_script_directory_and_head() -> None:
     integrity_revision = script.get_revision("010_phase7_integrity")
     assert integrity_revision is not None
     assert integrity_revision.down_revision == "009_merchant_agent_runs"
+
+    autonomy_revision = script.get_revision("011_phase8_controlled_autonomy")
+    assert autonomy_revision is not None
+    assert autonomy_revision.down_revision == "010_phase7_integrity"
 
 
 def test_merchant_run_downgrade_refuses_to_discard_merchant_scoped_runs() -> None:
