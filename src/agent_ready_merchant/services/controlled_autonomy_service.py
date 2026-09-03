@@ -666,6 +666,9 @@ class ControlledAutonomyService:
             if not product_id_str and proposal.target_entity:
                 product_id_str = proposal.target_entity
 
+            if not product_id_str:
+                raise AutonomyExecutionError("Proposal does not identify a target product.")
+
             target_prod_stmt = select(Product).where(Product.merchant_id == merchant_id)
             if product_id_str:
                 try:
@@ -1138,13 +1141,62 @@ class ControlledAutonomyService:
 
         assert receipt is not None
 
-        exp_stmt = select(MerchantExperiment).where(
-            MerchantExperiment.id == experiment_id,
-            MerchantExperiment.merchant_id == merchant_id,
+        exp_stmt = (
+            select(MerchantExperiment)
+            .where(
+                MerchantExperiment.id == experiment_id,
+                MerchantExperiment.merchant_id == merchant_id,
+            )
+            .with_for_update()
         )
         experiment = (await session.execute(exp_stmt)).scalar_one_or_none()
         if not experiment:
             raise ValueError(f"Experiment '{experiment_id}' not found for merchant.")
+
+        autonomy_action: MerchantAutonomyAction | None = None
+        if require_rollback:
+            action_stmt = (
+                select(MerchantAutonomyAction)
+                .where(
+                    MerchantAutonomyAction.merchant_id == merchant_id,
+                    MerchantAutonomyAction.experiment_id == experiment_id,
+                    MerchantAutonomyAction.target_entity_type == "merchant_experiment",
+                    MerchantAutonomyAction.status == AutonomyActionStatus.EXECUTED.value,
+                    MerchantAutonomyAction.rollback_status == RollbackStatus.AVAILABLE.value,
+                )
+                .order_by(MerchantAutonomyAction.created_at.desc())
+                .limit(1)
+                .with_for_update()
+            )
+            autonomy_action = (await session.execute(action_stmt)).scalar_one_or_none()
+
+        if autonomy_action is not None:
+            # Reuse the authoritative action rollback path so the target state,
+            # action ledger, idempotency receipt, and audit chain transition as
+            # one transaction.  The operation namespace makes the shared key
+            # safe alongside the enclosing experiment-stop receipt.
+            await cls.rollback_action(
+                session=session,
+                merchant_id=merchant_id,
+                action_id=autonomy_action.id,
+                expected_target_version=autonomy_action.target_version_after,
+                reason=reason,
+                idempotency_key=idempotency_key,
+                actor_id=actor_id,
+            )
+            response_body = {
+                "experiment_id": str(experiment_id),
+                "status": "ROLLED_BACK",
+                "reason": reason,
+                "autonomy_action_id": str(autonomy_action.id),
+                "message": "Experiment and its autonomous action were rolled back.",
+            }
+            await MerchantMutationIdempotencyService.complete(
+                session=session,
+                receipt=receipt,
+                response_body=response_body,
+            )
+            return response_body
 
         experiment.status = "ROLLED_BACK" if require_rollback else "STOPPED"
         experiment.version += 1

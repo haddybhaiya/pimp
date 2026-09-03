@@ -242,6 +242,11 @@ class MerchantAutonomyAction(Base, TimestampMixin, OptimisticLockMixin):
             name="ck_merchant_autonomy_actions_anomaly_state_valid",
         ),
         ForeignKeyConstraint(
+            ["proposal_id", "merchant_id"],
+            ["merchant_proposals.id", "merchant_proposals.merchant_id"],
+            name="fk_merchant_autonomy_actions_proposal_merchant",
+        ),
+        ForeignKeyConstraint(
             ["agent_run_id", "merchant_id"],
             ["agent_runs.id", "agent_runs.merchant_id"],
             name="fk_merchant_autonomy_actions_run_merchant",
@@ -273,7 +278,6 @@ class MerchantAutonomyAction(Base, TimestampMixin, OptimisticLockMixin):
     )
     proposal_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(),
-        ForeignKey("merchant_proposals.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
@@ -368,9 +372,17 @@ class MerchantAutonomyAction(Base, TimestampMixin, OptimisticLockMixin):
 
     # Relationships
     merchant: Mapped[Merchant] = relationship(
-        "Merchant", back_populates="autonomy_actions", overlaps="experiment"
+        "Merchant", back_populates="autonomy_actions", overlaps="experiment,proposal"
     )
-    proposal: Mapped[MerchantProposal | None] = relationship("MerchantProposal")
+    proposal: Mapped[MerchantProposal | None] = relationship(
+        "MerchantProposal",
+        primaryjoin=(
+            "and_(MerchantAutonomyAction.proposal_id == MerchantProposal.id, "
+            "MerchantAutonomyAction.merchant_id == MerchantProposal.merchant_id)"
+        ),
+        foreign_keys=[proposal_id, merchant_id],
+        overlaps="experiment,merchant",
+    )
     experiment: Mapped[MerchantExperiment | None] = relationship(
         "MerchantExperiment",
         primaryjoin=(
@@ -378,5 +390,5 @@ class MerchantAutonomyAction(Base, TimestampMixin, OptimisticLockMixin):
             "MerchantAutonomyAction.merchant_id == MerchantExperiment.merchant_id)"
         ),
         foreign_keys=[experiment_id, merchant_id],
-        overlaps="autonomy_actions,merchant",
+        overlaps="autonomy_actions,merchant,proposal",
     )

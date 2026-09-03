@@ -127,4 +127,5 @@ class Merchant(Base, TimestampMixin, OptimisticLockMixin):
         "MerchantAutonomyAction",
         back_populates="merchant",
         cascade="all, delete-orphan",
+        overlaps="proposal",
     )

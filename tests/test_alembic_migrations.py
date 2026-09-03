@@ -12,7 +12,7 @@ def test_alembic_script_directory_and_head() -> None:
     script = ScriptDirectory.from_config(config)
 
     head = script.get_current_head()
-    assert head == "011_phase8_controlled_autonomy"
+    assert head == "012_autonomy_proposal_integrity"
 
     revision = script.get_revision("001_initial_schema")
     assert revision is not None
@@ -58,6 +58,10 @@ def test_alembic_script_directory_and_head() -> None:
     assert autonomy_revision is not None
     assert autonomy_revision.down_revision == "010_phase7_integrity"
 
+    autonomy_proposal_integrity = script.get_revision("012_autonomy_proposal_integrity")
+    assert autonomy_proposal_integrity is not None
+    assert autonomy_proposal_integrity.down_revision == "011_phase8_controlled_autonomy"
+
 
 def test_merchant_run_downgrade_refuses_to_discard_merchant_scoped_runs() -> None:
     """Downgrade must preserve durable history rather than deleting merchant-only runs."""
@@ -82,3 +86,14 @@ def test_phase7_integrity_migration_adds_tenant_and_audit_linkage_constraints() 
     assert "uq_merchant_experiments_id_merchant" in migration_source
     assert "estimated_cost_paise" in migration_source
     assert "is_demo_sandbox_product" in migration_source
+
+
+def test_phase8_autonomy_proposal_links_are_tenant_coupled() -> None:
+    """Migration 012 must database-enforce action/proposal tenant ownership."""
+    migration_source = Path("alembic/versions/012_autonomy_proposal_tenant_integrity.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "uq_merchant_proposals_id_merchant" in migration_source
+    assert "fk_merchant_autonomy_actions_proposal_merchant" in migration_source
+    assert "cross-merchant autonomous action proposal links exist" in migration_source

@@ -632,6 +632,40 @@ async def test_stale_target_version_fails_closed(
     assert "version mismatch: expected 99, current 1" in str(exc_info.value)
 
 
+@pytest.mark.asyncio
+async def test_targetless_product_proposal_fails_closed(
+    db_session: AsyncSession, setup_merchants_and_catalog: dict[str, Any]
+) -> None:
+    """Product mutations require an explicit target and cannot select an arbitrary SKU."""
+    m1 = setup_merchants_and_catalog["m1"]
+    proposal = MerchantProposal(
+        merchant_id=m1.id,
+        proposal_type=AutonomyActionType.IMPROVE_PRODUCT_DESCRIPTION.value,
+        title="Targetless description update",
+        observation="Observation",
+        proposed_change="No product may be selected",
+        hypothesis="Hypothesis",
+        target_entity="",
+        expected_metric="conversion_rate",
+        expected_effect="+5%",
+        evidence=["ev_1"],
+        risk_level="LOW_RISK_REVERSIBLE",
+        status="PROPOSED",
+        metadata_payload={},
+    )
+    db_session.add(proposal)
+    await db_session.commit()
+
+    with pytest.raises(AutonomyExecutionError, match="does not identify a target product"):
+        await ControlledAutonomyService.execute_autonomous_action(
+            session=db_session,
+            merchant_id=m1.id,
+            proposal_id=proposal.id,
+            expected_target_version=1,
+            idempotency_key=f"targetless-{uuid.uuid4().hex}",
+        )
+
+
 # =============================================================================
 # 3. Kill Switch and Anomaly Handling
 # =============================================================================
@@ -722,6 +756,89 @@ async def test_kill_switch_stops_running_experiments_safely(
     await db_session.refresh(exp)
     assert exp.status == "STOPPED"
     assert exp.stopping_condition.get("stopped_by_kill_switch") is True
+
+
+@pytest.mark.asyncio
+async def test_experiment_rollback_reconciles_linked_autonomy_action(
+    db_session: AsyncSession, setup_merchants_and_catalog: dict[str, Any]
+) -> None:
+    """Experiment rollback delegates to the action rollback ledger when one exists."""
+    m1 = setup_merchants_and_catalog["m1"]
+    proposal = MerchantProposal(
+        merchant_id=m1.id,
+        proposal_type=AutonomyActionType.SUGGEST_BOUNDED_EXPERIMENT.value,
+        title="Autonomous experiment",
+        observation="Observation",
+        proposed_change="Expose delivery ETA",
+        hypothesis="Hypothesis",
+        target_entity="general",
+        expected_metric="conversion_rate",
+        expected_effect="+5%",
+        evidence=["ev_1"],
+        risk_level="LOW_RISK_REVERSIBLE",
+        status="PROPOSED",
+        metadata_payload={},
+    )
+    db_session.add(proposal)
+    await db_session.flush()
+    experiment = MerchantExperiment(
+        merchant_id=m1.id,
+        proposal_id=proposal.id,
+        title="Running autonomous experiment",
+        hypothesis="Hypothesis",
+        target_metric="conversion_rate",
+        baseline_value=0.0,
+        target_value=1.0,
+        proposed_variation={"description": "Expose delivery ETA"},
+        risk_level="LOW_RISK_REVERSIBLE",
+        status="RUNNING",
+        approval_status="APPROVED",
+        start_time=utc_now(),
+        version=2,
+    )
+    db_session.add(experiment)
+    await db_session.flush()
+    action = MerchantAutonomyAction(
+        merchant_id=m1.id,
+        proposal_id=proposal.id,
+        experiment_id=experiment.id,
+        action_type=AutonomyActionType.SUGGEST_BOUNDED_EXPERIMENT.value,
+        target_entity_type="merchant_experiment",
+        target_entity_id=experiment.id,
+        target_version_before=1,
+        target_version_after=2,
+        deterministic_classification=AutonomyClassification.AUTO_LOW_RISK.value,
+        autonomy_rule_hash="a" * 64,
+        autonomy_rule_version=1,
+        hourly_budget_consumed=1,
+        daily_budget_consumed=1,
+        status=AutonomyActionStatus.EXECUTED.value,
+        rollback_snapshot={"original_state": {"status": "APPROVED"}},
+        rollback_status=RollbackStatus.AVAILABLE.value,
+        anomaly_state=AnomalyState.NORMAL.value,
+        idempotency_key=f"experiment-action-{uuid.uuid4().hex}",
+    )
+    db_session.add(action)
+    await db_session.commit()
+
+    result = await ControlledAutonomyService.stop_experiment(
+        session=db_session,
+        merchant_id=m1.id,
+        experiment_id=experiment.id,
+        reason="Merchant requested experiment rollback",
+        require_rollback=True,
+        idempotency_key=f"experiment-rollback-{uuid.uuid4().hex}",
+        actor_id=m1.id,
+    )
+    await db_session.commit()
+
+    assert result["status"] == "ROLLED_BACK"
+    assert result["autonomy_action_id"] == str(action.id)
+    await db_session.refresh(action)
+    await db_session.refresh(experiment)
+    assert action.status == AutonomyActionStatus.ROLLED_BACK.value
+    assert action.rollback_status == RollbackStatus.ROLLED_BACK.value
+    assert experiment.status == "ROLLED_BACK"
 
 
 # =============================================================================
