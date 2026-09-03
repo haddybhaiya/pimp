@@ -60,3 +60,23 @@
 4. **Audit Cryptographic Integrity & Sanitization (INV-GOV-04):**  
    Every audit event must be linked in an unbroken cryptographic SHA-256 hash chain verified via `AuditEvent.verify_chain()`. All secrets, tokens, credentials, and buyer PII (email addresses) must be sanitized and masked before being committed to the immutable audit ledger.
 
+---
+
+## 5. Controlled Autonomy Invariants
+
+1. **Reversible Low-Risk Scope Exclusivity (INV-AUT-01):**  
+   Autonomous execution is strictly confined to 5 typed, reversible optimizations: `IMPROVE_PRODUCT_DESCRIPTION`, `IMPROVE_DISCOVERY_METADATA`, `REORDER_RECOMMENDATIONS`, `EXPOSE_DELIVERY_ETA`, `SUGGEST_BOUNDED_EXPERIMENT`. All other proposals require explicit human review or are rejected fail-closed.
+2. **Financial & Policy Immutability by Autonomous Agents (INV-AUT-02):**  
+   Autonomous agents cannot alter floor prices, modify profit margins, increase discount ceilings, alter transaction limits, change rule hashes, grant capabilities, or execute direct payments/refunds. Any such action is classified `PROHIBITED` and fails closed.
+3. **Deterministic 18-Precondition Gating (INV-AUT-03):**  
+   No autonomous mutation can occur without passing all 18 server-authoritative precondition checks sequentially (Actor Authority $\to$ Merchant State $\to$ Kill Switch $\to$ Anomaly State $\to$ Evidence Validation $\to$ Allowlist $\to$ Rule Classification $\to$ Rule Integrity Hash $\to$ Hourly Limit $\to$ Daily Limit $\to$ Cooldown $\to$ Resource Ownership $\to$ Optimistic Lock Version $\to$ Pre-mutation Snapshot $\to$ Idempotency Claim $\to$ Action Gateway Mutation $\to$ Ledger Persistence $\to$ Audit Logging).
+4. **Master Kill Switch Precedence (INV-AUT-04):**  
+   When the merchant master kill switch is activated (`kill_switch_enabled = True`), all pending autonomous executions are immediately rejected, and all active running experiments are safely stopped with `stopped_by_kill_switch: True`.
+5. **Deterministic Rollback & Human Precedence (INV-AUT-05):**  
+   Every autonomous action must store a lossless pre-mutation JSON snapshot. Rollback must restore that snapshot state version-checked. If a human merchant modified the entity after autonomous execution, rollback fails closed with `RollbackConflictError` and records `CONFLICT_REJECTED` status to guarantee human edits are never clobbered.
+6. **Rate Limit, Quota & Cooldown Bounding (INV-AUT-06):**  
+   Hourly budgets [1, 100], daily budgets [1, 1000], and cooldown durations [0, 86400s] are enforced server-side against committed ledger history. Any request exceeding rate limits or cooldown periods is rejected fail-closed.
+7. **Idempotency & Tenant Integrity (INV-AUT-07):**  
+   All autonomous executions and rollbacks require unique idempotency keys claimed via `MerchantMutationIdempotencyService`. Composite foreign keys enforce tenant isolation across merchants, proposals, actions, and experiments.
+
+

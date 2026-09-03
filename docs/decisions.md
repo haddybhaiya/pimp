@@ -274,6 +274,25 @@
   - *Positive:* Unlocks merchant-side AI optimization while maintaining airtight financial invariants, zero secret leakage, and full administrative control.
   - *Negative:* All proposals and experiments require human review and consent prior to production activation.
 
+---
+
+## ADR-021: Controlled Autonomy Architecture, Master Kill Switch, and Deterministic Reversible Rollback Engine
+
+- **Status:** ACCEPTED
+- **Context:** While Phase 7 established proposal formulation and approval-first experimentation, merchants require automated execution for explicitly configured, low-risk, reversible optimizations (e.g. improving search descriptions, exposing delivery ETA, reordering recommendations, updating discovery tags). However, autonomy must not bypass security, risk runaway budget consumption, clobber human merchant edits, or allow LLM prompt injection to elevate privileges or modify pricing.
+- **Decision:**
+  1. **Strict Allowed Action Allowlist:** Autonomous execution is restricted to 5 explicitly enumerated low-risk actions: `IMPROVE_PRODUCT_DESCRIPTION`, `IMPROVE_DISCOVERY_METADATA`, `REORDER_RECOMMENDATIONS`, `EXPOSE_DELIVERY_ETA`, `SUGGEST_BOUNDED_EXPERIMENT`.
+  2. **Zero Financial/Policy Mutation:** Financial authority, pricing floors, margins, rules, and capabilities remain strictly human-only. Any autonomous request attempting to modify financial parameters or escalate privileges is classified `PROHIBITED` and rejected fail-closed.
+  3. **Authoritative 18-Precondition Gate Pipeline:** Execution must pass sequentially through 18 deterministic server-side gates: actor authority, merchant active state, master kill switch, anomaly check, proposal evidence validation, typed allowlist, rule enablement and `AUTO_LOW_RISK` classification, rule hash integrity, hourly budget, daily budget, cooldown period, target resource existence and tenant ownership, optimistic version check, pre-mutation JSON snapshot generation, idempotency claim, target domain mutation, action ledger commit, and immutable audit event logging.
+  4. **Master Kill Switch:** Immediate server-authoritative toggle (`kill_switch_enabled`) that blocks all pending autonomous actions instantly and halts all running experiments safely with `stopped_by_kill_switch: True`.
+  5. **Deterministic Reversible Rollback & Human Precedence:** Every autonomous execution records a complete pre-mutation snapshot. Rollback restores the snapshot state version-checked. If a human merchant modified the entity after autonomous execution, rollback fails closed with `RollbackConflictError` and transitions to `CONFLICT_REJECTED` to prevent clobbering human edits.
+  6. **Rate Limiting & Quotas:** Enforces per-rule hourly limits [1, 100], daily limits [1, 1000], and cooldown periods [0, 86400s] verified directly via database counts.
+  7. **Tenant Isolation & Idempotency:** Composite foreign keys `(experiment_id, merchant_id)` prevent cross-tenant linkage; `MerchantMutationIdempotencyService` guarantees single execution and safe replays.
+- **Consequences:**
+  - *Positive:* Safe, bounded autonomous store optimization with zero risk to financial boundaries, instant kill-switch control, and guaranteed reversible state snapshots.
+  - *Negative:* Autonomous actions cannot alter pricing or financial parameters directly; requires maintenance of pre-mutation snapshots in database.
+
+
 
 
 

@@ -14,6 +14,40 @@
 
 **Verified by:** `tests/test_phase7_merchant_agent.py` and `tests/test_alembic_migrations.py`.
 
+
+---
+
+# Phase 8 Controlled Autonomy & Governance Hardening — Review & Remediation Log
+
+> **Reviewed on:** 2026-09-03  
+> **Scope:** Phase 8 Controlled Autonomy, entry gate governance hardening, master kill-switch, deterministic rollback engine, and human precedence safeguards.  
+> **Status:** **RESOLVED & VERIFIED**
+
+1. **Object-First Actions Governance (Resolved):**
+   - Normalized structured scalar matching now detects both verb-first (`change policy`, `increase autonomy`) and object-first patterns (`autonomy increase`, `policy override`, `capability grant`, `permission change`, `floor price change`).
+   - Recursively screens both `metadata` and `metadata_payload` structured action envelopes.
+   - Ambiguous and malformed structured action payloads fail closed to `PROHIBITED`.
+   - Verified by `test_object_first_and_inflected_actions_classified_prohibited` and `test_ambiguous_and_malformed_actions_fail_closed`.
+
+2. **Controlled Autonomy Rate Limiting & Cooldowns:**
+   - Implemented `ControlledAutonomyService.check_budget_and_cooldown` asserting hourly limits, daily limits, and non-negative cooldown periods fail-closed before execution.
+   - Verified by `test_budget_exhaustion_hourly_and_daily_fail_closed` and `test_cooldown_violations_fail_closed`.
+
+3. **Master Kill Switch Immediacy:**
+   - Enabling kill switch immediately prevents subsequent autonomous actions from executing and safely halts active running experiments with `stopped_by_kill_switch: True` and audit event logging.
+   - Verified by `test_kill_switch_blocks_pre_execution` and `test_kill_switch_stops_running_experiments_safely`.
+
+4. **Deterministic Reversible Rollback & Human Precedence:**
+   - Pre-mutation snapshot stored on every action.
+   - Reverts state version-checked; if human merchant modified entity post-execution (`current_version > action.target_version_after`), rollback fails closed with `RollbackConflictError` and records `CONFLICT_REJECTED`.
+   - Verified by `test_e2e_golden_path_scenario` and `test_rollback_after_human_modification_fails_closed`.
+
+5. **Migration 011:**
+   - Created `011_phase8_controlled_autonomy.py` adding `kill_switch_enabled` to merchants, `merchant_autonomy_rules`, and `merchant_autonomy_actions` with composite tenant constraints.
+   - Verified by `test_alembic_migrations.py`.
+
+**Verified by:** `tests/test_phase8_controlled_autonomy.py` (16 passed), full pytest suite (305 passed), and frontend test suite (31 passed).
+
 ---
 
 # Service, Telemetry, and Replay-Safety Follow-up Remediation Log

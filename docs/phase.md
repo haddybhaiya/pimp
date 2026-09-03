@@ -1,8 +1,9 @@
 # Phase Status & Roadmap: Agent-Ready Merchant
 
-> **Current Phase:** Phase 7 (Merchant Agent — Intelligence & Optimization Layer)  
+> **Current Phase:** Phase 8 (Controlled Autonomy)  
 > **Status:** 100% COMPLETED & SIGNED OFF  
-> **Milestone Status:** Phase 1–5 Complete, Phase 6 Skipped (Satisfied), Phase 7 Complete
+> **Milestone Status:** Phases 1–5 Complete, Phase 6 Skipped (Satisfied), Phase 7 Complete, Phase 8 Complete  
+> **Next Scope Cut Line:** Phase 8 is the final phase of this project. Phase 9 (Discovery Network) is strictly OUT OF SCOPE.
 
 ---
 
@@ -30,6 +31,8 @@
 | **Phase 5.3** | Demo Sandbox & Integration Hardening | **COMPLETED** | Interactive simulation sandbox (`/demo`), standard auto commerce, HITL escalation workbench, payment reconciliation, adversarial attack defense matrix |
 | **Phase 6** | Autonomous Negotiation Layer | **SKIPPED — FUNCTIONALITY SATISFIED BY EARLIER PHASES** | Counter-offer evaluation, floor price enforcement, margin protections, and HITL escalations fully implemented and verified in Phases 1–5 |
 | **Phase 7** | Merchant Agent (Intelligence & Optimization Layer) | **COMPLETED** | Live commerce observation matrix, diagnostic finding engine, evidence-backed proposal generation, server risk governance, approval-first experiment framework, deterministic measurement |
+| **Phase 8** | Controlled Autonomy | **COMPLETED** | Low-risk reversible optimizations (`IMPROVE_PRODUCT_DESCRIPTION`, `IMPROVE_DISCOVERY_METADATA`, `REORDER_RECOMMENDATIONS`, `EXPOSE_DELIVERY_ETA`, `SUGGEST_BOUNDED_EXPERIMENT`), Master Kill Switch, 18 pre-condition gates, rate limits & cooldowns, deterministic rollback engine |
+| **Phase 9** | Discovery Network | **OUT OF SCOPE** | DO NOT IMPLEMENT. Strictly out of scope. |
 
 ---
 
@@ -74,3 +77,37 @@
 - [x] **Comprehensive Test Suite & Quality Gate Compliance:**
   - 18 comprehensive tests in `tests/test_phase7_merchant_agent.py` covering multi-tenant scoping, evidence validation, adversarial prompt injection safety, proposal governance, deterministic experiment evaluation, bounded windows, replay-safe mutations, and historical conversion cohorts.
   - 100% clean passes on Ruff, Mypy strict, Vitest, and Pytest.
+
+---
+
+## Phase 8 Deliverables Completed
+
+- [x] **Entry Gate Governance Hardening (`MerchantAgentService.govern_and_classify_proposal`):**
+  - Prohibits hidden financial, policy, and authority escalation attacks across scalar, list, and nested object fields.
+  - Detects object-first actions (e.g. `autonomy_increase`, `policy_override`, `capability_grant`), direct action values, and inflected verb-object phrases.
+  - Evaluates both `metadata` and `metadata_payload` structured action envelopes fail-closed.
+  - Preserves reviewability of legitimate commerce terms (`loyalty credits`, `shipping charges`, `refundable`, `credit score`, `delivery policy description`).
+- [x] **Database Models & Alembic Migration 011 (`011_phase8_controlled_autonomy.py`):**
+  - Added `merchants.kill_switch_enabled` boolean column.
+  - Created `merchant_autonomy_rules` table with deterministic SHA-256 rule hashing, unique composite constraints `(merchant_id, action_type)`, hourly limit bounds [1, 100], and daily limit bounds [1, 1000].
+  - Created `merchant_autonomy_actions` ledger with snapshot storage, composite foreign keys to `merchant_experiments(id, merchant_id)`, and idempotency indexing.
+- [x] **Authoritative 18-Precondition Gate Pipeline (`ControlledAutonomyService.execute_autonomous_action`):**
+  - Pre-execution validation enforcing: (1) Actor authority, (2) Active merchant state, (3) Master kill-switch check, (4) Anomaly state evaluation, (5) Evidence-backed proposal existence and tenant ownership, (6) Typed action allowlist, (7) Rule enablement and `AUTO_LOW_RISK` classification, (8) Rule version & SHA-256 hash integrity, (9) Hourly rate limit budget, (10) Daily rate limit budget, (11) Cooldown period elapsed, (12) Target resource existence and tenant ownership, (13) Optimistic target version checking, (14) Pre-mutation JSON snapshot generation, (15) Idempotency claim receipt, (16) Target atomic domain mutation, (17) Ledger record persistence, (18) Cryptographic audit event append.
+- [x] **Master Kill Switch & Anomaly Controller:**
+  - Fast-path kill-switch endpoint (`POST /api/v1/merchant/autonomy/kill-switch`) instantly blocking all autonomous mutations.
+  - Safely halts all currently `RUNNING` experiments with `stopped_by_kill_switch: True` and appends immutable audit events.
+  - Anomaly state detection (`EVALUATE_ANOMALY_STATE`) shifting to `REQUIRE_HUMAN_REVIEW` upon high execution failure rates ($\ge 3$ failures/hour).
+- [x] **Deterministic Reversible Rollback Engine (`rollback_action`):**
+  - Reverts mutated resources back to exact pre-action snapshot state while asserting current target version equals expected post-action version.
+  - Human Precedence Rule: If a human merchant modified the entity after autonomous execution, rollback fails closed with `RollbackConflictError` and records `rollback_status = CONFLICT_REJECTED`.
+  - Idempotent: Repeated rollback calls return the cached rollback receipt safely.
+- [x] **Web Control Plane Integration:**
+  - Master Kill Switch card on Agent page with live status indicator and emergency trigger.
+  - Controlled Autonomy Execution Rules management card on Policies page with toggle and limit views.
+  - Autonomous Actions Ledger on Agent page with snapshot inspector dialog and one-click deterministic rollback dialog.
+  - Experiments workbench `AUTO_ELIGIBLE` badge, Stop Experiment, and Rollback Variation controls.
+- [x] **Comprehensive Test Suite & Quality Gate Compliance:**
+  - 16 dedicated integration tests in `tests/test_phase8_controlled_autonomy.py` covering authority boundaries, prohibited attacks, object-first intent, benign commerce preservation, ambiguous action failure, budget/cooldown enforcement, optimistic locking, kill switch pre-execution and running experiment halting, E2E Golden Path, rollback conflict rejection, tenant isolation, idempotency replay, and REST endpoints.
+  - 100% clean passes: 305 pytest tests passing, 31 frontend vitest tests passing, 0 Mypy errors across 141 source files, 0 Ruff errors.
+- [x] **Phase Stop Boundary Enforced:**
+  - Project execution stopped cleanly after Phase 8. Phase 9 (Discovery Network) is strictly OUT OF SCOPE.

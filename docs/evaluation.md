@@ -198,3 +198,26 @@ graph LR
 - **Frontend gate:** `npm test` passes 31 tests; `npm run build` passes. Vite reports only the existing large-chunk advisory.
 - **Focused regressions:** 38 portal/demo/Phase 7/migration tests pass, including tenant-linked records, server-owned demo provenance, stable audit cursors, safe malformed model output, and idempotent Phase 7 mutations.
 
+---
+
+## 5. Phase 8 Controlled Autonomy Verification Results Summary
+
+- **Total Backend Pytest Tests:** 305 passed, 3 skipped (live Razorpay sandbox / testmode)
+- **Phase 8 Dedicated Tests (`test_phase8_controlled_autonomy.py`):** 16 passed (100%)
+- **Total Frontend Vitest Tests:** 31 passed across 8 test files
+- **Frontend Production Build:** 100% clean TypeScript compilation and Vite bundling (`npm run build`)
+- **Ruff Lint & Format:** 100% clean across 153 files (0 errors)
+- **Mypy Static Typing:** 100% strict compliance across 141 files (0 issues)
+- **Alembic Migration Chain:** Migration 011 (`011_phase8_controlled_autonomy.py`) verified head (`tests/test_alembic_migrations.py` passed)
+- **Key Invariants Verified:**
+  - `INV-AUT-01` (Scope Exclusivity): Autonomous execution limited strictly to allowed 5 reversible actions.
+  - `INV-AUT-02` (Financial/Policy Immutability): Non-admin actors cannot modify rules; agent cannot alter floor prices, discounts, or policies.
+  - `INV-AUT-03` (18-Precondition Gating): Validated complete sequential execution pipeline before committing mutations.
+  - `INV-AUT-04` (Master Kill Switch): Verified instant pre-execution blocking and safe halting of running experiments.
+  - `INV-AUT-05` (Deterministic Rollback & Human Precedence): Verified version-checked snapshot revert and `CONFLICT_REJECTED` rejection when human merchant modified target.
+  - `INV-AUT-06` (Budget & Cooldown Enforcement): Verified hourly rate limits, daily rate limits, and non-negative cooldown periods fail-closed.
+  - `INV-AUT-07` (Multi-Tenant Isolation & Idempotency): Verified cross-tenant isolation and safe replay of mutation idempotency keys.
+- **Phase Gate Status:** **PASS (100% SIGNED OFF)**
+- **Scope Cut Line:** Execution halts at Phase 8 completion. Phase 9 (Discovery Network) is strictly OUT OF SCOPE.
+
+

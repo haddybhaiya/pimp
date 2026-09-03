@@ -158,6 +158,17 @@
 - **FAILURE IF WRONG:** A cross-tenant proposal/result link, duplicate experiment mutation, or caller-labelled live product could corrupt merchant reporting, inventory, or audit history.
 - **MITIGATION:** Composite foreign keys bind proposal runs and experiment results to the same merchant; `products.is_demo_sandbox_product` is a server-only column populated only for canonical seeded SKUs; Phase 7 POST handlers use merchant-scoped idempotency receipts; and audit history pages by stable `(created_at, id)` cursors.
 
+---
+
+### 17. Controlled Autonomy Rate-Limiting, Kill Switch, and Deterministic Rollback Reversibility
+- **ASSUMPTION:** Autonomous agent execution on live store resources is safe ONLY when confined to reversible low-risk actions, bounded by strict hourly and daily rate limits, instantly halt-able via a merchant master kill switch, and reversible to pre-mutation states without clobbering intervening human merchant edits.
+- **EVIDENCE:** Verified via `tests/test_phase8_controlled_autonomy.py` (all 16 security, budget, cooldown, kill switch, E2E golden path, rollback conflict rejection, and tenant isolation tests passing deterministically).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Rogue agent execution could flood store changes, clobber human edits, alter live pricing, or persist harmful catalog modifications without an emergency stop or recovery path.
+- **MITIGATION:** 18-precondition deterministic gate pipeline; server-authoritative master kill switch with instant execution blocking and safe running experiment stopping; pre-mutation JSON snapshots; optimistic locking with `RollbackConflictError` when target version exceeds expected rollback version; and human-only administrative authority over rules and budgets.
+
+
 
 
 
