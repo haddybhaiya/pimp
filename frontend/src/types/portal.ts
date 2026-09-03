@@ -28,6 +28,7 @@ export interface ProductItem {
   is_negotiable: boolean;
   is_active: boolean;
   attributes: Record<string, unknown>;
+  version: number;
   created_at: string;
   available_stock: number;
   reserved_stock: number;

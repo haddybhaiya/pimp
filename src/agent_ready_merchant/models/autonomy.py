@@ -91,6 +91,7 @@ def compute_autonomy_rule_hash(rule_data: dict[str, Any]) -> str:
         "max_executions_per_day": int(rule_data.get("max_executions_per_day", 0)),
         "cooldown_seconds": int(rule_data.get("cooldown_seconds", 0)),
         "experiment_duration_limit_days": int(rule_data.get("experiment_duration_limit_days", 0)),
+        "experiment_exposure_limit": rule_data.get("experiment_exposure_limit"),
         "rollback_required": bool(rule_data.get("rollback_required", True)),
         "approval_required": bool(rule_data.get("approval_required", False)),
         "policy_version": int(rule_data.get("policy_version", 1)),

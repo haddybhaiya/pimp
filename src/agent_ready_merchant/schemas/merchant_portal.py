@@ -52,6 +52,7 @@ class ProductItemResponse(BaseModel):
     is_negotiable: bool
     is_active: bool
     attributes: dict[str, Any] = Field(default_factory=dict)
+    version: int = Field(..., ge=1)
     created_at: datetime
     available_stock: int = Field(default=0, ge=0)
     reserved_stock: int = Field(default=0, ge=0)

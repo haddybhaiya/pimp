@@ -2002,7 +2002,14 @@ def create_app() -> FastAPI:
             return RollbackResponse.model_validate(result)
         except IdempotencyConflictError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-        except (OptimisticLockError, RollbackConflictError) as exc:
+        except RollbackConflictError as exc:
+            # The service deliberately records a conflict-rejected ledger state
+            # and audit event before signalling the 409. Persist that durable
+            # safety outcome instead of allowing the request dependency to roll
+            # it back with the error response.
+            await db.commit()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except OptimisticLockError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except AutonomyExecutionError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

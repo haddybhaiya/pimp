@@ -47,6 +47,7 @@ describe('Phase 5.2 Merchant Control Plane Views Tests', () => {
         is_negotiable: true,
         is_active: true,
         attributes: {},
+        version: 1,
         created_at: new Date().toISOString(),
         available_stock: 15,
         reserved_stock: 0,
