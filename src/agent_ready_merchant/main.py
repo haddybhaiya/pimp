@@ -1713,6 +1713,373 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
+    # =========================================================================
+    # Phase 8: Controlled Autonomy & Deterministic Rollback Endpoints
+    # =========================================================================
+    from datetime import timedelta
+
+    from sqlalchemy import func
+
+    from agent_ready_merchant.db.base import utc_now
+    from agent_ready_merchant.models.autonomy import MerchantAutonomyAction
+    from agent_ready_merchant.schemas.controlled_autonomy import (
+        AutonomousExecutionRequest,
+        AutonomousExecutionResponse,
+        AutonomyActionResponse,
+        AutonomyRuleResponse,
+        AutonomyRuleUpdateRequest,
+        AutonomyStatusResponse,
+        KillSwitchResponse,
+        KillSwitchUpdateRequest,
+        RollbackRequest,
+        RollbackResponse,
+    )
+    from agent_ready_merchant.services.controlled_autonomy_service import (
+        AutonomyExecutionError,
+        AutonomySecurityError,
+        ControlledAutonomyService,
+        OptimisticLockError,
+        RollbackConflictError,
+    )
+
+    @app.get(
+        "/api/v1/merchant/autonomy/status",
+        summary="Retrieve Autonomy Engine Status, Kill Switch, and Anomaly State",
+        tags=["Controlled Autonomy"],
+        response_model=AutonomyStatusResponse,
+    )
+    async def get_autonomy_status_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> AutonomyStatusResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        merchant = (
+            await db.execute(select(Merchant).where(Merchant.id == x_merchant_id))
+        ).scalar_one_or_none()
+        kill_switch = merchant.kill_switch_enabled if merchant else False
+
+        anomaly_state, anomaly_reasons = await ControlledAutonomyService.evaluate_anomaly_state(
+            session=db, merchant_id=x_merchant_id
+        )
+        rules = await ControlledAutonomyService.get_or_create_default_rules(db, x_merchant_id)
+
+        now = utc_now()
+        one_hour_ago = now - timedelta(hours=1)
+        one_day_ago = now - timedelta(days=1)
+
+        stmt_hour = select(func.count(MerchantAutonomyAction.id)).where(
+            MerchantAutonomyAction.merchant_id == x_merchant_id,
+            MerchantAutonomyAction.created_at >= one_hour_ago,
+            MerchantAutonomyAction.status != "FAILED",
+        )
+        hourly_count = (await db.execute(stmt_hour)).scalar() or 0
+
+        stmt_day = select(func.count(MerchantAutonomyAction.id)).where(
+            MerchantAutonomyAction.merchant_id == x_merchant_id,
+            MerchantAutonomyAction.created_at >= one_day_ago,
+            MerchantAutonomyAction.status != "FAILED",
+        )
+        daily_count = (await db.execute(stmt_day)).scalar() or 0
+
+        stmt_actions = (
+            select(MerchantAutonomyAction)
+            .where(MerchantAutonomyAction.merchant_id == x_merchant_id)
+            .order_by(MerchantAutonomyAction.created_at.desc())
+            .limit(10)
+        )
+        recent_actions = list((await db.execute(stmt_actions)).scalars().all())
+
+        return AutonomyStatusResponse(
+            merchant_id=x_merchant_id,
+            kill_switch_enabled=kill_switch,
+            anomaly_state=anomaly_state,
+            anomaly_reasons=anomaly_reasons,
+            hourly_executions_count=hourly_count,
+            daily_executions_count=daily_count,
+            recent_actions=[AutonomyActionResponse.model_validate(a) for a in recent_actions],
+            rules=[AutonomyRuleResponse.model_validate(r) for r in rules],
+        )
+
+    @app.post(
+        "/api/v1/merchant/autonomy/kill-switch",
+        summary="Toggle Merchant Master Autonomy Kill Switch",
+        tags=["Controlled Autonomy"],
+        response_model=KillSwitchResponse,
+    )
+    async def toggle_kill_switch_endpoint(
+        request: KillSwitchUpdateRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> KillSwitchResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            merchant = await ControlledAutonomyService.set_kill_switch(
+                session=db,
+                merchant_id=x_merchant_id,
+                enabled=request.enabled,
+                actor_type="MERCHANT_ADMIN",
+                actor_id=x_merchant_id,
+                reason=request.reason,
+            )
+            await db.commit()
+            return KillSwitchResponse(
+                kill_switch_enabled=merchant.kill_switch_enabled,
+                merchant_id=merchant.id,
+                updated_at=merchant.updated_at,
+            )
+        except AutonomySecurityError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/merchant/autonomy/rules",
+        summary="List Merchant Autonomy Rules",
+        tags=["Controlled Autonomy"],
+        response_model=list[AutonomyRuleResponse],
+    )
+    async def list_autonomy_rules_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> list[AutonomyRuleResponse]:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        rules = await ControlledAutonomyService.get_or_create_default_rules(db, x_merchant_id)
+        return [AutonomyRuleResponse.model_validate(r) for r in rules]
+
+    @app.put(
+        "/api/v1/merchant/autonomy/rules/{action_type}",
+        summary="Update Autonomy Rule Configuration",
+        tags=["Controlled Autonomy"],
+        response_model=AutonomyRuleResponse,
+    )
+    async def update_autonomy_rule_endpoint(
+        action_type: str,
+        request: AutonomyRuleUpdateRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> AutonomyRuleResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            rule = await ControlledAutonomyService.update_autonomy_rule(
+                session=db,
+                merchant_id=x_merchant_id,
+                action_type=action_type,
+                req=request,
+                actor_type="MERCHANT_ADMIN",
+                actor_id=x_merchant_id,
+            )
+            await db.commit()
+            return AutonomyRuleResponse.model_validate(rule)
+        except AutonomySecurityError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except OptimisticLockError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/merchant/autonomy/actions",
+        summary="List Autonomous Action Ledger Records",
+        tags=["Controlled Autonomy"],
+        response_model=list[AutonomyActionResponse],
+    )
+    async def list_autonomy_actions_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        limit: int = 50,
+        offset: int = 0,
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> list[AutonomyActionResponse]:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        stmt = (
+            select(MerchantAutonomyAction)
+            .where(MerchantAutonomyAction.merchant_id == x_merchant_id)
+            .order_by(MerchantAutonomyAction.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        actions = list((await db.execute(stmt)).scalars().all())
+        return [AutonomyActionResponse.model_validate(a) for a in actions]
+
+    @app.get(
+        "/api/v1/merchant/autonomy/actions/{action_id}",
+        summary="Get Single Autonomous Action Record with Snapshot",
+        tags=["Controlled Autonomy"],
+        response_model=AutonomyActionResponse,
+    )
+    async def get_autonomy_action_endpoint(
+        action_id: uuid.UUID,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> AutonomyActionResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        stmt = select(MerchantAutonomyAction).where(
+            MerchantAutonomyAction.id == action_id,
+            MerchantAutonomyAction.merchant_id == x_merchant_id,
+        )
+        action = (await db.execute(stmt)).scalar_one_or_none()
+        if not action:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Action not found.")
+        return AutonomyActionResponse.model_validate(action)
+
+    @app.post(
+        "/api/v1/merchant/autonomy/execute",
+        summary="Execute Approved/Auto-Eligible Proposal Autonomously",
+        tags=["Controlled Autonomy"],
+        response_model=AutonomousExecutionResponse,
+    )
+    async def execute_autonomous_action_endpoint(
+        request: AutonomousExecutionRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> AutonomousExecutionResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            result = await ControlledAutonomyService.execute_autonomous_action(
+                session=db,
+                merchant_id=x_merchant_id,
+                proposal_id=request.proposal_id,
+                expected_target_version=request.expected_target_version,
+                idempotency_key=x_idempotency_key,
+                actor_id=x_merchant_id,
+            )
+            await db.commit()
+            return AutonomousExecutionResponse.model_validate(result)
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except OptimisticLockError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except AutonomyExecutionError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/merchant/autonomy/actions/{action_id}/rollback",
+        summary="Deterministically Roll Back an Autonomous Action",
+        tags=["Controlled Autonomy"],
+        response_model=RollbackResponse,
+    )
+    async def rollback_autonomous_action_endpoint(
+        action_id: uuid.UUID,
+        request: RollbackRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> RollbackResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            result = await ControlledAutonomyService.rollback_action(
+                session=db,
+                merchant_id=x_merchant_id,
+                action_id=action_id,
+                expected_target_version=request.expected_target_version,
+                reason=request.reason,
+                idempotency_key=x_idempotency_key,
+                actor_id=x_merchant_id,
+            )
+            await db.commit()
+            return RollbackResponse.model_validate(result)
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except (OptimisticLockError, RollbackConflictError) as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except AutonomyExecutionError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/merchant/experiments/{experiment_id}/stop",
+        summary="Stop Running Experiment",
+        tags=["Merchant Experiments"],
+    )
+    async def stop_experiment_endpoint(
+        experiment_id: uuid.UUID,
+        payload: dict[str, Any],
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        reason = str(payload.get("reason", "Human merchant requested stop"))
+        require_rollback = bool(payload.get("require_rollback", False))
+        try:
+            result = await ControlledAutonomyService.stop_experiment(
+                session=db,
+                merchant_id=x_merchant_id,
+                experiment_id=experiment_id,
+                reason=reason,
+                require_rollback=require_rollback,
+                idempotency_key=x_idempotency_key,
+                actor_id=x_merchant_id,
+            )
+            await db.commit()
+            return result
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/merchant/experiments/{experiment_id}/rollback",
+        summary="Roll Back Running/Completed Experiment",
+        tags=["Merchant Experiments"],
+    )
+    async def rollback_experiment_endpoint(
+        experiment_id: uuid.UUID,
+        payload: dict[str, Any],
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        x_idempotency_key: str = Header(
+            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        reason = str(payload.get("reason", "Human merchant requested rollback"))
+        try:
+            result = await ControlledAutonomyService.stop_experiment(
+                session=db,
+                merchant_id=x_merchant_id,
+                experiment_id=experiment_id,
+                reason=reason,
+                require_rollback=True,
+                idempotency_key=x_idempotency_key,
+                actor_id=x_merchant_id,
+            )
+            await db.commit()
+            return result
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
     return app
 
 
