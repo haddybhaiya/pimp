@@ -135,6 +135,7 @@
   - Extended ACP Protocol Adapter with `discovery_search` and `get_public_profile` actions.
 - [x] **Deterministic Matching & Explainable Ranking Engine:**
   - Filtering by currency, capability requirements, bounded delivery region, public product SKU, attributes, authoritative available inventory, and integer paise budget.
+  - Bounded cursor pagination (1-50 merchant candidates per page) and at most 20 public product summaries per merchant; a continuation cursor advances through deterministic slug order.
   - Integer budget multiplication overflow protection (`min_price * qty <= budget_paise`).
   - Strict search keyword treatment: Prompt injection payloads are evaluated purely as literal search keywords, never instructions.
   - Explainable reason codes (`WITHIN_BUDGET`, `IN_STOCK`, `DELIVERY_SUPPORTED`, `CAPABILITY_MATCH`, `MATCH_EXACT_ATTRIBUTES`, `NEGOTIATION_SUPPORTED`, `PROFILE_COMPLETE`).
@@ -147,5 +148,6 @@
 - [x] **Comprehensive Test Suite & Quality Gate Compliance:**
   - Focused discovery tests cover anti-probing, opaque identifier projection, inventory-aware matching, prompt injection immunity, budget overflow guards, fail-closed capability/region filtering, ACP/REST discovery, public-to-gateway handoff telemetry, and control-plane optimistic concurrency.
   - Full backend regression suite, 31 frontend Vitest tests, Mypy, and Ruff are rerun for every Phase 9 remediation before merge.
+  - Discovery handoff retries replay one durable buyer-session response per merchant/idempotency key without persisting a server-generated raw buyer token.
 - [x] **Final Project Completion & Sign-off:**
   - Phase 9 is the final authorized phase of the Agent-Ready Merchant roadmap. All 9 phases are completed and fully verified. STOP all further implementation.

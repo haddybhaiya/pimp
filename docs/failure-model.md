@@ -156,4 +156,9 @@ sequenceDiagram
 - **Handling:** `DiscoveryService.record_telemetry` catches `IntegrityError` on the composite unique index `(merchant_id, event_type, correlation_id)` in `merchant_discovery_telemetry`.
 - **Resolution:** Silently ignores the duplicate insert, rolls back the sub-transaction savepoint, and logs a debug event. Telemetry metrics remain accurate without duplicate inflation.
 
+### 5.6 Bounded Discovery Search and Handoff Retry
+- **Trigger:** A public caller requests a broad discovery search or retries a handoff after losing the first response.
+- **Handling:** Discovery evaluates one deterministic cursor page (at most 50 merchant candidates and 20 public product summaries per merchant) and returns a continuation cursor when more candidates remain. Handoff claims a merchant-scoped durable idempotency receipt before session creation.
+- **Resolution:** Broad requests cannot load an unbounded merchant result set. A matching handoff replay returns the original session identifier without minting another session or replaying a server-generated raw buyer token.
+
 

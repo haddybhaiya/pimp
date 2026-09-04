@@ -976,3 +976,54 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 - Resolved: ACP discovery actions dispatch through the typed, read-only discovery contract rather than the merchant commerce dispatcher; public handoff delegates buyer-session creation to the existing canonical gateway.
 - Resolved: Search, merchant selection, product selection, and successful handoff events use replay-safe tenant telemetry.
 - Resolved: Merchant discoverability updates require the current profile version and lock the profile before mutation, preventing silent concurrent overwrites.
+
+## Phase 9 Public Discovery and Handoff Hardening (2026-09-04)
+
+- **Resolved — bounded public discovery:** Search now evaluates a deterministic cursor page of at most 50 merchant candidates and returns no more than 20 matching/public product summaries for one merchant. It reuses the eager-loaded candidate representation instead of reloading each public profile.
+- **Resolved — stale autonomy UI:** An unavailable autonomy-status response clears the browser's last trusted status. The Agent page no longer offers autonomous execution while status is unknown; backend execution gates remain authoritative.
+- **Resolved — replay-safe handoff:** Discovery handoff claims/replays a merchant-scoped durable receipt before buyer-session creation. Retries return the same session and never store or repeat a generated raw buyer token.
+- **Verified by:** `tests/test_phase9_discovery_network.py` and `frontend/tests/phase7-agent-pages.test.tsx`.
+
+## Deferred Post-Deployment Hardening — Phase 8/9 Review (2026-09-04)
+
+> **Status:** Deferred by the merchant for a follow-up deployment. These are
+> validated hardening, correctness, and documentation items; none are required
+> to preserve the current Phase 1–9 authority or financial-safety boundaries.
+> The three immediate P1/P2 findings addressed before deployment (bounded public
+> discovery, stale autonomy status, and replay-safe discovery handoff) are
+> recorded above and are not duplicated here.
+
+### Discovery API and registry
+
+- **P2 — `src/agent_ready_merchant/services/discovery_service.py:70`:** The in-process per-IP rate-limit map has no eviction and is not shared across workers. Replace it with a bounded, expiring shared limiter (or explicitly bounded local store) before high-volume/multi-worker public deployment.
+- **P2 — `src/agent_ready_merchant/services/discovery_service.py:440`:** Private and nonexistent profile lookups take observably different query paths. Resolve discoverability with a minimal uniform lookup before loading public data to reduce existence-probing timing leakage.
+- **P2 — `src/agent_ready_merchant/schemas/discovery.py:170`:** Align the maximum-budget description with the enforced paise limit; the current text describes a cap ten times lower than the API accepts.
+- **P2 — `src/agent_ready_merchant/schemas/discovery.py:183`:** Bound `required_attributes` key count and value lengths so an external buyer cannot submit an oversized matching payload.
+- **P2 — `src/agent_ready_merchant/main.py:2204`:** Enforce the same maximum length on `X-Discovery-Correlation-ID` as the telemetry column to return a client error rather than a database error for oversized headers.
+- **P2 — `alembic/versions/015_phase9_discovery_network.py:73`:** Database constraints validate discovery state values but not lifecycle edges. Consider a version-checked transition function/trigger if direct database writers become part of the production model.
+- **P2 — `alembic/versions/015_phase9_discovery_network.py:93`:** Couple optional telemetry `product_id` to the same merchant (and add an appropriate nullable foreign key) to preserve tenant integrity outside service-layer writers.
+- **P2 — `src/agent_ready_merchant/models/discovery.py:84`:** Align ORM and migration names for the public-ID constraint/index to prevent future Alembic autogeneration drift.
+
+### Merchant control-plane correctness
+
+- **P2 — `frontend/src/pages/policies.tsx:32`:** Make autonomy-rule loading best-effort or show a dedicated failure state so a secondary rule request does not hide the usable policy editor.
+- **P2 — `frontend/src/pages/discoverability.tsx:45`:** Load editable discovery metadata for `PRIVATE`/`PAUSED` merchants independently of the public-profile preview so a save cannot erase hidden tags.
+- **P2 — `frontend/src/pages/discoverability.tsx:102`:** Send explicit empty string/array values when a merchant clears description or delivery regions; omission currently means “leave unchanged.”
+- **P2 — `frontend/src/pages/agent.tsx:108`:** Clear or fail-close stale autonomy status after a refresh failure for every mutation control, including kill-switch interaction.
+- **P2 — `src/agent_ready_merchant/services/controlled_autonomy_service.py:1056`:** Return the actual resource version after an already-completed rollback rather than deriving it from the pre-rollback action state.
+- **P2 — `frontend/src/types/portal.ts:512`:** Narrow the merchant-editable discoverability-state type to `PRIVATE`, `DISCOVERABLE`, and `PAUSED`; `SUSPENDED` is system-owned.
+
+### Migration resilience
+
+- **P2 — `alembic/versions/017_phase8_deferred_hardening.py:19`:** Add preflight/remediation for existing invalid experiment durations before applying the new database constraint, otherwise upgrade can fail on legacy data.
+
+### Documentation and contract hygiene
+
+- **P3 — `alembic/versions/016_phase9_public_discovery_identifiers.py:33`:** Remove the redundant public-ID index if the unique constraint already supplies the required lookup index.
+- **P3 — `docs/failure-model.md:152`:** Match the documented discovery rate-limit response text to the actual exception message.
+- **P3 — `docs/invariants.md:89`:** Reword the public-profile invariant to describe its allowlist/no-secret rule rather than implying only two public fields are returned.
+- **P3 — `docs/invariants.md:95`:** Describe the budget check as an integer ceiling comparison, not an overflow guard.
+- **P3 — `src/agent_ready_merchant/schemas/discovery.py:119`:** Align the documented inventory summary values with the API’s `AVAILABLE` / `OUT_OF_STOCK` contract (prefer a typed literal/enum).
+- **P3 — `docs/phase.md:123`:** Document both Phase 9 migrations (015 and 016) and attribute opaque public IDs to revision 016.
+- **P3 — `docs/assumptions.md:175` and `docs/evaluation.md:227`:** Correct the Phase 9 focused-test count to the actual number of test functions.
+- **P3 — `docs/evaluation.md:232`:** Describe migration 015 as part of the verified chain, not the current Alembic head.

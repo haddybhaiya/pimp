@@ -3,6 +3,7 @@
 Establishes the deterministic application lifecycle for the Agent-Ready Merchant platform.
 """
 
+import hashlib
 import logging
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -2307,6 +2308,26 @@ def create_app() -> FastAPI:
                 detail="Merchant not found or not discoverable.",
             ) from exc
 
+        # Public callers may omit a key, but one handoff correlation must still
+        # create at most one buyer session for this merchant. The derived key is
+        # fixed-length and never stores the buyer-provided correlation value.
+        idempotency_key = (
+            req.idempotency_key
+            or hashlib.sha256(f"{merchant_id}:{req.correlation_id}".encode()).hexdigest()
+        )
+        try:
+            receipt, replay = await MerchantMutationIdempotencyService.claim_or_replay(
+                db,
+                merchant_id=merchant_id,
+                operation="discovery.handoff.initialize_session",
+                idempotency_key=idempotency_key,
+                payload=req.model_dump(mode="json"),
+            )
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        if replay is not None:
+            return GatewayResponseEnvelope[InitializeSessionResponse].model_validate(replay)
+
         product_id: uuid.UUID | None = None
         if req.selected_product_sku is not None:
             product_stmt = select(Product.id).where(
@@ -2344,6 +2365,13 @@ def create_app() -> FastAPI:
                 correlation_id=req.correlation_id,
                 product_id=product_id,
             )
+        assert receipt is not None
+        replay_body = response.model_dump(mode="json")
+        # A server-generated buyer token is return-once. Do not persist it in a
+        # durable replay receipt; a retry receives the same session without it.
+        if isinstance(replay_body.get("data"), dict):
+            replay_body["data"]["auth_token"] = None
+        await MerchantMutationIdempotencyService.complete(db, receipt, replay_body)
         return response
 
     @app.get(

@@ -208,6 +208,17 @@ class BuyerDiscoveryIntent(BaseModel):
         max_length=10,
         description="Safe preference tags",
     )
+    page_size: int = Field(
+        default=20,
+        ge=1,
+        le=50,
+        description="Maximum discovery results in this bounded page",
+    )
+    cursor: str | None = Field(
+        default=None,
+        max_length=100,
+        description="Deterministic continuation cursor from a previous discovery response",
+    )
 
 
 class DiscoveryMatchResult(BaseModel):
@@ -239,11 +250,17 @@ class DiscoverySearchResponse(BaseModel):
     results: list[DiscoveryMatchResult] = Field(
         default_factory=list, description="Ranked list of eligible matches"
     )
-    total_matches: int = Field(..., description="Total count of eligible merchants")
+    total_matches: int = Field(
+        ..., description="Count of eligible merchants returned in this bounded page"
+    )
     correlation_id: str = Field(
         ..., description="Replay-safe correlation ID for subsequent selection and handoff events"
     )
     discovery_schema_version: str = Field(default="1.0.0", description="Discovery contract version")
+    next_cursor: str | None = Field(
+        default=None,
+        description="Continuation cursor when more eligible discovery candidates remain",
+    )
     next_canonical_action: str = Field(
         default="START_BUYER_SESSION",
         description="Next authoritative action for the external buyer agent",

@@ -72,6 +72,7 @@ class MerchantNotFoundError(Exception):
 _SEARCH_RATE_LIMITS: dict[str, list[float]] = collections.defaultdict(list)
 _MAX_SEARCHES_PER_MINUTE = 60
 _RATE_LIMIT_WINDOW_SECONDS = 60.0
+_MAX_PUBLIC_PRODUCTS_PER_MERCHANT = 20
 
 
 def check_and_record_search_rate_limit(client_ip: str) -> None:
@@ -294,24 +295,27 @@ class DiscoveryService:
         cls,
         session: AsyncSession,
         merchant_id: uuid.UUID,
+        *,
+        loaded_merchant: Merchant | None = None,
     ) -> PublicMerchantProfile | None:
         """Constructs the safe public discovery representation of a merchant.
 
         Returns None if merchant is not ACTIVE or discoverability_state != DISCOVERABLE.
         Guarantees zero leakage of secrets, private policies, or buyer PII.
         """
-        # Load merchant
-        stmt_m = (
-            select(Merchant)
-            .options(
-                selectinload(Merchant.discovery_profile),
-                selectinload(Merchant.products)
-                .selectinload(Product.variants)
-                .selectinload(ProductVariant.inventory_item),
+        merchant = loaded_merchant
+        if merchant is None:
+            stmt_m = (
+                select(Merchant)
+                .options(
+                    selectinload(Merchant.discovery_profile),
+                    selectinload(Merchant.products)
+                    .selectinload(Product.variants)
+                    .selectinload(ProductVariant.inventory_item),
+                )
+                .where(Merchant.id == merchant_id)
             )
-            .where(Merchant.id == merchant_id)
-        )
-        merchant = (await session.execute(stmt_m)).scalar_one_or_none()
+            merchant = (await session.execute(stmt_m)).scalar_one_or_none()
 
         if merchant is None:
             return None
@@ -331,7 +335,9 @@ class DiscoveryService:
         product_summaries: list[PublicProductSummary] = []
         all_prices: list[int] = []
 
-        for p in merchant.products:
+        for p in sorted(merchant.products, key=lambda product: product.sku)[
+            :_MAX_PUBLIC_PRODUCTS_PER_MERCHANT
+        ]:
             if not p.is_active:
                 continue
 
@@ -500,7 +506,9 @@ class DiscoveryService:
 
         corr_id = correlation_id or f"disc-corr-{uuid.uuid4().hex}"
 
-        # 2. Query all candidates with active DISCOVERABLE profile
+        # 2. Read one deterministic, bounded candidate window.  Discovery is
+        # descriptive: a continuation cursor never changes transaction-time
+        # authority, which remains in the canonical gateway.
         stmt = (
             select(Merchant)
             .join(
@@ -519,8 +527,14 @@ class DiscoveryService:
                 Merchant.status == "ACTIVE",
                 Merchant.kill_switch_enabled == False,  # noqa: E712
             )
+            .order_by(Merchant.slug.asc())
         )
-        merchants = (await session.execute(stmt)).scalars().all()
+        if intent.cursor is not None:
+            stmt = stmt.where(Merchant.slug > intent.cursor)
+        merchants = (await session.execute(stmt.limit(intent.page_size + 1))).scalars().all()
+        has_more_candidates = len(merchants) > intent.page_size
+        merchants = merchants[: intent.page_size]
+        next_cursor = merchants[-1].slug if has_more_candidates and merchants else None
 
         query_text = (intent.query or "").strip().lower()
         cat_filter = (intent.category or "").strip().lower()
@@ -567,7 +581,7 @@ class DiscoveryService:
             has_category_match = False
             is_within_budget = False
 
-            for p in m.products:
+            for p in sorted(m.products, key=lambda product: product.sku):
                 if not p.is_active:
                     continue
 
@@ -649,6 +663,8 @@ class DiscoveryService:
                         attributes={"variants_count": len(purchasable_variants)},
                     )
                 )
+                if len(matching_products) >= _MAX_PUBLIC_PRODUCTS_PER_MERCHANT:
+                    break
 
             # A returned merchant must always have at least one product that can
             # fulfill the intent. Otherwise an unfiltered request could surface an
@@ -657,7 +673,7 @@ class DiscoveryService:
                 continue
 
             # Build public profile
-            pub_prof = await cls.build_public_profile(session, m.id)
+            pub_prof = await cls.build_public_profile(session, m.id, loaded_merchant=m)
             if pub_prof is None:
                 continue
 
@@ -752,6 +768,7 @@ class DiscoveryService:
             total_matches=len(matched_results),
             correlation_id=corr_id,
             discovery_schema_version="1.0.0",
+            next_cursor=next_cursor,
             next_canonical_action="START_BUYER_SESSION",
         )
 

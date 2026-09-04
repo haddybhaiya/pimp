@@ -442,6 +442,21 @@ async def test_deterministic_budget_quantity_currency_filtering(
     assert res_curr.total_matches == 0
 
 
+@pytest.mark.asyncio
+async def test_discovery_search_page_size_is_bounded(
+    db_session: AsyncSession, setup_discovery_merchants: dict[str, Any]
+) -> None:
+    """A public search rejects oversized pages and bounds returned result pages."""
+    with pytest.raises(ValueError):
+        BuyerDiscoveryIntent(currency="INR", page_size=51)
+
+    result = await DiscoveryService.search_merchants(
+        db_session, BuyerDiscoveryIntent(query="running", currency="INR", page_size=1)
+    )
+    assert len(result.results) <= 1
+    assert result.total_matches == len(result.results)
+
+
 # =========================================================================
 # 7. Required Capability & Delivery Region Filtering Fail Closed
 # =========================================================================
@@ -1171,3 +1186,41 @@ async def test_protocol_discovery_and_public_handoff_emit_authoritative_telemetr
         DiscoveryTelemetryEventType.PRODUCT_SELECTED.value,
         DiscoveryTelemetryEventType.HANDOFF_INITIATED.value,
     }.issubset(event_types)
+
+
+@pytest.mark.asyncio
+async def test_discovery_handoff_replays_without_creating_a_second_session(
+    db_session: AsyncSession, setup_discovery_merchants: dict[str, Any]
+) -> None:
+    """A retry with the same handoff key returns the original buyer session safely."""
+    app = create_app()
+    merchant = setup_discovery_merchants["m_pub"]
+    public_id = str(setup_discovery_merchants["prof_pub"].public_id)
+    request_body = {
+        "buyer_agent_identifier": "replay-safe-discovery-buyer",
+        "requested_capabilities": ["buyer:discover", "buyer:read"],
+        "correlation_id": f"handoff-replay-{uuid.uuid4().hex}",
+        "idempotency_key": f"handoff-key-{uuid.uuid4().hex}",
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post(
+            f"/api/v1/discovery/merchants/{public_id}/handoff", json=request_body
+        )
+        replay = await client.post(
+            f"/api/v1/discovery/merchants/{public_id}/handoff", json=request_body
+        )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert first.json()["data"]["session_id"] == replay.json()["data"]["session_id"]
+    assert replay.json()["data"]["auth_token"] is None
+    session_count = (
+        await db_session.execute(
+            select(func.count(BuyerAgentSession.id)).where(
+                BuyerAgentSession.merchant_id == merchant.id,
+                BuyerAgentSession.buyer_agent_identifier == request_body["buyer_agent_identifier"],
+            )
+        )
+    ).scalar_one()
+    assert session_count == 1
