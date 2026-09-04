@@ -91,11 +91,13 @@
    Direct lookups on merchants in non-discoverable states (`PRIVATE`, `PAUSED`, `SUSPENDED`) and non-existent merchant IDs must return an identical, uniform 404 response (`MerchantNotFoundError`) to prevent merchant existence or state probing.
 4. **Human-Only Discoverability Authority (INV-DISC-04):**  
    Discoverability state transitions and public discovery metadata modifications require authenticated human `MERCHANT_ADMIN` authorization. Autonomous agents, merchant LLMs, and external buyers fail closed.
-5. **Deterministic Matching & Integer Budget Safety (INV-DISC-05):**  
-   Buyer intent evaluation, capability filtering, delivery region matching, available-inventory checks, and price range checks are completely deterministic. Budget checks enforce integer multiplication overflow guards (`min_var_paise * qty <= maximum_budget_paise`). Unsupported capabilities, unavailable inventory, and non-deliverable regions fail closed.
+5. **Deterministic Matching, Bounded Discovery, & Integer Budget Safety (INV-DISC-05):**
+   Buyer intent evaluation, capability filtering, delivery region matching, available-inventory checks, and price range checks are completely deterministic. Search evaluates a bounded cursor page (at most 50 merchant candidates and 20 SQL-selected eligible products/public summaries per merchant); public-profile range and availability aggregates remain authoritative across the full active catalog. Budget checks enforce the integer ceiling `min_var_paise * qty <= maximum_budget_paise`. Unsupported capabilities, unavailable inventory, and non-deliverable regions fail closed.
 6. **Prompt Injection Search-Keyword Neutralization (INV-DISC-06):**  
    Buyer discovery queries and preference parameters are treated strictly as untrusted literal search text. Prompt injection instructions never influence ranking scores, bypass eligibility filters, modify policies, or trigger model execution.
 7. **Replay-Safe Telemetry & Public Rate Limiting (INV-DISC-07):**  
    Discovery search and profile telemetry enforce composite database uniqueness on `(merchant_id, event_type, correlation_id)` to prevent replay distortion. Public discovery search is strictly rate-limited (60 requests/minute per client IP) to protect system compute.
+8. **Replay-Safe Discovery Handoff (INV-DISC-08):**
+   A discovery handoff claims a durable merchant-scoped idempotency receipt before creating a buyer session. Retried handoffs replay the original session response and never persist or re-expose a server-generated raw buyer token.
 
 

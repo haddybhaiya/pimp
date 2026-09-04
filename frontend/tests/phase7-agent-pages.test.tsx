@@ -143,6 +143,14 @@ describe('Phase 7 Agent workbench', () => {
     await waitFor(() => expect(screen.getByText('ARCHIVED')).toBeInTheDocument());
   });
 
+  it('fails closed when the autonomy status cannot be refreshed', async () => {
+    vi.mocked(api.getAutonomyStatus).mockRejectedValue(new Error('Status temporarily unavailable.'));
+    render(<AgentPage />);
+
+    await waitFor(() => expect(screen.getByText('Status temporarily unavailable.')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /run autonomously/i })).not.toBeInTheDocument();
+  });
+
   it('keeps loaded audit events visible when the next cursor page fails', async () => {
     vi.mocked(api.getAuditLedger)
       .mockResolvedValueOnce({

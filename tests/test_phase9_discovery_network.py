@@ -442,6 +442,95 @@ async def test_deterministic_budget_quantity_currency_filtering(
     assert res_curr.total_matches == 0
 
 
+@pytest.mark.asyncio
+async def test_discovery_search_page_size_is_bounded(
+    db_session: AsyncSession, setup_discovery_merchants: dict[str, Any]
+) -> None:
+    """A public search rejects oversized pages and bounds returned result pages."""
+    with pytest.raises(ValueError):
+        BuyerDiscoveryIntent(currency="INR", page_size=51)
+
+    result = await DiscoveryService.search_merchants(
+        db_session, BuyerDiscoveryIntent(query="running", currency="INR", page_size=1)
+    )
+    assert len(result.results) <= 1
+    assert result.total_matches == len(result.results)
+
+
+@pytest.mark.asyncio
+async def test_public_profile_aggregates_full_catalog_while_search_bounds_product_loads(
+    db_session: AsyncSession, setup_discovery_merchants: dict[str, Any]
+) -> None:
+    """A late SKU remains discoverable without expanding the public profile sample."""
+    merchant = setup_discovery_merchants["m_pub"]
+    filler_products = [
+        Product(
+            merchant_id=merchant.id,
+            sku=f"AA-PUBLIC-SAMPLE-{index:02d}",
+            title=f"Public sample {index}",
+            description="Bounded public catalog sample.",
+            category="Footwear",
+            base_price_paise=100_000,
+            floor_price_paise=80_000,
+            version=1,
+        )
+        for index in range(21)
+    ]
+    late_product = Product(
+        merchant_id=merchant.id,
+        sku="ZZZ-LATE-DISCOVERY-SKU",
+        title="Late catalog discovery product",
+        description="This product is beyond the public SKU sample.",
+        category="Footwear",
+        base_price_paise=900_000,
+        floor_price_paise=700_000,
+        version=1,
+    )
+    db_session.add_all([*filler_products, late_product])
+    await db_session.flush()
+
+    products = [*filler_products, late_product]
+    variants = [
+        ProductVariant(
+            product_id=product.id,
+            sku=f"{product.sku}-VARIANT",
+            title=f"{product.title} variant",
+            price_override_paise=product.base_price_paise,
+        )
+        for product in products
+    ]
+    db_session.add_all(variants)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            InventoryItem(
+                variant_id=variant.id,
+                available_quantity=5,
+                reserved_quantity=0,
+            )
+            for variant in variants
+        ]
+    )
+    await db_session.flush()
+
+    public_profile = await DiscoveryService.build_public_profile(db_session, merchant.id)
+    assert public_profile is not None
+    assert len(public_profile.safe_product_summaries) == 20
+    assert public_profile.price_range_paise["max"] == 900_000
+    assert public_profile.inventory_summary == "AVAILABLE"
+
+    result = await DiscoveryService.search_merchants(
+        db_session,
+        BuyerDiscoveryIntent(
+            product_sku=late_product.sku,
+            currency="INR",
+            quantity=1,
+        ),
+    )
+    assert result.total_matches == 1
+    assert result.results[0].matching_products[0].product_sku == late_product.sku
+
+
 # =========================================================================
 # 7. Required Capability & Delivery Region Filtering Fail Closed
 # =========================================================================
@@ -1171,3 +1260,41 @@ async def test_protocol_discovery_and_public_handoff_emit_authoritative_telemetr
         DiscoveryTelemetryEventType.PRODUCT_SELECTED.value,
         DiscoveryTelemetryEventType.HANDOFF_INITIATED.value,
     }.issubset(event_types)
+
+
+@pytest.mark.asyncio
+async def test_discovery_handoff_replays_without_creating_a_second_session(
+    db_session: AsyncSession, setup_discovery_merchants: dict[str, Any]
+) -> None:
+    """A retry with the same handoff key returns the original buyer session safely."""
+    app = create_app()
+    merchant = setup_discovery_merchants["m_pub"]
+    public_id = str(setup_discovery_merchants["prof_pub"].public_id)
+    request_body = {
+        "buyer_agent_identifier": "replay-safe-discovery-buyer",
+        "requested_capabilities": ["buyer:discover", "buyer:read"],
+        "correlation_id": f"handoff-replay-{uuid.uuid4().hex}",
+        "idempotency_key": f"handoff-key-{uuid.uuid4().hex}",
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post(
+            f"/api/v1/discovery/merchants/{public_id}/handoff", json=request_body
+        )
+        replay = await client.post(
+            f"/api/v1/discovery/merchants/{public_id}/handoff", json=request_body
+        )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert first.json()["data"]["session_id"] == replay.json()["data"]["session_id"]
+    assert replay.json()["data"]["auth_token"] is None
+    session_count = (
+        await db_session.execute(
+            select(func.count(BuyerAgentSession.id)).where(
+                BuyerAgentSession.merchant_id == merchant.id,
+                BuyerAgentSession.buyer_agent_identifier == request_body["buyer_agent_identifier"],
+            )
+        )
+    ).scalar_one()
+    assert session_count == 1

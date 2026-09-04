@@ -105,7 +105,7 @@ export const AgentPage: React.FC = () => {
         setProposals(propData);
         setAutonomyStatusError(statusResult.error);
         setAutonomyActionsError(actionsResult.error);
-        if (statusResult.value) setAutonomyStatus(statusResult.value);
+        setAutonomyStatus(statusResult.value);
         if (actionsResult.value) setAutonomyActions(actionsResult.value);
       }
     } catch (err: unknown) {
