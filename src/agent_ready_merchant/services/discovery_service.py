@@ -1,0 +1,765 @@
+"""Discovery Network Service coordinating safe public merchant discovery.
+
+Adheres strictly to Phase 9 specifications:
+- Governs discoverability states (PRIVATE, DISCOVERABLE, PAUSED, SUSPENDED)
+- Human-only administrative control over discoverability
+- Public capability graph derived from canonical CapabilityRegistry
+- Strict eligibility filtering and explainable deterministic ranking
+- Anti-probing: uniform 404 for non-discoverable or nonexistent merchants
+- Zero secret, private policy, or buyer PII leakage
+- Bounded in-memory search rate-limiting
+- Replay-safe discovery telemetry
+"""
+
+from __future__ import annotations
+
+import collections
+import logging
+import time
+import uuid
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from agent_ready_merchant.gateway.registry import CapabilityRegistry
+from agent_ready_merchant.models.audit import AuditEvent
+from agent_ready_merchant.models.discovery import (
+    DiscoverabilityState,
+    DiscoveryTelemetryEventType,
+    MerchantDiscoveryProfile,
+    MerchantDiscoveryTelemetry,
+    compute_discovery_metadata_hash,
+)
+from agent_ready_merchant.models.merchant import Merchant
+from agent_ready_merchant.models.policy import PolicyRule
+from agent_ready_merchant.models.product import Product
+from agent_ready_merchant.schemas.discovery import (
+    BuyerDiscoveryIntent,
+    DiscoverabilityStatusResponse,
+    DiscoverabilityUpdateRequest,
+    DiscoveryMatchResult,
+    DiscoverySearchResponse,
+    PublicCapabilityNode,
+    PublicMerchantProfile,
+    PublicProductSummary,
+)
+
+logger = logging.getLogger("agent_ready_merchant.discovery")
+
+
+class DiscoverySecurityError(Exception):
+    """Raised when an unauthorized actor attempts to modify discoverability."""
+
+
+class DiscoveryRateLimitError(Exception):
+    """Raised when public discovery search rate limit is exceeded."""
+
+
+class MerchantNotFoundError(Exception):
+    """Raised when a merchant is not found or not discoverable (anti-probing)."""
+
+
+# In-memory sliding window rate limiter: IP -> list of timestamps
+_SEARCH_RATE_LIMITS: dict[str, list[float]] = collections.defaultdict(list)
+_MAX_SEARCHES_PER_MINUTE = 60
+_RATE_LIMIT_WINDOW_SECONDS = 60.0
+
+
+def check_and_record_search_rate_limit(client_ip: str) -> None:
+    """Enforces bounded in-memory sliding window rate limiting on public search."""
+    now = time.monotonic()
+    window_start = now - _RATE_LIMIT_WINDOW_SECONDS
+
+    # Clean old timestamps
+    timestamps = [ts for ts in _SEARCH_RATE_LIMITS[client_ip] if ts > window_start]
+
+    if len(timestamps) >= _MAX_SEARCHES_PER_MINUTE:
+        _SEARCH_RATE_LIMITS[client_ip] = timestamps
+        raise DiscoveryRateLimitError(
+            f"Public discovery search rate limit exceeded ({_MAX_SEARCHES_PER_MINUTE}/min). "
+            "Please retry later."
+        )
+
+    timestamps.append(now)
+    _SEARCH_RATE_LIMITS[client_ip] = timestamps
+
+
+def reset_search_rate_limits() -> None:
+    """Clears rate limiter state (used in testing)."""
+    _SEARCH_RATE_LIMITS.clear()
+
+
+class DiscoveryService:
+    """Core server-authoritative service for Phase 9 Discovery Network."""
+
+    @classmethod
+    async def get_or_create_profile(
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+    ) -> MerchantDiscoveryProfile:
+        """Retrieves or creates the default PRIVATE discovery profile for a merchant."""
+        stmt = select(MerchantDiscoveryProfile).where(
+            MerchantDiscoveryProfile.merchant_id == merchant_id
+        )
+        profile = (await session.execute(stmt)).scalar_one_or_none()
+        if profile is not None:
+            return profile
+
+        # Default initial state is strictly PRIVATE
+        initial_tags: list[str] = ["general", "commerce"]
+        initial_regions: list[str] = ["INDIA"]
+        meta_hash = compute_discovery_metadata_hash(
+            {
+                "merchant_id": str(merchant_id),
+                "discoverability_state": DiscoverabilityState.PRIVATE.value,
+                "custom_tags": initial_tags,
+                "delivery_regions": initial_regions,
+            }
+        )
+
+        profile = MerchantDiscoveryProfile(
+            merchant_id=merchant_id,
+            discoverability_state=DiscoverabilityState.PRIVATE.value,
+            custom_tags=initial_tags,
+            custom_description=None,
+            delivery_regions=initial_regions,
+            profile_version=1,
+            metadata_hash=meta_hash,
+            last_refreshed_at=datetime.now(UTC),
+        )
+        session.add(profile)
+        await session.flush()
+        return profile
+
+    @classmethod
+    async def update_discoverability(
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+        req: DiscoverabilityUpdateRequest,
+        actor_role: str = "MERCHANT_ADMIN",
+        actor_id: str | None = None,
+    ) -> MerchantDiscoveryProfile:
+        """Updates discoverability settings and metadata.
+
+        Strictly enforces that ONLY human MERCHANT_ADMIN can change discoverability.
+        Autonomous agents, buyers, and non-admins fail closed.
+        """
+        if actor_role != "MERCHANT_ADMIN":
+            raise DiscoverySecurityError(
+                f"Actor role '{actor_role}' is not authorized to modify discoverability settings. "
+                "Only human MERCHANT_ADMIN may publish or modify discovery profiles."
+            )
+
+        profile = await cls.get_or_create_profile(session, merchant_id)
+
+        # Apply state changes if requested
+        if req.discoverability_state is not None:
+            # Cannot self-assign SUSPENDED via merchant control plane
+            if req.discoverability_state not in (
+                DiscoverabilityState.PRIVATE.value,
+                DiscoverabilityState.DISCOVERABLE.value,
+                DiscoverabilityState.PAUSED.value,
+            ):
+                raise ValueError(
+                    f"Invalid discoverability state '{req.discoverability_state}'. "
+                    "Allowed values: PRIVATE, DISCOVERABLE, PAUSED."
+                )
+            profile.discoverability_state = req.discoverability_state
+
+        if req.custom_tags is not None:
+            # Sanitize and bound tags
+            profile.custom_tags = [
+                str(t).strip().lower()[:50] for t in req.custom_tags if str(t).strip()
+            ][:20]
+
+        if req.custom_description is not None:
+            profile.custom_description = req.custom_description[:1000]
+
+        if req.delivery_regions is not None:
+            profile.delivery_regions = [
+                str(r).strip().upper()[:50] for r in req.delivery_regions if str(r).strip()
+            ][:50]
+
+        profile.profile_version += 1
+        profile.last_refreshed_at = datetime.now(UTC)
+
+        # Compute updated metadata hash
+        profile.metadata_hash = compute_discovery_metadata_hash(
+            {
+                "merchant_id": str(merchant_id),
+                "discoverability_state": profile.discoverability_state,
+                "custom_tags": profile.custom_tags,
+                "custom_description": profile.custom_description,
+                "delivery_regions": profile.delivery_regions,
+                "profile_version": profile.profile_version,
+            }
+        )
+
+        # Commit immutable audit log with cryptographic hash chaining
+        await AuditEvent.create_event(
+            session=session,
+            merchant_id=merchant_id,
+            actor_type="MERCHANT_ADMIN",
+            event_type="MERCHANT_DISCOVERY_PROFILE_UPDATED",
+            payload={
+                "actor_id": actor_id or str(merchant_id),
+                "discoverability_state": profile.discoverability_state,
+                "profile_version": profile.profile_version,
+                "metadata_hash": profile.metadata_hash,
+                "custom_tags": profile.custom_tags,
+            },
+        )
+        return profile
+
+    @classmethod
+    def get_public_capability_graph(cls) -> list[PublicCapabilityNode]:
+        """Generates the safe, descriptive public capability graph.
+
+        Discovery is descriptive only; discovery of a capability does not grant invocation.
+        """
+        nodes: list[PublicCapabilityNode] = []
+        for name, cap in CapabilityRegistry._CAPABILITIES.items():
+            # Classify monetary impact
+            monetary_desc = (
+                "Direct financial transaction processing"
+                if cap.monetary_impact
+                else (
+                    "Price quote calculation and negotiation"
+                    if "quote" in name
+                    else "None (informational)"
+                )
+            )
+
+            side_effect_desc = (
+                ", ".join(cap.side_effects)
+                if cap.side_effects
+                else "Read-only idempotent operation"
+            )
+
+            nodes.append(
+                PublicCapabilityNode(
+                    name=cap.name,
+                    protocol_version="1.0.0",
+                    classification=cap.classification,
+                    side_effect_classification=side_effect_desc,
+                    monetary_impact_classification=monetary_desc,
+                    authorization_requirement=cap.required_capability,
+                    approval_requirement=cap.approval_requirement,
+                    idempotency_requirement=cap.idempotency_requirement,
+                    supported_adapters=["ACP", "REST"],
+                    coarse_availability="AVAILABLE",
+                )
+            )
+        return nodes
+
+    @classmethod
+    async def build_public_profile(
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+    ) -> PublicMerchantProfile | None:
+        """Constructs the safe public discovery representation of a merchant.
+
+        Returns None if merchant is not ACTIVE or discoverability_state != DISCOVERABLE.
+        Guarantees zero leakage of secrets, private policies, or buyer PII.
+        """
+        # Load merchant
+        stmt_m = (
+            select(Merchant)
+            .options(
+                selectinload(Merchant.discovery_profile),
+                selectinload(Merchant.products).selectinload(Product.variants),
+            )
+            .where(Merchant.id == merchant_id)
+        )
+        merchant = (await session.execute(stmt_m)).scalar_one_or_none()
+
+        if merchant is None:
+            return None
+
+        # Anti-probing: must be ACTIVE and kill switch OFF
+        if merchant.status != "ACTIVE" or merchant.kill_switch_enabled:
+            return None
+
+        profile = merchant.discovery_profile
+        if (
+            profile is None
+            or profile.discoverability_state != DiscoverabilityState.DISCOVERABLE.value
+        ):
+            return None
+
+        # Inspect active products and calculate non-binding price range
+        product_summaries: list[PublicProductSummary] = []
+        all_prices: list[int] = []
+
+        for p in merchant.products:
+            if not p.is_active:
+                continue
+
+            active_variants = [v for v in p.variants if v.is_active]
+            if not active_variants:
+                continue
+
+            var_prices: list[int] = [
+                v.price_override_paise
+                for v in active_variants
+                if v.price_override_paise is not None and v.price_override_paise > 0
+            ]
+            if not var_prices and p.base_price_paise > 0:
+                var_prices = [p.base_price_paise]
+            elif not var_prices:
+                var_prices = [10000]  # fallback positive paise
+
+            min_p: int = min(var_prices)
+            max_p: int = max(var_prices)
+            all_prices.extend(var_prices)
+
+            # Safe allowlisted attributes only (sample_sku)
+            safe_attrs: dict[str, Any] = {}
+            for v in active_variants:
+                if v.sku:
+                    safe_attrs["sample_sku"] = v.sku
+                break
+
+            product_summaries.append(
+                PublicProductSummary(
+                    product_id=str(p.id),
+                    title=p.title,
+                    category=p.category,
+                    description=p.description,
+                    price_range_paise={"min": min_p, "max": max_p},
+                    in_stock=True,  # Coarse signal
+                    attributes=safe_attrs,
+                )
+            )
+
+        overall_min = min(all_prices) if all_prices else 0
+        overall_max = max(all_prices) if all_prices else 0
+
+        # Check negotiation support via active merchant policies
+        stmt_pol = select(PolicyRule).where(
+            PolicyRule.merchant_id == merchant_id,
+            PolicyRule.is_active == True,  # noqa: E712
+            PolicyRule.rule_type == "MAX_DISCOUNT_PCT",
+        )
+        policy_rule = (await session.execute(stmt_pol)).scalar_one_or_none()
+        negotiation_supported = False
+        if policy_rule is not None:
+            max_disc = float(
+                policy_rule.rule_value.get(
+                    "max_discount_pct",
+                    policy_rule.rule_value.get(
+                        "max_discount_percentage",
+                        policy_rule.rule_value.get("max_discount", 0),
+                    ),
+                )
+            )
+            negotiation_supported = max_disc > 0
+
+        # Authoritative coarse trust signals
+        trust_signals = [
+            "MERCHANT_ACTIVE",
+            "DISCOVERY_PROFILE_VALID",
+            "CANONICAL_GATEWAY_AVAILABLE",
+            "POLICY_ENFORCEMENT_ENABLED",
+            "AUDIT_LEDGER_ENABLED",
+            "CHECKOUT_AVAILABLE",
+            "PROTOCOL_SUPPORTED",
+        ]
+
+        supported_caps = list(CapabilityRegistry._CAPABILITIES.keys())
+        desc = profile.custom_description or f"Official agent-ready storefront for {merchant.name}."
+
+        return PublicMerchantProfile(
+            public_id=str(merchant.id),
+            slug=merchant.slug,
+            display_name=merchant.name,
+            category=product_summaries[0].category if product_summaries else "General",
+            description=desc,
+            discovery_tags=profile.custom_tags or ["commerce"],
+            safe_product_summaries=product_summaries,
+            supported_currencies=[merchant.currency],
+            price_range_paise={"min": overall_min, "max": overall_max},
+            safe_delivery_regions=profile.delivery_regions or ["INDIA"],
+            inventory_summary="AVAILABLE" if product_summaries else "OUT_OF_STOCK",
+            negotiation_supported=negotiation_supported,
+            checkout_available=not merchant.kill_switch_enabled,
+            supported_canonical_capabilities=supported_caps,
+            supported_protocol_versions=["ACP/1.0", "REST/1.0"],
+            discovery_schema_version="1.0.0",
+            profile_version=profile.profile_version,
+            updated_at=profile.last_refreshed_at.isoformat(),
+            verified_trust_signals=trust_signals,
+        )
+
+    @classmethod
+    async def get_public_merchant_by_id_or_slug(
+        cls,
+        session: AsyncSession,
+        public_id_or_slug: str,
+    ) -> PublicMerchantProfile:
+        """Retrieves a public merchant profile by ID or slug.
+
+        Enforces anti-probing: throws uniform MerchantNotFoundError for nonexistent,
+        PRIVATE, PAUSED, or SUSPENDED merchants.
+        """
+        merchant_id: uuid.UUID | None = None
+        try:
+            merchant_id = uuid.UUID(public_id_or_slug)
+        except ValueError:
+            # Slug lookup
+            stmt_slug = select(Merchant.id).where(Merchant.slug == public_id_or_slug)
+            merchant_id = (await session.execute(stmt_slug)).scalar_one_or_none()
+
+        if merchant_id is None:
+            raise MerchantNotFoundError("Merchant not found or not discoverable.")
+
+        profile = await cls.build_public_profile(session, merchant_id)
+        if profile is None:
+            raise MerchantNotFoundError("Merchant not found or not discoverable.")
+        return profile
+
+    @classmethod
+    async def search_merchants(
+        cls,
+        session: AsyncSession,
+        intent: BuyerDiscoveryIntent,
+        client_ip: str = "127.0.0.1",
+        correlation_id: str | None = None,
+    ) -> DiscoverySearchResponse:
+        """Performs strict, bounded deterministic matching and ranking for external buyers.
+
+        Adheres strictly to Phase 9 rules:
+        1. Bounded search rate limiting
+        2. Strict eligibility filtering (DISCOVERABLE only, currency, budget overflow protection)
+        3. Explainable deterministic ranking with reason codes
+        4. Replay-safe discovery telemetry
+        5. Prompt injection text treated as search keywords only
+        """
+        # 1. Rate Limiting Check
+        check_and_record_search_rate_limit(client_ip)
+
+        corr_id = correlation_id or f"disc-corr-{uuid.uuid4().hex}"
+
+        # 2. Query all candidates with active DISCOVERABLE profile
+        stmt = (
+            select(Merchant)
+            .join(
+                MerchantDiscoveryProfile,
+                Merchant.id == MerchantDiscoveryProfile.merchant_id,
+            )
+            .options(
+                selectinload(Merchant.discovery_profile),
+                selectinload(Merchant.products).selectinload(Product.variants),
+            )
+            .where(
+                MerchantDiscoveryProfile.discoverability_state
+                == DiscoverabilityState.DISCOVERABLE.value,
+                Merchant.status == "ACTIVE",
+                Merchant.kill_switch_enabled == False,  # noqa: E712
+            )
+        )
+        merchants = (await session.execute(stmt)).scalars().all()
+
+        query_text = (intent.query or "").strip().lower()
+        cat_filter = (intent.category or "").strip().lower()
+        req_caps = set(intent.required_capabilities)
+
+        matched_results: list[DiscoveryMatchResult] = []
+
+        for m in merchants:
+            # Currency eligibility filter
+            if m.currency.upper() != intent.currency.upper():
+                continue
+
+            # Capability compatibility filter
+            supported_caps = set(CapabilityRegistry._CAPABILITIES.keys())
+            if req_caps and not req_caps.issubset(supported_caps):
+                continue
+
+            profile = m.discovery_profile
+            if profile is None:
+                continue
+
+            # Delivery compatibility filter (if intent specified delivery_region)
+            merchant_regions = [str(r).strip().upper() for r in profile.delivery_regions]
+            if intent.delivery_region:
+                intent_reg = intent.delivery_region.strip().upper()
+                region_matched = (
+                    not merchant_regions
+                    or intent_reg in merchant_regions
+                    or "ALL" in merchant_regions
+                    or (
+                        "INDIA" in merchant_regions
+                        and (
+                            intent_reg == "INDIA"
+                            or intent_reg.startswith("IN-")
+                            or intent_reg.startswith("IN/")
+                        )
+                    )
+                )
+                if not region_matched:
+                    continue
+
+            # Inspect active products
+            matching_products: list[PublicProductSummary] = []
+            has_attribute_match = False
+            has_category_match = False
+            is_within_budget = False
+
+            for p in m.products:
+                if not p.is_active:
+                    continue
+
+                if intent.product_id and p.id != intent.product_id:
+                    continue
+
+                p_title = (p.title or "").lower()
+                p_desc = (p.description or "").lower()
+                p_cat = (p.category or "").lower()
+
+                # Category filter
+                if cat_filter and cat_filter not in p_cat:
+                    continue
+                if cat_filter and cat_filter in p_cat:
+                    has_category_match = True
+
+                # Query keyword filter
+                if query_text:
+                    m_tags = [t.lower() for t in profile.custom_tags]
+                    words = [w for w in query_text.split() if len(w) > 2]
+                    matches_query = (
+                        query_text in p_title
+                        or query_text in p_desc
+                        or query_text in p_cat
+                        or any(query_text in t for t in m_tags)
+                        or any(word in p_title or word in p_desc for word in words)
+                    )
+                    if not matches_query:
+                        continue
+
+                active_variants = [v for v in p.variants if v.is_active]
+                if not active_variants:
+                    continue
+
+                # Attributes check (e.g. size, color)
+                if intent.required_attributes:
+                    attrs_satisfied = False
+                    for v in active_variants:
+                        v_title = (v.title or "").lower()
+                        v_sku = (v.sku or "").lower()
+                        req_vals = [
+                            val.strip().lower()
+                            for val in intent.required_attributes.values()
+                            if val.strip()
+                        ]
+                        if req_vals and all(val in v_title or val in v_sku for val in req_vals):
+                            attrs_satisfied = True
+                            break
+                    if not attrs_satisfied:
+                        continue
+                    has_attribute_match = True
+
+                var_prices: list[int] = [
+                    v.price_override_paise
+                    for v in active_variants
+                    if v.price_override_paise is not None and v.price_override_paise > 0
+                ]
+                if not var_prices and p.base_price_paise > 0:
+                    var_prices = [p.base_price_paise]
+                if not var_prices:
+                    continue
+                min_var_p: int = min(var_prices)
+                max_var_p: int = max(var_prices)
+
+                if intent.maximum_budget_paise is not None:
+                    qty = min(max(intent.quantity, 1), 1000)
+                    total_required_paise = min_var_p * qty
+                    if total_required_paise > intent.maximum_budget_paise:
+                        continue
+                    is_within_budget = True
+                else:
+                    is_within_budget = True
+
+                matching_products.append(
+                    PublicProductSummary(
+                        product_id=str(p.id),
+                        title=p.title,
+                        category=p.category,
+                        description=p.description,
+                        price_range_paise={"min": min_var_p, "max": max_var_p},
+                        in_stock=True,
+                        attributes={"variants_count": len(active_variants)},
+                    )
+                )
+
+            # If search filters were provided, candidate must have matching products
+            has_filter = bool(
+                query_text or intent.required_attributes or cat_filter or intent.product_id
+            )
+            if has_filter and not matching_products:
+                continue
+
+            # Build public profile
+            pub_prof = await cls.build_public_profile(session, m.id)
+            if pub_prof is None:
+                continue
+
+            # Deterministic Reason Codes & Score
+            reason_codes: list[str] = []
+            score = 0
+
+            if has_attribute_match:
+                reason_codes.append("MATCH_EXACT_ATTRIBUTES")
+                score += 40
+            cat_matched = has_category_match or bool(
+                cat_filter and cat_filter in (pub_prof.category or "").lower()
+            )
+            if cat_matched:
+                reason_codes.append("MATCH_CATEGORY")
+                score += 20
+            if is_within_budget or intent.maximum_budget_paise is None:
+                reason_codes.append("WITHIN_BUDGET")
+                score += 20
+            if pub_prof.inventory_summary == "AVAILABLE":
+                reason_codes.append("IN_STOCK")
+                score += 15
+            if intent.delivery_region and merchant_regions:
+                reason_codes.append("DELIVERY_SUPPORTED")
+                score += 10
+            if req_caps:
+                reason_codes.append("CAPABILITY_MATCH")
+                score += 10
+            if pub_prof.negotiation_supported and intent.negotiation_preference in (
+                "WANTED",
+                "INDIFFERENT",
+                None,
+            ):
+                reason_codes.append("NEGOTIATION_SUPPORTED")
+                score += 5
+            if pub_prof.description and pub_prof.discovery_tags:
+                reason_codes.append("PROFILE_COMPLETE")
+                score += 5
+
+            matched_results.append(
+                DiscoveryMatchResult(
+                    merchant=pub_prof,
+                    matching_products=matching_products,
+                    rank=0,  # Will be assigned after sort
+                    score=score,
+                    reason_codes=reason_codes,
+                    next_actions=["START_BUYER_SESSION", "GET_PRODUCT", "GET_QUOTE"],
+                )
+            )
+
+            # Record telemetry replay-safely
+            target_pid = uuid.UUID(matching_products[0].product_id) if matching_products else None
+            await cls.record_telemetry(
+                session=session,
+                merchant_id=m.id,
+                event_type=DiscoveryTelemetryEventType.MERCHANT_RETURNED.value,
+                correlation_id=corr_id,
+                sanitized_query=query_text[:255] if query_text else None,
+                product_id=target_pid,
+            )
+
+        # Deterministic sort: higher score first, lower min_price second, slug third
+        matched_results.sort(
+            key=lambda res: (
+                -res.score,
+                res.merchant.price_range_paise.get("min", 0),
+                res.merchant.slug,
+            )
+        )
+
+        # Assign deterministic 1-indexed ranks
+        for idx, item in enumerate(matched_results, start=1):
+            item.rank = idx
+
+        return DiscoverySearchResponse(
+            results=matched_results,
+            total_matches=len(matched_results),
+            discovery_schema_version="1.0.0",
+            next_canonical_action="START_BUYER_SESSION",
+        )
+
+    @classmethod
+    async def record_telemetry(
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+        event_type: str,
+        correlation_id: str,
+        sanitized_query: str | None = None,
+        product_id: uuid.UUID | None = None,
+    ) -> None:
+        """Records tenant-scoped discovery telemetry idempotently.
+
+        Uses unique constraint (merchant_id, event_type, correlation_id) to ensure
+        replays do not duplicate telemetry entries.
+        """
+        stmt = select(MerchantDiscoveryTelemetry).where(
+            MerchantDiscoveryTelemetry.merchant_id == merchant_id,
+            MerchantDiscoveryTelemetry.event_type == event_type,
+            MerchantDiscoveryTelemetry.correlation_id == correlation_id,
+        )
+        existing = (await session.execute(stmt)).scalar_one_or_none()
+        if existing is not None:
+            return  # Replay safe
+
+        telemetry = MerchantDiscoveryTelemetry(
+            merchant_id=merchant_id,
+            event_type=event_type,
+            correlation_id=correlation_id,
+            sanitized_query=sanitized_query,
+            product_id=product_id,
+        )
+        session.add(telemetry)
+        await session.flush()
+
+    @classmethod
+    async def get_discoverability_status(
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+    ) -> DiscoverabilityStatusResponse:
+        """Returns the merchant control plane discoverability status and metrics."""
+        profile = await cls.get_or_create_profile(session, merchant_id)
+        pub_profile = await cls.build_public_profile(session, merchant_id)
+
+        # Query telemetry metrics
+        stmt_counts = (
+            select(
+                MerchantDiscoveryTelemetry.event_type,
+                func.count(MerchantDiscoveryTelemetry.id),
+            )
+            .where(MerchantDiscoveryTelemetry.merchant_id == merchant_id)
+            .group_by(MerchantDiscoveryTelemetry.event_type)
+        )
+        rows = (await session.execute(stmt_counts)).all()
+        metrics: dict[str, int] = {
+            DiscoveryTelemetryEventType.SEARCH_RECEIVED.value: 0,
+            DiscoveryTelemetryEventType.MERCHANT_RETURNED.value: 0,
+            DiscoveryTelemetryEventType.MERCHANT_SELECTED.value: 0,
+            DiscoveryTelemetryEventType.PRODUCT_SELECTED.value: 0,
+            DiscoveryTelemetryEventType.HANDOFF_INITIATED.value: 0,
+        }
+        for event_type, count in rows:
+            metrics[event_type] = int(count)
+
+        caps = cls.get_public_capability_graph()
+
+        return DiscoverabilityStatusResponse(
+            discoverability_state=profile.discoverability_state,
+            profile=pub_profile,
+            metrics=metrics,
+            public_capability_graph=caps,
+            supported_protocols=["ACP/1.0", "REST/1.0"],
+            profile_version=profile.profile_version,
+            updated_at=profile.last_refreshed_at.isoformat(),
+        )
