@@ -12,7 +12,7 @@ def test_alembic_script_directory_and_head() -> None:
     script = ScriptDirectory.from_config(config)
 
     head = script.get_current_head()
-    assert head == "016_phase9_public_discovery_identifiers"
+    assert head == "017_phase8_deferred_hardening"
 
     revision = script.get_revision("001_initial_schema")
     assert revision is not None
@@ -74,9 +74,12 @@ def test_alembic_script_directory_and_head() -> None:
     assert discovery_network is not None
     assert discovery_network.down_revision == "014_autonomy_failure_telemetry"
 
-    public_identifiers = script.get_revision("016_phase9_public_discovery_identifiers")
+    public_identifiers = script.get_revision("016_phase9_public_ids")
     assert public_identifiers is not None
     assert public_identifiers.down_revision == "015_phase9_discovery_network"
+
+    for revision in script.walk_revisions():
+        assert len(revision.revision) <= 32
 
 
 def test_merchant_run_downgrade_refuses_to_discard_merchant_scoped_runs() -> None:
