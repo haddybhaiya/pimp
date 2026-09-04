@@ -168,6 +168,17 @@
 - **FAILURE IF WRONG:** Rogue agent execution could flood store changes, clobber human edits, alter live pricing, or persist harmful catalog modifications without an emergency stop or recovery path.
 - **MITIGATION:** 18-precondition deterministic gate pipeline; rejected gates are rolled back to a savepoint, then recorded in the tenant-scoped failure ledger and audit chain for anomaly detection; server-authoritative master kill switch with instant execution blocking and safe running experiment stopping; pre-mutation JSON snapshots; optimistic locking with `RollbackConflictError` when target version exceeds expected rollback version; and human-only administrative authority over rules and budgets.
 
+---
+
+### 18. Discovery Network Descriptive Separation, Anti-Probing 404, and Zero-Secret Allowlisting
+- **ASSUMPTION:** External AI discovery surfaces must operate strictly in descriptive mode without capability execution, stock reservation, or session establishment. Direct merchant lookups must return an identical 404 (`MerchantNotFoundError`) for both non-discoverable and non-existent IDs to prevent store enumeration/probing. Public profiles and capability graphs must project strictly allowlisted non-sensitive fields without exposing credentials, private margins, floor prices, or buyer PII.
+- **EVIDENCE:** Verified via `tests/test_phase9_discovery_network.py` (all 17 integration, anti-probing, zero-secret, prompt-injection, rate-limiting, and golden path tests passing deterministically).
+- **STATUS:** **VERIFIED (PASS)**
+- **CONFIDENCE:** 100%
+- **FAILURE IF WRONG:** Aggregator bots could probe private stores, leak internal pricing floor margins, initiate unauthorized buyer sessions from discovery, cause DoS via prompt injection, or inflate search telemetry via replays.
+- **MITIGATION:** Descriptive-only architecture; uniform `MerchantNotFoundError` for non-discoverable stores; default-deny allowlisted public projection (`PublicMerchantProfile`); integer multiplication overflow protection for budget filtering; prompt injection inputs treated as literal search strings; in-memory sliding window rate limits (60 req/min per client IP); and composite DB replay constraint `(merchant_id, event_type, correlation_id)` on search telemetry.
+
+
 
 
 

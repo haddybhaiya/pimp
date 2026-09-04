@@ -1,9 +1,9 @@
 # Phase Status & Roadmap: Agent-Ready Merchant
 
-> **Current Phase:** Phase 8 (Controlled Autonomy)  
+> **Current Phase:** Phase 9 (Discovery Network) — FINAL AUTHORIZED IMPLEMENTATION PHASE  
 > **Status:** 100% COMPLETED & SIGNED OFF  
-> **Milestone Status:** Phases 1–5 Complete, Phase 6 Skipped (Satisfied), Phase 7 Complete, Phase 8 Complete  
-> **Next Scope Cut Line:** Phase 8 is the final phase of this project. Phase 9 (Discovery Network) is strictly OUT OF SCOPE.
+> **Milestone Status:** Phases 1–5 Complete, Phase 6 Skipped (Satisfied), Phases 7–9 Complete  
+> **Next Scope Cut Line:** Phase 9 is the final implementation phase. All 9 authorized phases are complete. Development is concluded and signed off.
 
 ---
 
@@ -32,7 +32,7 @@
 | **Phase 6** | Autonomous Negotiation Layer | **SKIPPED — FUNCTIONALITY SATISFIED BY EARLIER PHASES** | Counter-offer evaluation, floor price enforcement, margin protections, and HITL escalations fully implemented and verified in Phases 1–5 |
 | **Phase 7** | Merchant Agent (Intelligence & Optimization Layer) | **COMPLETED** | Live commerce observation matrix, diagnostic finding engine, evidence-backed proposal generation, server risk governance, approval-first experiment framework, deterministic measurement |
 | **Phase 8** | Controlled Autonomy | **COMPLETED** | Low-risk reversible optimizations (`IMPROVE_PRODUCT_DESCRIPTION`, `IMPROVE_DISCOVERY_METADATA`, `REORDER_RECOMMENDATIONS`, `EXPOSE_DELIVERY_ETA`, `SUGGEST_BOUNDED_EXPERIMENT`), Master Kill Switch, 18 pre-condition gates, rate limits & cooldowns, deterministic rollback engine |
-| **Phase 9** | Discovery Network | **OUT OF SCOPE** | DO NOT IMPLEMENT. Strictly out of scope. |
+| **Phase 9** | Discovery Network | **COMPLETED** | Public discovery search, descriptive capability graph, anti-probing uniform 404, zero-secret public profiles, deterministic ranking reason codes, replay-safe discovery telemetry, discoverability control-plane page |
 
 ---
 
@@ -114,5 +114,38 @@
 - [x] **Comprehensive Test Suite & Quality Gate Compliance:**
   - 24 dedicated integration tests in `tests/test_phase8_controlled_autonomy.py` covering authority boundaries, prohibited attacks, explicit opt-in defaults, rejected-proposal execution blocking, approval-first experiment starts, budget/cooldown enforcement, durable failure anomaly detection, optimistic locking, kill switch pre-execution and running experiment halting, E2E Golden Path, targetless/placeholder mutation rejection, experiment rollback reconciliation and conflict durability, rollback conflict rejection, tenant isolation, idempotency replay, and REST endpoints.
   - 100% clean passes: 316 pytest tests passing, 31 frontend vitest tests passing, 0 Mypy errors across 141 source files, 0 Ruff errors.
-- [x] **Phase Stop Boundary Enforced:**
-  - Project execution stopped cleanly after Phase 8. Phase 9 (Discovery Network) is strictly OUT OF SCOPE.
+- [x] **Phase 8 Completed & Signed Off.**
+
+---
+
+## Phase 9 Deliverables Completed
+
+- [x] **Database Models & Alembic Migration 015 (`015_phase9_discovery_network.py`):**
+  - Created `merchant_discovery_profiles` table with `discoverability_state` (`PRIVATE`, `DISCOVERABLE`, `PAUSED`, `SUSPENDED`), default `PRIVATE`.
+  - Stored allowlisted discovery metadata (custom tags, custom description, delivery regions) with deterministic SHA-256 `metadata_hash`.
+  - Created `merchant_discovery_telemetry` table with tenant foreign key and composite replay constraint `(merchant_id, event_type, correlation_id)`.
+- [x] **Authoritative Discovery Service & Public Surface (`DiscoveryService`):**
+  - $\text{Intelligence} \neq \text{Authority}$: Discovery is strictly descriptive. It never creates buyer sessions, quotes, orders, reservations, payments, or refunds.
+  - Zero Secret & PII Leakage (`INV-AGY-03`): Never leaks Razorpay keys, HMAC secrets, auth tokens, database IDs/secrets, private policies, floor prices, or customer PII.
+  - Anti-probing guarantee: Non-discoverable merchants (`PRIVATE`, `PAUSED`, `SUSPENDED`) and non-existent IDs return an identical, uniform 404 (`MerchantNotFoundError`).
+  - Human-only discoverability administration: Modifying discoverability state or metadata requires authenticated human `MERCHANT_ADMIN` role; autonomous agents and buyers fail closed.
+  - In-memory sliding-window rate limiting (60 requests/minute per client IP) on public discovery search.
+- [x] **Public Capability Graph & ACP Adapter Support:**
+  - Dynamic, read-only capability graph derived from canonical `CapabilityRegistry` without capability invocation or privilege grant.
+  - Extended ACP Protocol Adapter with `discovery_search` and `get_public_profile` actions.
+- [x] **Deterministic Matching & Explainable Ranking Engine:**
+  - Filtering by currency, capability requirements, bounded delivery region, category, product ID, attributes, and integer paise budget.
+  - Integer budget multiplication overflow protection (`min_price * qty <= budget_paise`).
+  - Strict search keyword treatment: Prompt injection payloads are evaluated purely as literal search keywords, never instructions.
+  - Explainable reason codes (`WITHIN_BUDGET`, `IN_STOCK`, `DELIVERY_SUPPORTED`, `CAPABILITY_MATCH`, `MATCH_EXACT_ATTRIBUTES`, `NEGOTIATION_SUPPORTED`, `PROFILE_COMPLETE`).
+- [x] **Web Control Plane Integration (`frontend/src/pages/discoverability.tsx`):**
+  - Live Discoverability status switch (`DISCOVERABLE` / `PAUSED` / `PRIVATE`).
+  - Allowlisted metadata editor (tags, description, regions).
+  - Public profile preview matching buyer-facing API payload.
+  - Public capability graph viewer.
+  - Real-time search and profile view telemetry counters.
+- [x] **Comprehensive Test Suite & Quality Gate Compliance:**
+  - 17 dedicated tests in `tests/test_phase9_discovery_network.py` covering all discovery specifications, anti-probing, zero secret leakage, prompt injection immunity, budget overflow guards, fail-closed capability/region filtering, explainable reason codes, replay-safe telemetry, rate limiting, cross-tenant isolation, E2E Golden Path, deliberate out-of-stock failure, and REST endpoints.
+  - 100% clean verification across the entire project: 333 passed pytest tests, 31 frontend vitest tests, 0 Mypy errors, 0 Ruff errors.
+- [x] **Final Project Completion & Sign-off:**
+  - Phase 9 is the final authorized phase of the Agent-Ready Merchant roadmap. All 9 phases are completed and fully verified. STOP all further implementation.

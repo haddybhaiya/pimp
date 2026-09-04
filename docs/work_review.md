@@ -66,6 +66,23 @@
 
 **Verified by:** `tests/test_phase8_controlled_autonomy.py` (23 passed), migration tests (5 passed), full pytest suite (314 passed, 3 skipped), and frontend test suite (31 passed).
 
+**Validated deferred follow-ups (2026-09-04 — no implementation in this review):**
+   - **P1 — Incomplete rollback idempotency receipts:** A delegated experiment rollback can commit a `RollbackConflictError` while its experiment-stop and action-rollback receipts remain incomplete. A retry with the same key is then permanently reported as in progress. Complete or explicitly terminalize both receipts before committing the conflict outcome.
+   - **P2 — Placeholder target aliases:** `discovery` and `sku`, like `general`, can currently resolve to literal product SKUs. Reject all server-known placeholders before product lookup.
+   - **P2 — Autonomy execution idempotency length:** The API accepts 255-character keys while the successful autonomy-action ledger permits 128. Align validation and persistence limits before a successful action is recorded.
+   - **P2 — Authoritative evidence validation:** The execution gate checks only that proposal evidence is nonempty, then re-governs with an empty evidence context. Verify every reference against the server-produced snapshot before execution.
+   - **P2 — Rollback replay version:** A new key for an already-rolled-back action reports the pre-rollback version rather than the current version created by rollback.
+   - **P2 — Agent-page unavailable states:** Failed action-ledger/status requests can look like empty/healthy autonomy state; the visible kill-switch control can become a no-op; and autonomous execution remains offered while status is unknown or paused. Preserve data, surface errors, and fail closed in the UI.
+   - **P2 — Zero experiment target:** The Agent page rejects `target_value = 0` although the typed endpoint allows finite non-negative values.
+   - **P2 — Structured financial-action normalization:** The prohibited-action patterns miss `reimbursing`, `disbursing`, and acronym-boundary forms such as `REFUNDRequest`.
+   - **P2 — Approval-required gate coverage:** The existing test changes rule classification, causing an earlier classification gate to fail rather than exercising `approval_required = true`.
+   - **P2 — Policies-page rule-load error:** A rejected autonomy-rules request is presented as an empty rule list rather than an unavailable control plane.
+   - **P2 — Experiment rollback messaging:** The UI promises a baseline restoration even when the experiment has no linked action snapshot and only its lifecycle status changes.
+   - **P2 — Rule duration database constraint:** `experiment_duration_limit_days` is bounded by the request schema but not by a database constraint; direct writers can persist invalid values.
+   - **P2 — Incomplete client autonomy-rule payload:** The typed client omits `experiment_exposure_limit` and `bounded_monetary_limit_paise`, which the server already supports.
+   - **P2 — Autonomous-action pagination bounds:** The action-ledger endpoint accepts negative or unbounded `limit`/`offset` values.
+   - **P2 — Strict rollback request body:** `bool("false")` currently enables rollback because the stop endpoint accepts an untyped dictionary instead of a strict boolean schema.
+   - **Already resolved — proposal tenant coupling:** The reported migration-011 `proposal_id` issue is superseded by migrations 012–013, which add the composite `(proposal_id, merchant_id)` foreign key and tenant uniqueness constraint.
 ---
 
 # Service, Telemetry, and Replay-Safety Follow-up Remediation Log
@@ -913,7 +930,35 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 
 ## Phase 8 P1 Remediation: Durable Failure Circuit Breaker (2026-09-03)
 
-- **Status:** **RESOLVED & VERIFIED**
-- **Finding:** Rejected autonomous execution gates did not persist a failure record, so the three-failures-per-hour anomaly breaker could never reach `REQUIRE_HUMAN_REVIEW`.
-- **Resolution:** `execute_autonomous_action` now runs its gates inside a nested transaction. A rejected gate or optimistic conflict rolls back all tentative side effects and idempotency state, then appends a tenant-scoped `merchant_autonomy_failures` record plus an immutable `AUTONOMOUS_ACTION_REJECTED` audit event. The anomaly controller counts these non-mutating records; they neither consume autonomous-execution budget nor appear as successful actions.
 - **Verification:** `tests/test_phase8_controlled_autonomy.py::test_rejected_execution_attempts_trip_durable_anomaly_circuit_breaker` and the Alembic migration test suite.
+
+---
+
+## Phase 9 Discovery Network Implementation & Verification Summary (2026-09-04)
+
+- **Status:** **COMPLETED, VERIFIED & SIGNED OFF**
+- **Objective:** Enable external AI buyers, discovery agents, and aggregator networks to discover agent-ready merchants and catalog summaries matching buyer intent.
+- **Architectural Implementation:**
+  1. **Database & Migrations (`alembic/versions/015_phase9_discovery_network.py`):**
+     - Created `merchant_discovery_profiles` (`discoverability_state`, `custom_tags`, `custom_description`, `delivery_regions`, `metadata_hash`, `profile_version`).
+     - Created `merchant_discovery_telemetry` (`event_type`, `correlation_id`, `sanitized_query`, `product_id`) with composite replay protection constraint `(merchant_id, event_type, correlation_id)`.
+  2. **Authoritative Discovery Service (`src/agent_ready_merchant/services/discovery_service.py`):**
+     - Enforced $\text{Intelligence} \neq \text{Authority}$: Discovery is strictly descriptive and read-only. Never creates buyer sessions, quotes, orders, inventory reservations, or payments.
+     - Anti-probing guarantee: Lookups on non-discoverable stores (`PRIVATE`, `PAUSED`, `SUSPENDED`) and non-existent IDs return an identical, uniform 404 (`MerchantNotFoundError`).
+     - Zero secret/PII leakage: Public profile allowlists non-sensitive projection; excludes keys, secrets, auth tokens, internal margins, floor prices, customer PII.
+     - Human-only discoverability administration: Modifying discoverability state or metadata requires human `MERCHANT_ADMIN` role; autonomous agents fail closed.
+     - Bounded rate limiting: In-memory sliding window rate limits (60 req/min per IP) on public search.
+     - Deterministic multi-criteria matching & ranking with integer multiplication overflow protection for budget calculations.
+     - Prompt injection neutralization: Buyer query text is treated strictly as search keywords, never instructions.
+     - Replay-safe telemetry logging with idempotency rollback handling.
+  3. **Public Capability Graph & Protocol Adapters:**
+     - Dynamic, read-only capability graph derived from canonical `CapabilityRegistry`.
+     - ACP Protocol Adapter extended with `discovery_search` and `get_public_profile` actions.
+  4. **Frontend Discoverability Control Plane (`frontend/src/pages/discoverability.tsx`):**
+     - State toggle (`DISCOVERABLE`, `PAUSED`, `PRIVATE`), metadata editor, public preview, capability graph viewer, live metrics.
+  5. **Verification Matrix:**
+     - 17 dedicated tests in `tests/test_phase9_discovery_network.py` (100% pass).
+     - Full project regression: 333 backend pytest tests pass, 31 frontend vitest tests pass, production Vite build passes, 0 Mypy issues, 0 Ruff issues.
+  6. **Final Project Roadmap Sign-off:**
+     - All 9 authorized phases are complete. Execution stops cleanly.
+

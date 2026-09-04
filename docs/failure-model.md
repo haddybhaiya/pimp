@@ -122,3 +122,33 @@ sequenceDiagram
 - **Handling:** Each rejected execution gate or optimistic-lock conflict rolls back its nested execution transaction, then appends a tenant-scoped `merchant_autonomy_failures` record and immutable `AUTONOMOUS_ACTION_REJECTED` audit event. `evaluate_anomaly_state` counts these durable records over the trailing hour.
 - **Resolution:** Subsequent autonomous execution attempts fail closed with `REQUIRE_HUMAN_REVIEW` while the rolling failure threshold is met. The state is intentionally derived rather than persisted, so it returns to `NORMAL` only after all qualifying failure records age out of the one-hour window.
 
+---
+
+## 5. Discovery Network Failure Modes
+
+### 5.1 Anti-Probing & Non-Discoverable Merchant Lookup Rejection (Uniform 404)
+- **Trigger:** An external buyer agent, aggregator crawler, or malicious actor attempts a direct lookup (`GET /api/v1/discovery/merchants/{public_id}`) on a merchant ID that is non-existent, or currently in `PRIVATE`, `PAUSED`, or `SUSPENDED` state.
+- **Handling:** `DiscoveryService.get_public_merchant_by_id_or_slug` queries the store profile. If missing or not `DISCOVERABLE`, it immediately raises `MerchantNotFoundError`.
+- **Resolution:** Returns an identical HTTP 404 response (`MERCHANT_NOT_FOUND`, "Merchant not found or not discoverable.") with uniform timing and payload. The probing caller cannot distinguish whether the merchant ID exists or is non-public.
+
+### 5.2 Out-of-Band Stock Depletion After Discovery (Transaction-Time Inventory Gate)
+- **Trigger:** Discovery search reports a product as "in stock" based on coarse metadata. Between discovery and order creation, inventory drops to zero (due to concurrent purchases or merchant admin adjustment).
+- **Handling:** Discovery data is explicitly non-binding. When the buyer agent attempts to accept a quote or create an order via `CanonicalCommerceGateway.create_order`, the gateway locks the inventory row (`SELECT ... FOR UPDATE`) and validates live unreserved stock against the requested quantity.
+- **Resolution:** Fails closed with `ORDER_CREATION_FAILED` ("Insufficient stock for variant..."). Zero orders or payment charges are committed, and inventory remains non-negative (`INV-STA-03`).
+
+### 5.3 Unauthorized Discovery Publication Attempt by Autonomous Agent
+- **Trigger:** An autonomous merchant agent or external caller attempts to call `PUT /api/v1/merchant/discoverability` to change store status to `DISCOVERABLE` or alter discovery tags.
+- **Handling:** `DiscoveryService.update_discoverability` enforces an explicit actor check: `actor_role == "MERCHANT_ADMIN"`.
+- **Resolution:** Rejects the call immediately with `DiscoverySecurityError` (HTTP 403). Autonomous agents and non-admin actors are structurally prevented from publishing merchants or altering public visibility.
+
+### 5.4 Public Search Rate-Limit Saturation
+- **Trigger:** A buyer agent, scraper, or bot sends more than 60 discovery search requests within a rolling 60-second window from the same client IP address.
+- **Handling:** `DiscoveryService.search_merchants` checks the client IP against an in-memory sliding window deque of request timestamps.
+- **Resolution:** Rejects excess requests with `DiscoveryRateLimitError` (HTTP 429: "Discovery search rate limit exceeded. Please retry in a few moments."). System compute and database query capacity remain protected.
+
+### 5.5 Replay of Duplicate Discovery Search Telemetry
+- **Trigger:** A network retry or aggregator re-transmits an identical search telemetry event (`SEARCH_RECEIVED`, `MERCHANT_RETURNED`, etc.) with the same `correlation_id`.
+- **Handling:** `DiscoveryService.record_telemetry` catches `IntegrityError` on the composite unique index `(merchant_id, event_type, correlation_id)` in `merchant_discovery_telemetry`.
+- **Resolution:** Silently ignores the duplicate insert, rolls back the sub-transaction savepoint, and logs a debug event. Telemetry metrics remain accurate without duplicate inflation.
+
+

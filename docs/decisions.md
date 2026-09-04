@@ -292,6 +292,25 @@
   - *Positive:* Safe, bounded autonomous store optimization with zero risk to financial boundaries, instant kill-switch control, and guaranteed reversible state snapshots.
   - *Negative:* Autonomous actions cannot alter pricing or financial parameters directly; requires maintenance of pre-mutation snapshots in database.
 
+---
+
+## ADR-022: Discovery Network Architecture, Public Capability Graph, and Deterministic Buyer Matching Engine
+
+- **Status:** ACCEPTED
+- **Context:** External AI buyers, autonomous aggregator agents, and commerce protocols require a mechanism to discover agent-ready merchants, explore public catalog summaries, and assess store capabilities matching buyer intent. However, discovery surfaces must not create unauthorized buyer sessions, reserve stock, leak merchant secrets/credentials, expose floor prices or private policy rules, allow prompt injection attacks to alter rankings, or enable resource-existence probing against non-public stores.
+- **Decision:**
+  1. **Strict Separation of Discovery and Authority ($\text{Intelligence} \neq \text{Authority}$):** Discovery endpoints and capability graphs are strictly descriptive and read-only. Discovery never grants capability execution, initializes buyer sessions, reserves inventory, creates binding quotes, generates orders, or triggers financial transactions.
+  2. **Merchant-Controlled Discoverability Lifecycle:** Store discoverability is managed exclusively by human `MERCHANT_ADMIN` users across four explicit states: `PRIVATE` (default upon signup), `DISCOVERABLE`, `PAUSED`, and `SUSPENDED`. Autonomous agents, LLM proposals, and external buyers cannot modify discoverability.
+  3. **Anti-Probing Uniform 404:** Direct lookups on merchants in `PRIVATE`, `PAUSED`, `SUSPENDED`, or non-existent states return an identical, uniform 404 error (`MerchantNotFoundError`) with consistent error timing and payloads, preventing merchant enumeration or existence probing.
+  4. **Safe Public Capability Graph:** The public capability graph is dynamically derived from the canonical `CapabilityRegistry` with descriptive metadata, monetary classifications, and side-effect classes. Discovery of a capability node does not grant authorization to invoke it.
+  5. **Zero Secret & PII Leakage:** Public profiles project strictly allowlisted fields (public UUID, slug, display name, category, safe product summaries, supported currencies, non-binding price range in integer paise, safe delivery regions, and verified platform trust signals). Razorpay keys, webhook secrets, internal margin percentages, private policies, and customer PII are strictly excluded.
+  6. **Deterministic Matching & Integer Budget Safety:** Buyer intents are evaluated against catalog offerings using deterministic filtering (currency, required capabilities, delivery region, category, product ID, attributes, and integer budget). Budget checks enforce integer multiplication overflow guards (`min_var_paise * qty <= maximum_budget_paise`). Unsupported capabilities and regions fail closed.
+  7. **Prompt Injection Search-Keyword Neutralization:** All text inputs in buyer search queries and parameters are treated strictly as literal search strings. Prompt injection directives (e.g. `IGNORE PREVIOUS INSTRUCTIONS`) cannot modify ranking algorithms, alter floor prices, bypass capability gates, or trigger autonomous mutations.
+  8. **Replay-Safe Discovery Telemetry & Bounded Rate Limits:** Telemetry events enforce composite uniqueness on `(merchant_id, event_type, correlation_id)` in PostgreSQL, preventing replay inflation. Public search is protected by in-memory sliding window rate limits (60 req/min per client IP).
+- **Consequences:**
+  - *Positive:* Enables seamless discovery of agent-ready merchants across the external AI buyer ecosystem while maintaining zero secret leakage, fail-closed security, and complete protection against unauthorized financial or state mutations.
+  - *Negative:* Buyers cannot immediately transact from search results; they must perform an explicit, server-authoritative handoff to `initialize_session` on the canonical commerce gateway.
+
 
 
 
