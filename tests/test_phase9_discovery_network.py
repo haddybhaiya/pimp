@@ -65,6 +65,7 @@ from agent_ready_merchant.schemas.discovery import (
     DiscoverabilityUpdateRequest,
 )
 from agent_ready_merchant.services.discovery_service import (
+    DiscoveryConflictError,
     DiscoveryRateLimitError,
     DiscoverySecurityError,
     DiscoveryService,
@@ -218,6 +219,10 @@ async def setup_discovery_merchants(db_session: AsyncSession) -> dict[str, Any]:
         "m_priv": m_priv,
         "m_paused": m_paused,
         "m_susp": m_susp,
+        "prof_pub": prof_pub,
+        "prof_priv": prof_priv,
+        "prof_paused": prof_paused,
+        "prof_susp": prof_susp,
     }
 
 
@@ -235,10 +240,10 @@ async def test_private_paused_suspended_merchants_not_discoverable(
     search_res = await DiscoveryService.search_merchants(db_session, intent)
 
     returned_merchant_ids = [r.merchant.public_id for r in search_res.results]
-    pub_id = str(setup_discovery_merchants["m_pub"].id)
-    priv_id = str(setup_discovery_merchants["m_priv"].id)
-    paused_id = str(setup_discovery_merchants["m_paused"].id)
-    susp_id = str(setup_discovery_merchants["m_susp"].id)
+    pub_id = str(setup_discovery_merchants["prof_pub"].public_id)
+    priv_id = str(setup_discovery_merchants["prof_priv"].public_id)
+    paused_id = str(setup_discovery_merchants["prof_paused"].public_id)
+    susp_id = str(setup_discovery_merchants["prof_susp"].public_id)
 
     assert pub_id in returned_merchant_ids
     assert priv_id not in returned_merchant_ids
@@ -257,9 +262,9 @@ async def test_direct_lookup_anti_probing_uniform_404(
 ) -> None:
     """Direct lookup must return uniform 404 without revealing private existence or state."""
     fake_id = str(uuid.uuid4())
-    priv_id = str(setup_discovery_merchants["m_priv"].id)
-    paused_id = str(setup_discovery_merchants["m_paused"].id)
-    susp_id = str(setup_discovery_merchants["m_susp"].id)
+    priv_id = str(setup_discovery_merchants["prof_priv"].public_id)
+    paused_id = str(setup_discovery_merchants["prof_paused"].public_id)
+    susp_id = str(setup_discovery_merchants["prof_susp"].public_id)
 
     # All non-discoverable IDs must raise identical MerchantNotFoundError
     for target_id in [fake_id, priv_id, paused_id, susp_id]:
@@ -278,8 +283,9 @@ async def test_public_profile_zero_secret_and_pii_leakage(
     db_session: AsyncSession, setup_discovery_merchants: dict[str, Any]
 ) -> None:
     """Public profile must contain only safe allowlisted fields; zero secrets or PII."""
-    m_pub = setup_discovery_merchants["m_pub"]
-    profile = await DiscoveryService.get_public_merchant_by_id_or_slug(db_session, str(m_pub.id))
+    profile = await DiscoveryService.get_public_merchant_by_id_or_slug(
+        db_session, str(setup_discovery_merchants["prof_pub"].public_id)
+    )
 
     dump = profile.model_dump()
     raw_str = str(dump).lower()
@@ -313,6 +319,7 @@ async def test_human_only_discoverability_controls_agent_cannot_publish(
     m_priv = setup_discovery_merchants["m_priv"]
 
     req = DiscoverabilityUpdateRequest(
+        expected_profile_version=setup_discovery_merchants["prof_priv"].profile_version,
         discoverability_state=DiscoverabilityState.DISCOVERABLE.value,
         custom_tags=["unauthorized", "agent", "publish"],
     )
@@ -580,29 +587,32 @@ async def test_explicit_handoff_to_canonical_buyer_session(
     """Discovery signals next action 'START_BUYER_SESSION';
     handoff creates authoritative session.
     """
-    m_pub = setup_discovery_merchants["m_pub"]
-
     intent = BuyerDiscoveryIntent(query="running", currency="INR")
     search_res = await DiscoveryService.search_merchants(db_session, intent)
 
     assert search_res.next_canonical_action == "START_BUYER_SESSION"
     matched_merchant = search_res.results[0].merchant
-    assert matched_merchant.public_id == str(m_pub.id)
+    assert matched_merchant.public_id == str(setup_discovery_merchants["prof_pub"].public_id)
 
-    # Explicit handoff: buyer invokes canonical gateway initialize_session
-    init_req = InitializeSessionRequest(
-        buyer_agent_identifier="buyer_ai_test",
-        requested_capabilities=["buyer:discover", "buyer:quote", "buyer:checkout"],
-    )
-    gateway = CanonicalCommerceGateway()
-    init_env = await gateway.initialize_session(
-        db_session, init_req, uuid.UUID(matched_merchant.public_id)
-    )
+    # Explicit handoff resolves only the opaque public ID, then delegates the
+    # buyer-session mutation to the existing canonical gateway.
+    app = create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        handoff = await client.post(
+            f"/api/v1/discovery/merchants/{matched_merchant.public_id}/handoff",
+            json={
+                "buyer_agent_identifier": "buyer_ai_test",
+                "requested_capabilities": ["buyer:discover", "buyer:quote", "buyer:checkout"],
+                "correlation_id": search_res.correlation_id,
+                "selected_product_sku": "FLEET-RUN-SHOE-09",
+            },
+        )
 
-    assert init_env.status == "SUCCESS"
-    assert init_env.data is not None
-    assert init_env.data.session_id is not None
-    assert "buyer:discover" in init_env.data.granted_capabilities
+    assert handoff.status_code == 200
+    handoff_data = handoff.json()
+    assert handoff_data["status"] == "SUCCESS"
+    assert handoff_data["data"]["session_id"] is not None
+    assert "buyer:discover" in handoff_data["data"]["granted_capabilities"]
 
 
 # =========================================================================
@@ -643,6 +653,51 @@ async def test_stale_discovery_cannot_bypass_transaction_time_inventory_checks(
     assert check_env.data is not None
     assert check_env.data.in_stock is False
     assert check_env.data.available_quantity == 0
+
+
+@pytest.mark.asyncio
+async def test_out_of_stock_products_are_not_returned_or_ranked_in_stock(
+    db_session: AsyncSession, setup_discovery_merchants: dict[str, Any]
+) -> None:
+    """Discovery uses authoritative available inventory before returning a product."""
+    m_pub = setup_discovery_merchants["m_pub"]
+    inv_shoes = setup_discovery_merchants["inv_shoes"]
+    inv_shoes.available_quantity = 0
+    await db_session.commit()
+
+    profile = await DiscoveryService.build_public_profile(db_session, m_pub.id)
+    assert profile is not None
+    assert profile.inventory_summary == "OUT_OF_STOCK"
+    assert profile.safe_product_summaries[0].in_stock is False
+
+    result = await DiscoveryService.search_merchants(
+        db_session, BuyerDiscoveryIntent(query="running", currency="INR")
+    )
+    assert result.total_matches == 0
+
+
+@pytest.mark.asyncio
+async def test_public_identifiers_are_opaque_and_profile_updates_are_version_checked(
+    db_session: AsyncSession, setup_discovery_merchants: dict[str, Any]
+) -> None:
+    """Public discovery never returns merchant/product database UUIDs or loses concurrent edits."""
+    m_pub = setup_discovery_merchants["m_pub"]
+    prof_pub = setup_discovery_merchants["prof_pub"]
+    profile = await DiscoveryService.build_public_profile(db_session, m_pub.id)
+    assert profile is not None
+    assert profile.public_id == str(prof_pub.public_id)
+    assert profile.public_id != str(m_pub.id)
+    assert profile.safe_product_summaries[0].product_sku == "FLEET-RUN-SHOE-09"
+
+    with pytest.raises(DiscoveryConflictError):
+        await DiscoveryService.update_discoverability(
+            session=db_session,
+            merchant_id=m_pub.id,
+            req=DiscoverabilityUpdateRequest(
+                expected_profile_version=prof_pub.profile_version + 1,
+                custom_tags=["stale"],
+            ),
+        )
 
 
 # =========================================================================
@@ -771,7 +826,7 @@ async def test_e2e_golden_path_discovery_to_completed_payment(
     assert search_res.total_matches == 1
     match = search_res.results[0]
     assert match.rank == 1
-    assert match.merchant.public_id == str(m_pub.id)
+    assert match.merchant.public_id == str(setup_discovery_merchants["prof_pub"].public_id)
     assert "WITHIN_BUDGET" in match.reason_codes
     assert "MATCH_EXACT_ATTRIBUTES" in match.reason_codes
 
@@ -995,14 +1050,15 @@ async def test_rest_api_discovery_endpoints(
         assert data_search["next_canonical_action"] == "START_BUYER_SESSION"
 
         # 2. GET /api/v1/discovery/merchants/{id}
-        resp_prof = await client.get(f"/api/v1/discovery/merchants/{m_pub.id}")
+        public_id = str(setup_discovery_merchants["prof_pub"].public_id)
+        resp_prof = await client.get(f"/api/v1/discovery/merchants/{public_id}")
         assert resp_prof.status_code == 200
         data_prof = resp_prof.json()
         assert data_prof["display_name"] == m_pub.name
         assert "rzp_test" not in str(data_prof).lower()
 
         # 3. GET /api/v1/discovery/merchants/{id}/capabilities
-        resp_caps = await client.get(f"/api/v1/discovery/merchants/{m_pub.id}/capabilities")
+        resp_caps = await client.get(f"/api/v1/discovery/merchants/{public_id}/capabilities")
         assert resp_caps.status_code == 200
         data_caps = resp_caps.json()
         assert len(data_caps["capabilities"]) >= 5
@@ -1032,6 +1088,7 @@ async def test_rest_api_discovery_endpoints(
             "/api/v1/merchant/discoverability",
             headers=headers,
             json={
+                "expected_profile_version": data_status["profile_version"],
                 "custom_tags": ["pro", "running", "marathon"],
                 "custom_description": "Elite marathon and track gear.",
             },
@@ -1040,3 +1097,70 @@ async def test_rest_api_discovery_endpoints(
         data_update = resp_update.json()
         assert data_update["profile"]["description"] == "Elite marathon and track gear."
         assert "marathon" in data_update["profile"]["discovery_tags"]
+
+
+@pytest.mark.asyncio
+async def test_protocol_discovery_and_public_handoff_emit_authoritative_telemetry(
+    db_session: AsyncSession, setup_discovery_merchants: dict[str, Any]
+) -> None:
+    """ACP discovery is executable and handoff delegates session authority to the gateway."""
+    app = create_app()
+    m_pub = setup_discovery_merchants["m_pub"]
+    public_id = str(setup_discovery_merchants["prof_pub"].public_id)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        acp_search = await client.post(
+            "/api/v1/protocol/acp",
+            json={
+                "protocol": "acp",
+                "version": "2026-03-01",
+                "action": "discovery_search",
+                "params": {"query": "running", "currency": "INR"},
+            },
+        )
+        assert acp_search.status_code == 200
+        acp_search_data = acp_search.json()
+        assert acp_search_data["status"] == "SUCCESS"
+        assert acp_search_data["result"]["results"][0]["merchant"]["public_id"] == public_id
+        correlation_id = acp_search_data["result"]["correlation_id"]
+
+        acp_profile = await client.post(
+            "/api/v1/protocol/acp",
+            json={
+                "protocol": "acp",
+                "version": "2026-03-01",
+                "action": "get_public_profile",
+                "params": {"public_id": public_id},
+            },
+        )
+        assert acp_profile.status_code == 200
+        assert acp_profile.json()["status"] == "SUCCESS"
+
+        handoff = await client.post(
+            f"/api/v1/discovery/merchants/{public_id}/handoff",
+            json={
+                "buyer_agent_identifier": "discovery-protocol-buyer",
+                "requested_capabilities": ["buyer:discover", "buyer:read"],
+                "correlation_id": correlation_id,
+                "selected_product_sku": "FLEET-RUN-SHOE-09",
+            },
+        )
+        assert handoff.status_code == 200
+        assert handoff.json()["status"] == "SUCCESS"
+
+    event_types = set(
+        (
+            await db_session.execute(
+                select(MerchantDiscoveryTelemetry.event_type).where(
+                    MerchantDiscoveryTelemetry.merchant_id == m_pub.id,
+                    MerchantDiscoveryTelemetry.correlation_id == correlation_id,
+                )
+            )
+        ).scalars()
+    )
+    assert {
+        DiscoveryTelemetryEventType.SEARCH_RECEIVED.value,
+        DiscoveryTelemetryEventType.MERCHANT_RETURNED.value,
+        DiscoveryTelemetryEventType.PRODUCT_SELECTED.value,
+        DiscoveryTelemetryEventType.HANDOFF_INITIATED.value,
+    }.issubset(event_types)
