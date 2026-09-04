@@ -11,6 +11,10 @@ from agent_ready_merchant.db.base import GUID, Base, OptimisticLockMixin, Timest
 if TYPE_CHECKING:
     from agent_ready_merchant.models.audit import AuditEvent
     from agent_ready_merchant.models.autonomy import MerchantAutonomyAction, MerchantAutonomyRule
+    from agent_ready_merchant.models.discovery import (
+        MerchantDiscoveryProfile,
+        MerchantDiscoveryTelemetry,
+    )
     from agent_ready_merchant.models.experiment import MerchantExperiment
     from agent_ready_merchant.models.order import Order
     from agent_ready_merchant.models.policy import PolicyRule
@@ -128,4 +132,14 @@ class Merchant(Base, TimestampMixin, OptimisticLockMixin):
         back_populates="merchant",
         cascade="all, delete-orphan",
         overlaps="proposal",
+    )
+    discovery_profile: Mapped["MerchantDiscoveryProfile | None"] = relationship(
+        "MerchantDiscoveryProfile",
+        back_populates="merchant",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    discovery_telemetry: Mapped[list["MerchantDiscoveryTelemetry"]] = relationship(
+        "MerchantDiscoveryTelemetry",
+        cascade="all, delete-orphan",
     )

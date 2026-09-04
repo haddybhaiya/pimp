@@ -19,6 +19,17 @@ from agent_ready_merchant.schemas.controlled_autonomy import (
     RollbackRequest,
     RollbackResponse,
 )
+from agent_ready_merchant.schemas.discovery import (
+    BuyerDiscoveryIntent,
+    DiscoverabilityStatusResponse,
+    DiscoverabilityUpdateRequest,
+    DiscoveryMatchResult,
+    DiscoverySearchResponse,
+    PublicCapabilityGraphResponse,
+    PublicCapabilityNode,
+    PublicMerchantProfile,
+    PublicProductSummary,
+)
 from agent_ready_merchant.schemas.inventory import (
     InventoryItemBase,
     InventoryItemCreate,
@@ -112,4 +123,13 @@ __all__ = [
     "AutonomyActionStatus",
     "RollbackStatus",
     "AnomalyState",
+    "PublicCapabilityNode",
+    "PublicCapabilityGraphResponse",
+    "PublicProductSummary",
+    "PublicMerchantProfile",
+    "BuyerDiscoveryIntent",
+    "DiscoveryMatchResult",
+    "DiscoverySearchResponse",
+    "DiscoverabilityUpdateRequest",
+    "DiscoverabilityStatusResponse",
 ]
