@@ -15,6 +15,8 @@ from agent_ready_merchant.llm.exceptions import (
 
 logger = logging.getLogger("agent_ready_merchant.llm.groq")
 
+_STRICT_JSON_SCHEMA_MODELS = frozenset({"openai/gpt-oss-20b", "openai/gpt-oss-120b"})
+
 
 class GroqProvider(BaseLLMProvider):
     """Groq API provider implementing BaseLLMProvider."""
@@ -25,11 +27,28 @@ class GroqProvider(BaseLLMProvider):
         model: str = "llama-3.3-70b-versatile",
         base_url: str = "https://api.groq.com/openai/v1",
         http_client: httpx.AsyncClient | None = None,
+        response_schema: dict[str, Any] | None = None,
     ) -> None:
         self._api_key = api_key.get_secret_value() if isinstance(api_key, SecretStr) else api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
         self._custom_client = http_client
+        self._response_schema = response_schema
+
+    def _response_format(self) -> dict[str, Any]:
+        """Returns the strongest supported JSON constraint for the configured model."""
+        if self._response_schema is not None and self.model in _STRICT_JSON_SCHEMA_MODELS:
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "merchant_agent_analysis",
+                    "strict": True,
+                    "schema": self._response_schema,
+                },
+            }
+        # JSON object mode makes all existing Groq-backed structured callers
+        # syntactically safe even when a model lacks strict schema support.
+        return {"type": "json_object"}
 
     async def generate_response(
         self,
@@ -49,6 +68,7 @@ class GroqProvider(BaseLLMProvider):
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "response_format": self._response_format(),
         }
 
         async def _send(client: httpx.AsyncClient) -> httpx.Response:
@@ -82,7 +102,7 @@ class GroqProvider(BaseLLMProvider):
 
             data = response.json()
             choice = data.get("choices", [{}])[0]
-            content = choice.get("message", {}).get("content", "")
+            content = choice.get("message", {}).get("content") or ""
             usage_data = data.get("usage", {})
             usage = {
                 "prompt_tokens": usage_data.get("prompt_tokens", 0),

@@ -1,5 +1,7 @@
 """Unit tests for GroqProvider adapter and error mappings."""
 
+import json
+
 import httpx
 import pytest
 from pydantic import SecretStr
@@ -20,6 +22,7 @@ async def test_groq_provider_success() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/openai/v1/chat/completions"
         assert request.headers["authorization"] == "Bearer gsk_valid_key_123"
+        assert json.loads(request.content)["response_format"] == {"type": "json_object"}
         return httpx.Response(
             status_code=200,
             json={
@@ -60,6 +63,47 @@ async def test_groq_provider_success() -> None:
         assert res.model == "llama-3.3-70b-versatile"
         assert "thought_process" in res.content
         assert res.usage["total_tokens"] == 40
+
+
+@pytest.mark.asyncio
+async def test_groq_provider_uses_strict_schema_for_gpt_oss() -> None:
+    """GPT-OSS merchant analysis must use provider-enforced structured output."""
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["diagnoses", "proposals"],
+        "properties": {"diagnoses": {"type": "array"}, "proposals": {"type": "array"}},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "merchant_agent_analysis",
+                "strict": True,
+                "schema": schema,
+            },
+        }
+        return httpx.Response(
+            status_code=200,
+            json={
+                "model": "openai/gpt-oss-20b",
+                "choices": [{"message": {"content": '{"diagnoses":[],"proposals":[]}'}}],
+                "usage": {},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        provider = GroqProvider(
+            api_key=SecretStr("gsk_valid_key_123"),
+            model="openai/gpt-oss-20b",
+            http_client=http_client,
+            response_schema=schema,
+        )
+        response = await provider.generate_response([LLMMessage(role="user", content="Hi")])
+
+    assert response.content == '{"diagnoses":[],"proposals":[]}'
 
 
 @pytest.mark.asyncio

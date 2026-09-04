@@ -53,6 +53,9 @@ class AgentCommerceProtocolAdapter(BaseProtocolAdapter):
         "negotiate_quote": "negotiate_quote",
         "accept_quote": "accept_quote",
         "get_order_status": "get_order_status",
+        "discovery_search": "discovery_search",
+        "search_merchants": "discovery_search",
+        "get_public_profile": "get_public_profile",
     }
 
     CAPABILITY_TO_ACTION: dict[str, str] = {
@@ -69,6 +72,8 @@ class AgentCommerceProtocolAdapter(BaseProtocolAdapter):
         "negotiate_quote": "negotiate_quote",
         "accept_quote": "accept_quote",
         "get_order_status": "get_order_status",
+        "discovery_search": "discovery_search",
+        "get_public_profile": "get_public_profile",
     }
 
     def parse_request(self, raw_input: dict[str, Any] | str | bytes) -> ProtocolRequestMessage:

@@ -66,6 +66,16 @@ class ControlledAutonomyService:
         AutonomyActionType.EXPOSE_DELIVERY_ETA.value,
         AutonomyActionType.SUGGEST_BOUNDED_EXPERIMENT.value,
     }
+    IDEMPOTENCY_KEY_MAX_LENGTH = 128
+
+    @classmethod
+    def _validate_idempotency_key(cls, idempotency_key: str) -> None:
+        """Keep direct service callers aligned with the durable ledger bound."""
+        if not 1 <= len(idempotency_key) <= cls.IDEMPOTENCY_KEY_MAX_LENGTH:
+            raise AutonomyExecutionError(
+                "Idempotency key must be between 1 and "
+                f"{cls.IDEMPOTENCY_KEY_MAX_LENGTH} characters."
+            )
 
     @classmethod
     async def get_or_create_default_rules(
@@ -471,6 +481,7 @@ class ControlledAutonomyService:
         failure telemetry and its audit event are then committed by the caller
         in the enclosing request transaction.
         """
+        cls._validate_idempotency_key(idempotency_key)
         try:
             async with session.begin_nested():
                 return await cls._execute_autonomous_action(
@@ -554,6 +565,8 @@ class ControlledAutonomyService:
 
         Commits target mutation, autonomy action ledger, receipt, and audit event atomically.
         """
+        cls._validate_idempotency_key(idempotency_key)
+
         # Gate 15: Claim idempotency receipt first
         claim_payload = {
             "proposal_id": str(proposal_id),
@@ -604,10 +617,6 @@ class ControlledAutonomyService:
         proposal = (await session.execute(prop_stmt)).scalar_one_or_none()
         if not proposal:
             raise AutonomyExecutionError(f"Proposal '{proposal_id}' not found for merchant.")
-
-        # Gate 3: Valid evidence-backed proposal
-        if not proposal.evidence:
-            raise AutonomyExecutionError("Proposal lacks authoritative evidence references.")
 
         # Gate 4 & 5: Deterministic risk classification and structured normalization
         proposal_dict = {
@@ -752,7 +761,8 @@ class ControlledAutonomyService:
             if not product_id_str and proposal.target_entity:
                 product_id_str = proposal.target_entity
 
-            if not product_id_str or str(product_id_str).strip().casefold() == "general":
+            placeholder_targets = {"general", "discovery", "sku"}
+            if not product_id_str or str(product_id_str).strip().casefold() in placeholder_targets:
                 raise AutonomyExecutionError("Proposal does not identify a target product.")
 
             target_prod_stmt = select(Product).where(Product.merchant_id == merchant_id)
@@ -777,6 +787,23 @@ class ControlledAutonomyService:
                     f"current {target_product.version}."
                 )
                 raise OptimisticLockError(msg)
+
+        # Gate 3: Every evidence reference must remain present in a freshly
+        # generated, authoritative merchant snapshot.  A non-empty client or
+        # maintenance-written JSON list alone is never proof.  This check runs
+        # after cheaper authorization/target gates to preserve their specific
+        # fail-closed errors without ever allowing a mutation beforehand.
+        snapshot = await MerchantAgentService.build_authoritative_observations(session, merchant_id)
+        authoritative_evidence = {item.metric_name for item in snapshot.telemetry}
+        authoritative_evidence.update(
+            str(signal["signal_key"])
+            for signal in snapshot.signals
+            if signal.get("signal_key") is not None
+        )
+        if not proposal.evidence or not all(
+            evidence in authoritative_evidence for evidence in proposal.evidence
+        ):
+            raise AutonomyExecutionError("Proposal lacks authoritative evidence references.")
 
         # Gate 16: No conflicting active autonomous action on same target
         active_conflict_stmt = select(MerchantAutonomyAction).where(
@@ -985,6 +1012,7 @@ class ControlledAutonomyService:
         Enforces tenant isolation, version checking, idempotency, and audit logging.
         Fails closed if the resource was modified by a newer merchant change.
         """
+        cls._validate_idempotency_key(idempotency_key)
         claim_payload = {
             "action_id": str(action_id),
             "expected_target_version": expected_target_version,
@@ -998,6 +1026,8 @@ class ControlledAutonomyService:
             payload=claim_payload,
         )
         if replayed is not None:
+            if replayed.get("status") == "CONFLICT_REJECTED":
+                raise RollbackConflictError(str(replayed["message"]))
             return replayed
 
         assert receipt is not None
@@ -1022,7 +1052,8 @@ class ControlledAutonomyService:
                 "target_entity_id": str(action.target_entity_id),
                 "target_entity_type": action.target_entity_type,
                 "target_version_reverted_to": action.target_version_before,
-                "target_current_version": action.target_version_after,
+                # Every successful rollback increments its target exactly once.
+                "target_current_version": action.target_version_after + 1,
                 "rolled_back_at": action.rolled_back_at.isoformat()
                 if action.rolled_back_at
                 else utc_now().isoformat(),
@@ -1084,6 +1115,16 @@ class ControlledAutonomyService:
                     f"exceeds expected post-action version ({action.target_version_after}). "
                     "A newer merchant modification exists."
                 )
+                await MerchantMutationIdempotencyService.complete(
+                    session=session,
+                    receipt=receipt,
+                    response_body={
+                        "status": "CONFLICT_REJECTED",
+                        "message": msg,
+                        "action_id": str(action.id),
+                    },
+                    response_status=409,
+                )
                 raise RollbackConflictError(msg)
 
             if product.version != expected_target_version:
@@ -1138,6 +1179,16 @@ class ControlledAutonomyService:
                 msg = (
                     f"Rollback rejected: experiment version ({exp.version}) "
                     "exceeds post-action version."
+                )
+                await MerchantMutationIdempotencyService.complete(
+                    session=session,
+                    receipt=receipt,
+                    response_body={
+                        "status": "CONFLICT_REJECTED",
+                        "message": msg,
+                        "action_id": str(action.id),
+                    },
+                    response_status=409,
                 )
                 raise RollbackConflictError(msg)
 
@@ -1210,6 +1261,7 @@ class ControlledAutonomyService:
         actor_id: uuid.UUID | str | None = None,
     ) -> dict[str, Any]:
         """Stops a running experiment and optionally triggers deterministic rollback."""
+        cls._validate_idempotency_key(idempotency_key)
         claim_payload = {
             "experiment_id": str(experiment_id),
             "reason": reason,
@@ -1223,6 +1275,8 @@ class ControlledAutonomyService:
             payload=claim_payload,
         )
         if replayed is not None:
+            if replayed.get("status") == "CONFLICT_REJECTED":
+                raise RollbackConflictError(str(replayed["message"]))
             return replayed
 
         assert receipt is not None
@@ -1261,15 +1315,29 @@ class ControlledAutonomyService:
             # action ledger, idempotency receipt, and audit chain transition as
             # one transaction.  The operation namespace makes the shared key
             # safe alongside the enclosing experiment-stop receipt.
-            await cls.rollback_action(
-                session=session,
-                merchant_id=merchant_id,
-                action_id=autonomy_action.id,
-                expected_target_version=autonomy_action.target_version_after,
-                reason=reason,
-                idempotency_key=idempotency_key,
-                actor_id=actor_id,
-            )
+            try:
+                await cls.rollback_action(
+                    session=session,
+                    merchant_id=merchant_id,
+                    action_id=autonomy_action.id,
+                    expected_target_version=autonomy_action.target_version_after,
+                    reason=reason,
+                    idempotency_key=idempotency_key,
+                    actor_id=actor_id,
+                )
+            except RollbackConflictError as exc:
+                await MerchantMutationIdempotencyService.complete(
+                    session=session,
+                    receipt=receipt,
+                    response_body={
+                        "status": "CONFLICT_REJECTED",
+                        "message": str(exc),
+                        "experiment_id": str(experiment_id),
+                        "autonomy_action_id": str(autonomy_action.id),
+                    },
+                    response_status=409,
+                )
+                raise
             response_body = {
                 "experiment_id": str(experiment_id),
                 "status": "ROLLED_BACK",

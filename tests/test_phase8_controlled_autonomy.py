@@ -38,6 +38,7 @@ from agent_ready_merchant.models.autonomy import (
 )
 from agent_ready_merchant.models.experiment import MerchantExperiment
 from agent_ready_merchant.models.merchant import Merchant
+from agent_ready_merchant.models.merchant_mutation_receipt import MerchantMutationReceipt
 from agent_ready_merchant.models.policy import PolicyRule
 from agent_ready_merchant.models.product import Product, ProductVariant
 from agent_ready_merchant.models.proposal import MerchantProposal
@@ -380,13 +381,21 @@ async def test_approval_required_actions_blocked_from_auto_execution(
     m1 = setup_merchants_and_catalog["m1"]
     p1 = setup_merchants_and_catalog["p1"]
 
-    # Set rule to APPROVAL_REQUIRED
+    # Keep the rule auto-classified but require merchant approval. This reaches
+    # the dedicated approval gate rather than failing at rule classification.
     rules = await ControlledAutonomyService.get_or_create_default_rules(db_session, m1.id)
     rule = next(
         r for r in rules if r.action_type == AutonomyActionType.IMPROVE_PRODUCT_DESCRIPTION.value
     )
-    rule.classification = AutonomyClassification.APPROVAL_REQUIRED.value
-    await db_session.flush()
+    await ControlledAutonomyService.update_autonomy_rule(
+        session=db_session,
+        merchant_id=m1.id,
+        action_type=rule.action_type,
+        req=AutonomyRuleUpdateRequest(approval_required=True, expected_version=rule.version),
+        actor_type="MERCHANT_ADMIN",
+        actor_id=m1.id,
+    )
+    await db_session.commit()
 
     proposal = MerchantProposal(
         merchant_id=m1.id,
@@ -398,8 +407,8 @@ async def test_approval_required_actions_blocked_from_auto_execution(
         target_entity=str(p1.id),
         expected_metric="conversion_rate",
         expected_effect="+5%",
-        evidence=["ev_1"],
-        risk_level="APPROVAL_REQUIRED",
+        evidence=["total_buyer_sessions"],
+        risk_level="LOW_RISK_REVERSIBLE",
         status="PROPOSED",
         metadata_payload={"target_product_id": str(p1.id)},
     )
@@ -752,13 +761,60 @@ async def test_targetless_product_proposal_fails_closed(
 
 
 @pytest.mark.asyncio
-async def test_placeholder_product_target_fails_closed(
+async def test_execution_requires_snapshot_backed_evidence_and_bounded_key(
     db_session: AsyncSession, setup_merchants_and_catalog: dict[str, Any]
 ) -> None:
-    """The Phase 7 general placeholder must never select a product SKU."""
+    """Maintenance-written evidence and oversized ledger keys fail before mutation."""
+    merchant = setup_merchants_and_catalog["m1"]
+    product = setup_merchants_and_catalog["p1"]
+    proposal = MerchantProposal(
+        merchant_id=merchant.id,
+        proposal_type=AutonomyActionType.IMPROVE_PRODUCT_DESCRIPTION.value,
+        title="Unverified evidence proposal",
+        observation="Observation",
+        proposed_change="A safe-looking but unsupported description update",
+        hypothesis="Hypothesis",
+        target_entity=str(product.id),
+        expected_metric="conversion_rate",
+        expected_effect="+5%",
+        evidence=["buyer_supplied_unverified_key"],
+        risk_level="LOW_RISK_REVERSIBLE",
+        status="PROPOSED",
+        metadata_payload={"target_product_id": str(product.id)},
+    )
+    db_session.add(proposal)
+    await db_session.commit()
+
+    with pytest.raises(AutonomyExecutionError, match="authoritative evidence"):
+        await ControlledAutonomyService.execute_autonomous_action(
+            session=db_session,
+            merchant_id=merchant.id,
+            proposal_id=proposal.id,
+            expected_target_version=product.version,
+            idempotency_key=f"unsupported-evidence-{uuid.uuid4().hex}",
+        )
+
+    with pytest.raises(AutonomyExecutionError, match="128"):
+        await ControlledAutonomyService.execute_autonomous_action(
+            session=db_session,
+            merchant_id=merchant.id,
+            proposal_id=proposal.id,
+            expected_target_version=product.version,
+            idempotency_key="x" * 129,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("placeholder", ["general", "discovery", "sku"])
+async def test_placeholder_product_target_fails_closed(
+    db_session: AsyncSession,
+    setup_merchants_and_catalog: dict[str, Any],
+    placeholder: str,
+) -> None:
+    """Server-known placeholders must never select literal product SKUs."""
     m1 = setup_merchants_and_catalog["m1"]
     product = setup_merchants_and_catalog["p1"]
-    product.sku = "general"
+    product.sku = placeholder
     await db_session.commit()
 
     proposal = MerchantProposal(
@@ -768,7 +824,7 @@ async def test_placeholder_product_target_fails_closed(
         observation="Observation",
         proposed_change="No product may be selected by placeholder",
         hypothesis="Hypothesis",
-        target_entity="general",
+        target_entity=placeholder,
         expected_metric="conversion_rate",
         expected_effect="+5%",
         evidence=["ev_1"],
@@ -1014,12 +1070,13 @@ async def test_experiment_rollback_conflict_is_persisted_before_http_409(
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        idempotency_key = f"experiment-conflict-rollback-{uuid.uuid4().hex}"
         response = await client.post(
             f"/api/v1/merchant/experiments/{experiment.id}/rollback",
             headers={
                 "X-Merchant-ID": str(merchant.id),
                 "X-Auth-Token": token,
-                "X-Idempotency-Key": f"experiment-conflict-rollback-{uuid.uuid4().hex}",
+                "X-Idempotency-Key": idempotency_key,
             },
             json={"reason": "A newer merchant change must take precedence"},
         )
@@ -1036,6 +1093,26 @@ async def test_experiment_rollback_conflict_is_persisted_before_http_409(
         )
     ).scalar_one_or_none()
     assert conflict_event is not None
+    receipts = list(
+        (
+            await db_session.execute(
+                select(MerchantMutationReceipt).where(
+                    MerchantMutationReceipt.merchant_id == merchant.id,
+                    MerchantMutationReceipt.idempotency_key == idempotency_key,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {receipt.operation for receipt in receipts} == {
+        "AUTONOMOUS_ACTION_ROLLBACK",
+        "MERCHANT_EXPERIMENT_STOP",
+    }
+    assert all(
+        receipt.response_body and receipt.response_body["status"] == "CONFLICT_REJECTED"
+        for receipt in receipts
+    )
 
 
 # =============================================================================
@@ -1068,7 +1145,7 @@ async def test_e2e_golden_path_scenario(
         target_entity=str(p1.id),
         expected_metric="conversion_rate",
         expected_effect="+8%",
-        evidence=["ev_chat_101", "ev_quote_202"],
+        evidence=["total_buyer_sessions"],
         risk_level="LOW_RISK_REVERSIBLE",
         status="PROPOSED",
         metadata_payload={
@@ -1144,6 +1221,19 @@ async def test_e2e_golden_path_scenario(
     )
     assert rb_replay["rollback_status"] == RollbackStatus.ROLLED_BACK.value
 
+    # A new key must expose the resource version created by rollback, not the
+    # stale post-action version retained in the original mutation snapshot.
+    rb_new_key = await ControlledAutonomyService.rollback_action(
+        session=db_session,
+        merchant_id=m1.id,
+        action_id=action_id,
+        expected_target_version=post_action_version,
+        reason="Human merchant preferred original description",
+        idempotency_key=f"golden-rollback-replay-{uuid.uuid4().hex}",
+        actor_id=m1.id,
+    )
+    assert rb_new_key["target_current_version"] == post_action_version + 1
+
 
 @pytest.mark.asyncio
 async def test_rollback_after_human_modification_fails_closed(
@@ -1166,7 +1256,7 @@ async def test_rollback_after_human_modification_fails_closed(
         target_entity=str(p1.id),
         expected_metric="conversion_rate",
         expected_effect="+5%",
-        evidence=["ev_1"],
+        evidence=["total_buyer_sessions"],
         risk_level="LOW_RISK_REVERSIBLE",
         status="PROPOSED",
         metadata_payload={"target_product_id": str(p1.id)},
@@ -1233,7 +1323,7 @@ async def test_cross_tenant_access_fails_closed(
         target_entity=str(p1.id),
         expected_metric="conversion_rate",
         expected_effect="+5%",
-        evidence=["ev_1"],
+        evidence=["total_buyer_sessions"],
         risk_level="LOW_RISK_REVERSIBLE",
         status="PROPOSED",
         metadata_payload={"target_product_id": str(p1.id)},
@@ -1272,7 +1362,7 @@ async def test_duplicate_execution_mutates_once(
         target_entity=str(p1.id),
         expected_metric="conversion_rate",
         expected_effect="+5%",
-        evidence=["ev_1"],
+        evidence=["total_buyer_sessions"],
         risk_level="LOW_RISK_REVERSIBLE",
         status="PROPOSED",
         metadata_payload={"target_product_id": str(p1.id)},
@@ -1382,7 +1472,7 @@ async def test_rest_api_autonomy_endpoints(
             target_entity=str(p1.id),
             expected_metric="conversion_rate",
             expected_effect="+5%",
-            evidence=["ev_1"],
+            evidence=["total_buyer_sessions"],
             risk_level="LOW_RISK_REVERSIBLE",
             status="PROPOSED",
             metadata_payload={"target_product_id": str(p1.id)},

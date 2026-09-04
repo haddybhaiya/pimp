@@ -445,3 +445,74 @@ export interface RollbackResponse {
   message: string;
 }
 
+export type DiscoverabilityState = 'PRIVATE' | 'DISCOVERABLE' | 'PAUSED' | 'SUSPENDED';
+
+export interface PublicCapabilityNode {
+  name: string;
+  protocol_version: string;
+  classification: 'READ_ONLY' | 'TRANSIENT_STATE' | 'PRIVILEGED_FINANCIAL';
+  side_effect_classification: string;
+  monetary_impact_classification: string;
+  authorization_requirement: string;
+  approval_requirement: string;
+  idempotency_requirement: boolean;
+  supported_adapters: string[];
+  coarse_availability: 'AVAILABLE' | 'RESTRICTED' | 'UNAVAILABLE';
+}
+
+export interface PublicCapabilityGraphResponse {
+  capabilities: PublicCapabilityNode[];
+  schema_version: string;
+}
+
+export interface PublicProductSummary {
+  product_sku: string;
+  title: string;
+  category?: string | null;
+  description?: string | null;
+  price_range_paise: { min: number; max: number };
+  in_stock: boolean;
+  attributes: Record<string, unknown>;
+}
+
+export interface PublicMerchantProfile {
+  public_id: string;
+  slug: string;
+  display_name: string;
+  category?: string | null;
+  description?: string | null;
+  discovery_tags: string[];
+  safe_product_summaries: PublicProductSummary[];
+  supported_currencies: string[];
+  price_range_paise: { min: number; max: number };
+  safe_delivery_regions: string[];
+  inventory_summary: string;
+  negotiation_supported: boolean;
+  checkout_available: boolean;
+  supported_canonical_capabilities: string[];
+  supported_protocol_versions: string[];
+  discovery_schema_version: string;
+  profile_version: number;
+  updated_at: string;
+  verified_trust_signals: string[];
+}
+
+export interface DiscoverabilityStatusResponse {
+  discoverability_state: DiscoverabilityState;
+  profile?: PublicMerchantProfile | null;
+  metrics: Record<string, number>;
+  public_capability_graph: PublicCapabilityNode[];
+  supported_protocols: string[];
+  profile_version: number;
+  updated_at: string;
+}
+
+export interface DiscoverabilityUpdateRequest {
+  expected_profile_version: number;
+  discoverability_state?: DiscoverabilityState;
+  custom_tags?: string[];
+  custom_description?: string;
+  delivery_regions?: string[];
+}
+
+

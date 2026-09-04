@@ -79,4 +79,23 @@
 7. **Idempotency & Tenant Integrity (INV-AUT-07):**  
    All autonomous executions and rollbacks require unique idempotency keys claimed via `MerchantMutationIdempotencyService`. Composite foreign keys enforce tenant isolation across merchants, proposals, actions, and experiments.
 
+---
+
+## 6. Discovery Network Invariants
+
+1. **Descriptive Exclusivity (INV-DISC-01):**  
+   Discovery endpoints and public capability graphs are strictly descriptive and read-only. Discovery never grants capability invocation rights, initializes buyer sessions, reserves inventory, creates binding quotes, generates orders, or initiates financial transactions.
+2. **Zero Secret & PII Leakage (INV-DISC-02):**  
+   Public merchant discovery profiles and search responses must never expose Razorpay keys, webhook secrets, session tokens, merchant/product database IDs, credentials, private policies, floor prices, internal margins, audit logs, or customer PII. Strict allowlisting exposes only an opaque discovery-profile ID and merchant-scoped public SKUs.
+3. **Anti-Probing Uniform 404 (INV-DISC-03):**  
+   Direct lookups on merchants in non-discoverable states (`PRIVATE`, `PAUSED`, `SUSPENDED`) and non-existent merchant IDs must return an identical, uniform 404 response (`MerchantNotFoundError`) to prevent merchant existence or state probing.
+4. **Human-Only Discoverability Authority (INV-DISC-04):**  
+   Discoverability state transitions and public discovery metadata modifications require authenticated human `MERCHANT_ADMIN` authorization. Autonomous agents, merchant LLMs, and external buyers fail closed.
+5. **Deterministic Matching & Integer Budget Safety (INV-DISC-05):**  
+   Buyer intent evaluation, capability filtering, delivery region matching, available-inventory checks, and price range checks are completely deterministic. Budget checks enforce integer multiplication overflow guards (`min_var_paise * qty <= maximum_budget_paise`). Unsupported capabilities, unavailable inventory, and non-deliverable regions fail closed.
+6. **Prompt Injection Search-Keyword Neutralization (INV-DISC-06):**  
+   Buyer discovery queries and preference parameters are treated strictly as untrusted literal search text. Prompt injection instructions never influence ranking scores, bypass eligibility filters, modify policies, or trigger model execution.
+7. **Replay-Safe Telemetry & Public Rate Limiting (INV-DISC-07):**  
+   Discovery search and profile telemetry enforce composite database uniqueness on `(merchant_id, event_type, correlation_id)` to prevent replay distortion. Public discovery search is strictly rate-limited (60 requests/minute per client IP) to protect system compute.
+
 

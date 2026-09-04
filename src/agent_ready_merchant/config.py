@@ -86,8 +86,8 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         description="Groq API key for model inference",
     )
-    LLM_MODEL_NAME: str = "llama-3.3-70b-versatile"
-    LLM_MAX_OUTPUT_TOKENS: int = 2048
+    LLM_MODEL_NAME: str = "openai/gpt-oss-20b"
+    LLM_MAX_OUTPUT_TOKENS: int = Field(default=4096, ge=256, le=8192)
     LLM_TEMPERATURE: float = 0.2
     LLM_STEP_LIMIT: int = 5
     LLM_TIMEOUT_SECONDS: int = 15

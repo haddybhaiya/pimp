@@ -16,6 +16,13 @@ from agent_ready_merchant.models.autonomy import (
     MerchantAutonomyRule,
     RollbackStatus,
 )
+from agent_ready_merchant.models.discovery import (
+    DiscoverabilityState,
+    DiscoveryTelemetryEventType,
+    MerchantDiscoveryProfile,
+    MerchantDiscoveryTelemetry,
+    compute_discovery_metadata_hash,
+)
 from agent_ready_merchant.models.experiment import MerchantExperiment, MerchantExperimentResult
 from agent_ready_merchant.models.intent import BuyerIntent
 from agent_ready_merchant.models.inventory import InventoryItem
@@ -61,4 +68,9 @@ __all__ = [
     "AutonomyActionStatus",
     "RollbackStatus",
     "AnomalyState",
+    "MerchantDiscoveryProfile",
+    "MerchantDiscoveryTelemetry",
+    "DiscoverabilityState",
+    "DiscoveryTelemetryEventType",
+    "compute_discovery_metadata_hash",
 ]

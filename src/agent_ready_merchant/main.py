@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
@@ -798,7 +798,8 @@ def create_app() -> FastAPI:
     )
     async def acp_wire_endpoint(
         msg: ProtocolRequestMessage,
-        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        request: Request,
+        x_merchant_id: uuid.UUID | None = Header(default=None, alias="X-Merchant-ID"),
         x_session_id: uuid.UUID | None = Header(default=None, alias="X-Session-ID"),
         x_capabilities: str | None = Header(default=None, alias="X-Capabilities"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
@@ -810,15 +811,6 @@ def create_app() -> FastAPI:
         """Translates ACP wire message to canonical gateway invocation and returns ACP response."""
         req_id = msg.request_id or x_request_id or uuid.uuid4()
         idemp_key = msg.idempotency_key or x_idempotency_key
-        ctx = _get_context(
-            merchant_id=x_merchant_id,
-            session_id=x_session_id,
-            capabilities_hdr=x_capabilities,
-            settings=current_settings,
-            request_id=req_id,
-            idempotency_key=idemp_key,
-            auth_token=x_auth_token,
-        )
 
         try:
             capability, payload = acp_adapter.to_canonical_request(msg)
@@ -831,6 +823,79 @@ def create_app() -> FastAPI:
                 retryable=False,
             )
 
+        # Discovery is protocol-neutral and public by design. It is not a merchant
+        # gateway capability, so it must not be forced through a pre-selected
+        # merchant context or the canonical commerce dispatcher.
+        if capability in {"discovery_search", "get_public_profile"}:
+            from agent_ready_merchant.schemas.discovery import (
+                BuyerDiscoveryIntent,
+                DiscoveryProfileLookupRequest,
+            )
+            from agent_ready_merchant.services.discovery_service import (
+                DiscoveryRateLimitError,
+                DiscoveryService,
+                MerchantNotFoundError,
+            )
+
+            try:
+                discovery_result: Any
+                if capability == "discovery_search":
+                    discovery_result = await DiscoveryService.search_merchants(
+                        session=db,
+                        intent=BuyerDiscoveryIntent.model_validate(payload),
+                        client_ip=request.client.host if request.client else "127.0.0.1",
+                        correlation_id=str(req_id),
+                    )
+                else:
+                    lookup = DiscoveryProfileLookupRequest.model_validate(payload)
+                    discovery_result = await DiscoveryService.get_public_merchant_by_id_or_slug(
+                        session=db,
+                        public_id_or_slug=lookup.public_id,
+                        correlation_id=str(req_id),
+                    )
+            except DiscoveryRateLimitError as exc:
+                return acp_adapter.format_error_response(
+                    error_code="RATE_LIMIT_EXCEEDED",
+                    message=str(exc),
+                    request_id=req_id,
+                    action=msg.action,
+                    retryable=True,
+                )
+            except (MerchantNotFoundError, ValueError):
+                return acp_adapter.format_error_response(
+                    error_code="DISCOVERY_REQUEST_REJECTED",
+                    message="Merchant not found or discovery request is invalid.",
+                    request_id=req_id,
+                    action=msg.action,
+                    retryable=False,
+                )
+
+            discovery_envelope = GatewayResponseEnvelope[Any](
+                status="SUCCESS",
+                capability=capability,
+                data=discovery_result,
+                request_id=req_id,
+            )
+            return acp_adapter.from_canonical_envelope(capability, discovery_envelope, msg)
+
+        if x_merchant_id is None:
+            return acp_adapter.format_error_response(
+                error_code="MISSING_MERCHANT_CONTEXT",
+                message="A merchant context is required for commerce capabilities.",
+                request_id=req_id,
+                action=msg.action,
+                retryable=False,
+            )
+
+        ctx = _get_context(
+            merchant_id=x_merchant_id,
+            session_id=x_session_id,
+            capabilities_hdr=x_capabilities,
+            settings=current_settings,
+            request_id=req_id,
+            idempotency_key=idemp_key,
+            auth_token=x_auth_token,
+        )
         envelope = await gateway_instance.execute_capability(db, capability, payload, ctx)
         return acp_adapter.from_canonical_envelope(capability, envelope, msg)
 
@@ -1381,6 +1446,7 @@ def create_app() -> FastAPI:
     import json
 
     from agent_ready_merchant.schemas.merchant_agent import (
+        MERCHANT_AGENT_LLM_OUTPUT_SCHEMA,
         ExperimentCreateRequest,
         ExperimentResponse,
         ExperimentResultResponse,
@@ -1484,6 +1550,7 @@ def create_app() -> FastAPI:
                 llm_instance = GroqProvider(
                     api_key=current_settings.GROQ_API_KEY.get_secret_value(),
                     model=current_settings.LLM_MODEL_NAME,
+                    response_schema=MERCHANT_AGENT_LLM_OUTPUT_SCHEMA,
                 )
 
             result = await MerchantAgentService.execute_agent_run(
@@ -1733,6 +1800,7 @@ def create_app() -> FastAPI:
         KillSwitchUpdateRequest,
         RollbackRequest,
         RollbackResponse,
+        StopExperimentRequest,
     )
     from agent_ready_merchant.services.controlled_autonomy_service import (
         AutonomyExecutionError,
@@ -1894,8 +1962,8 @@ def create_app() -> FastAPI:
     async def list_autonomy_actions_endpoint(
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
-        limit: int = 50,
-        offset: int = 0,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> list[AutonomyActionResponse]:
@@ -1944,7 +2012,7 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         x_idempotency_key: str = Header(
-            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+            ..., min_length=1, max_length=128, alias="X-Idempotency-Key"
         ),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
@@ -1988,7 +2056,7 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         x_idempotency_key: str = Header(
-            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+            ..., min_length=1, max_length=128, alias="X-Idempotency-Key"
         ),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
@@ -2029,18 +2097,18 @@ def create_app() -> FastAPI:
     )
     async def stop_experiment_endpoint(
         experiment_id: uuid.UUID,
-        payload: dict[str, Any],
+        payload: StopExperimentRequest,
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         x_idempotency_key: str = Header(
-            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+            ..., min_length=1, max_length=128, alias="X-Idempotency-Key"
         ),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
-        reason = str(payload.get("reason", "Human merchant requested stop"))
-        require_rollback = bool(payload.get("require_rollback", False))
+        reason = payload.reason
+        require_rollback = payload.require_rollback
         try:
             result = await ControlledAutonomyService.stop_experiment(
                 session=db,
@@ -2070,17 +2138,17 @@ def create_app() -> FastAPI:
     )
     async def rollback_experiment_endpoint(
         experiment_id: uuid.UUID,
-        payload: dict[str, Any],
+        payload: StopExperimentRequest,
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         x_idempotency_key: str = Header(
-            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+            ..., min_length=1, max_length=128, alias="X-Idempotency-Key"
         ),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
-        reason = str(payload.get("reason", "Human merchant requested rollback"))
+        reason = payload.reason
         try:
             result = await ControlledAutonomyService.stop_experiment(
                 session=db,
@@ -2102,6 +2170,242 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    # =========================================================================
+    # Phase 9: Discovery Network Endpoints
+    # =========================================================================
+    from agent_ready_merchant.models.product import Product
+    from agent_ready_merchant.schemas.discovery import (
+        BuyerDiscoveryIntent,
+        DiscoverabilityStatusResponse,
+        DiscoverabilityUpdateRequest,
+        DiscoveryHandoffRequest,
+        DiscoverySearchResponse,
+        PublicCapabilityGraphResponse,
+        PublicMerchantProfile,
+    )
+    from agent_ready_merchant.services.discovery_service import (
+        DiscoveryConflictError,
+        DiscoveryRateLimitError,
+        DiscoverySecurityError,
+        DiscoveryService,
+        MerchantNotFoundError,
+    )
+
+    @app.post(
+        "/api/v1/discovery/search",
+        summary="Search and Discover Agent-Ready Merchants",
+        tags=["Discovery Network"],
+        response_model=DiscoverySearchResponse,
+    )
+    async def discovery_search_endpoint(
+        intent: BuyerDiscoveryIntent,
+        request: Request,
+        x_discovery_correlation_id: str | None = Header(
+            default=None, alias="X-Discovery-Correlation-ID"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+    ) -> DiscoverySearchResponse:
+        client_ip = request.client.host if request.client else "127.0.0.1"
+        try:
+            return await DiscoveryService.search_merchants(
+                session=db,
+                intent=intent,
+                client_ip=client_ip,
+                correlation_id=x_discovery_correlation_id,
+            )
+        except DiscoveryRateLimitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=str(exc),
+            ) from exc
+
+    @app.get(
+        "/api/v1/discovery/merchants/{public_id}",
+        summary="Retrieve Public Merchant Profile",
+        tags=["Discovery Network"],
+        response_model=PublicMerchantProfile,
+    )
+    async def get_public_merchant_endpoint(
+        public_id: str,
+        x_discovery_correlation_id: str | None = Header(
+            default=None, alias="X-Discovery-Correlation-ID"
+        ),
+        db: AsyncSession = Depends(get_db_session),
+    ) -> PublicMerchantProfile:
+        try:
+            return await DiscoveryService.get_public_merchant_by_id_or_slug(
+                session=db,
+                public_id_or_slug=public_id,
+                correlation_id=x_discovery_correlation_id or f"profile-{uuid.uuid4().hex}",
+            )
+        except MerchantNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Merchant not found or not discoverable.",
+            ) from exc
+
+    @app.get(
+        "/api/v1/discovery/merchants/{public_id}/capabilities",
+        summary="Retrieve Public Capability Graph for Merchant",
+        tags=["Discovery Network"],
+        response_model=PublicCapabilityGraphResponse,
+    )
+    async def get_public_merchant_capabilities_endpoint(
+        public_id: str,
+        db: AsyncSession = Depends(get_db_session),
+    ) -> PublicCapabilityGraphResponse:
+        try:
+            await DiscoveryService.get_public_merchant_by_id_or_slug(
+                session=db,
+                public_id_or_slug=public_id,
+            )
+            return PublicCapabilityGraphResponse(
+                capabilities=DiscoveryService.get_public_capability_graph(),
+                schema_version="1.0.0",
+            )
+        except MerchantNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Merchant not found or not discoverable.",
+            ) from exc
+
+    @app.get(
+        "/api/v1/discovery/capabilities",
+        summary="Retrieve Public Platform Capability Graph",
+        tags=["Discovery Network"],
+        response_model=PublicCapabilityGraphResponse,
+    )
+    async def get_public_capabilities_endpoint() -> PublicCapabilityGraphResponse:
+        return PublicCapabilityGraphResponse(
+            capabilities=DiscoveryService.get_public_capability_graph(),
+            schema_version="1.0.0",
+        )
+
+    @app.post(
+        "/api/v1/discovery/merchants/{public_id}/handoff",
+        summary="Start an Authoritative Buyer Session from Public Discovery",
+        tags=["Discovery Network"],
+        response_model=GatewayResponseEnvelope[InitializeSessionResponse],
+    )
+    async def discovery_handoff_endpoint(
+        public_id: str,
+        req: DiscoveryHandoffRequest,
+        db: AsyncSession = Depends(get_db_session),
+    ) -> GatewayResponseEnvelope[InitializeSessionResponse]:
+        """Resolves a public listing, then delegates session creation to the gateway.
+
+        The discovery layer only resolves and records the public handoff. The
+        existing canonical gateway remains the sole authority that creates the
+        buyer session and grants its bounded capabilities.
+        """
+        try:
+            merchant_id = await DiscoveryService.resolve_discoverable_merchant_id(db, public_id)
+        except MerchantNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Merchant not found or not discoverable.",
+            ) from exc
+
+        product_id: uuid.UUID | None = None
+        if req.selected_product_sku is not None:
+            product_stmt = select(Product.id).where(
+                Product.merchant_id == merchant_id,
+                Product.sku == req.selected_product_sku,
+                Product.is_active.is_(True),
+            )
+            product_id = (await db.execute(product_stmt)).scalar_one_or_none()
+            if product_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Product unavailable.",
+                )
+            await DiscoveryService.record_telemetry(
+                session=db,
+                merchant_id=merchant_id,
+                event_type="PRODUCT_SELECTED",
+                correlation_id=req.correlation_id,
+                product_id=product_id,
+            )
+
+        session_request = InitializeSessionRequest(
+            buyer_agent_identifier=req.buyer_agent_identifier,
+            requested_capabilities=req.requested_capabilities,
+            duration_minutes=req.duration_minutes,
+            auth_token_raw=req.auth_token_raw,
+            idempotency_key=req.idempotency_key,
+        )
+        response = await gateway_instance.initialize_session(db, session_request, merchant_id)
+        if response.status == "SUCCESS":
+            await DiscoveryService.record_telemetry(
+                session=db,
+                merchant_id=merchant_id,
+                event_type="HANDOFF_INITIATED",
+                correlation_id=req.correlation_id,
+                product_id=product_id,
+            )
+        return response
+
+    @app.get(
+        "/api/v1/merchant/discoverability",
+        summary="Retrieve Merchant Discoverability Status, Metadata and Metrics",
+        tags=["Merchant Discoverability"],
+        response_model=DiscoverabilityStatusResponse,
+    )
+    async def get_merchant_discoverability_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> DiscoverabilityStatusResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        return await DiscoveryService.get_discoverability_status(
+            session=db,
+            merchant_id=x_merchant_id,
+        )
+
+    @app.put(
+        "/api/v1/merchant/discoverability",
+        summary="Update Discoverability State and Public Metadata",
+        tags=["Merchant Discoverability"],
+        response_model=DiscoverabilityStatusResponse,
+    )
+    async def update_merchant_discoverability_endpoint(
+        req: DiscoverabilityUpdateRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> DiscoverabilityStatusResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            await DiscoveryService.update_discoverability(
+                session=db,
+                merchant_id=x_merchant_id,
+                req=req,
+                actor_role="MERCHANT_ADMIN",
+                actor_id=str(x_merchant_id),
+            )
+            await db.commit()
+            return await DiscoveryService.get_discoverability_status(
+                session=db,
+                merchant_id=x_merchant_id,
+            )
+        except DiscoveryConflictError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+        except DiscoverySecurityError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=str(exc),
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
 
     return app
 

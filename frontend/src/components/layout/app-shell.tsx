@@ -19,6 +19,7 @@ import {
   Database,
   Bot,
   FlaskConical,
+  Globe,
 } from 'lucide-react';
 
 export interface AppShellProps {
@@ -48,6 +49,7 @@ export const AppShell: React.FC<AppShellProps> = ({ currentPath, onNavigate, chi
         { label: 'Products & Catalog', path: '/catalog', icon: Package },
         { label: 'Inventory Stock', path: '/inventory', icon: Layers },
         { label: 'Policy Governance', path: '/policies', icon: Sliders },
+        { label: 'Discoverability', path: '/discoverability', icon: Globe },
       ],
     },
     {

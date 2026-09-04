@@ -16,6 +16,8 @@ vi.mock('@/lib/api-client', () => ({
     listProposals: vi.fn(),
     runAgentAnalysis: vi.fn(),
     reviewProposal: vi.fn(),
+    getAutonomyStatus: vi.fn(),
+    getAutonomyActions: vi.fn(),
     getAuditLedger: vi.fn(),
   },
 }));
@@ -73,6 +75,17 @@ describe('Phase 7 Agent workbench', () => {
     vi.mocked(api.listExperiments).mockResolvedValue([]);
     vi.mocked(api.getAgentSnapshot).mockResolvedValue(snapshot);
     vi.mocked(api.listProposals).mockResolvedValue([proposedProposal]);
+    vi.mocked(api.getAutonomyStatus).mockResolvedValue({
+      merchant_id: 'merchant-1',
+      kill_switch_enabled: false,
+      anomaly_state: 'NORMAL',
+      anomaly_reasons: [],
+      hourly_executions_count: 0,
+      daily_executions_count: 0,
+      recent_actions: [],
+      rules: [],
+    });
+    vi.mocked(api.getAutonomyActions).mockResolvedValue([]);
   });
 
   it('submits the merchant-entered experiment variation', async () => {
