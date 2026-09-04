@@ -675,6 +675,13 @@ async def test_out_of_stock_products_are_not_returned_or_ranked_in_stock(
     )
     assert result.total_matches == 0
 
+    # An unfiltered search must obey the same availability boundary. It must not
+    # return a merchant with no purchasable product and transaction next actions.
+    unfiltered_result = await DiscoveryService.search_merchants(
+        db_session, BuyerDiscoveryIntent(currency="INR")
+    )
+    assert unfiltered_result.total_matches == 0
+
 
 @pytest.mark.asyncio
 async def test_public_identifiers_are_opaque_and_profile_updates_are_version_checked(

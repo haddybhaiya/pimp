@@ -21,6 +21,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -648,11 +650,10 @@ class DiscoveryService:
                     )
                 )
 
-            # If search filters were provided, candidate must have matching products
-            has_filter = bool(
-                query_text or intent.required_attributes or cat_filter or intent.product_sku
-            )
-            if has_filter and not matching_products:
+            # A returned merchant must always have at least one product that can
+            # fulfill the intent. Otherwise an unfiltered request could surface an
+            # unavailable merchant with transaction-oriented next actions.
+            if not matching_products:
                 continue
 
             # Build public profile
@@ -769,24 +770,27 @@ class DiscoveryService:
         Uses unique constraint (merchant_id, event_type, correlation_id) to ensure
         replays do not duplicate telemetry entries.
         """
-        stmt = select(MerchantDiscoveryTelemetry).where(
-            MerchantDiscoveryTelemetry.merchant_id == merchant_id,
-            MerchantDiscoveryTelemetry.event_type == event_type,
-            MerchantDiscoveryTelemetry.correlation_id == correlation_id,
-        )
-        existing = (await session.execute(stmt)).scalar_one_or_none()
-        if existing is not None:
-            return  # Replay safe
+        dialect_name = session.bind.dialect.name if session.bind is not None else ""
+        values = {
+            "merchant_id": merchant_id,
+            "event_type": event_type,
+            "correlation_id": correlation_id,
+            "sanitized_query": sanitized_query,
+            "product_id": product_id,
+        }
+        conflict_columns = ["merchant_id", "event_type", "correlation_id"]
 
-        telemetry = MerchantDiscoveryTelemetry(
-            merchant_id=merchant_id,
-            event_type=event_type,
-            correlation_id=correlation_id,
-            sanitized_query=sanitized_query,
-            product_id=product_id,
-        )
-        session.add(telemetry)
-        await session.flush()
+        statement: Any
+        if dialect_name == "postgresql":
+            statement = postgresql_insert(MerchantDiscoveryTelemetry).values(values)
+        elif dialect_name == "sqlite":
+            statement = sqlite_insert(MerchantDiscoveryTelemetry).values(values)
+        else:
+            raise RuntimeError("Discovery telemetry requires a PostgreSQL-compatible database.")
+
+        # One database statement makes concurrent requests carrying the same
+        # client correlation ID replay-safe without poisoning the transaction.
+        await session.execute(statement.on_conflict_do_nothing(index_elements=conflict_columns))
 
     @classmethod
     async def get_discoverability_status(

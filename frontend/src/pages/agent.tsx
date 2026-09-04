@@ -288,7 +288,7 @@ export const AgentPage: React.FC = () => {
             <div className="flex items-center gap-2.5">
               <h2 className="text-xl font-bold tracking-tight text-text-primary">Merchant Optimization Agent</h2>
               <Badge variant="outline" className="text-[10px] font-mono border-brand-bright/40 text-brand-bright">
-                Phase 8 Controlled Autonomy
+                Controlled autonomy
               </Badge>
             </div>
             <p className="text-xs text-text-muted mt-1 max-w-xl">
@@ -787,9 +787,7 @@ export const AgentPage: React.FC = () => {
             </div>
           ) : (
             <p className="text-text-secondary leading-relaxed">
-              {reviewAction === 'APPROVE'
-                ? 'Approving this proposal registers merchant administrative consent. In Phase 8, low-risk actions can execute autonomously with deterministic rollback.'
-                : 'Converting this proposal into a structured experiment will register baseline metrics and allow deterministic measurement.'}
+              Approving records your decision. It does not change your store by itself; eligible changes are reviewed and run separately.
             </p>
           )}
         </div>
