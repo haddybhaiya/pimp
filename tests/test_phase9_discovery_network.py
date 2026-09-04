@@ -457,6 +457,80 @@ async def test_discovery_search_page_size_is_bounded(
     assert result.total_matches == len(result.results)
 
 
+@pytest.mark.asyncio
+async def test_public_profile_aggregates_full_catalog_while_search_bounds_product_loads(
+    db_session: AsyncSession, setup_discovery_merchants: dict[str, Any]
+) -> None:
+    """A late SKU remains discoverable without expanding the public profile sample."""
+    merchant = setup_discovery_merchants["m_pub"]
+    filler_products = [
+        Product(
+            merchant_id=merchant.id,
+            sku=f"AA-PUBLIC-SAMPLE-{index:02d}",
+            title=f"Public sample {index}",
+            description="Bounded public catalog sample.",
+            category="Footwear",
+            base_price_paise=100_000,
+            floor_price_paise=80_000,
+            version=1,
+        )
+        for index in range(21)
+    ]
+    late_product = Product(
+        merchant_id=merchant.id,
+        sku="ZZZ-LATE-DISCOVERY-SKU",
+        title="Late catalog discovery product",
+        description="This product is beyond the public SKU sample.",
+        category="Footwear",
+        base_price_paise=900_000,
+        floor_price_paise=700_000,
+        version=1,
+    )
+    db_session.add_all([*filler_products, late_product])
+    await db_session.flush()
+
+    products = [*filler_products, late_product]
+    variants = [
+        ProductVariant(
+            product_id=product.id,
+            sku=f"{product.sku}-VARIANT",
+            title=f"{product.title} variant",
+            price_override_paise=product.base_price_paise,
+        )
+        for product in products
+    ]
+    db_session.add_all(variants)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            InventoryItem(
+                variant_id=variant.id,
+                available_quantity=5,
+                reserved_quantity=0,
+            )
+            for variant in variants
+        ]
+    )
+    await db_session.flush()
+
+    public_profile = await DiscoveryService.build_public_profile(db_session, merchant.id)
+    assert public_profile is not None
+    assert len(public_profile.safe_product_summaries) == 20
+    assert public_profile.price_range_paise["max"] == 900_000
+    assert public_profile.inventory_summary == "AVAILABLE"
+
+    result = await DiscoveryService.search_merchants(
+        db_session,
+        BuyerDiscoveryIntent(
+            product_sku=late_product.sku,
+            currency="INR",
+            quantity=1,
+        ),
+    )
+    assert result.total_matches == 1
+    assert result.results[0].matching_products[0].product_sku == late_product.sku
+
+
 # =========================================================================
 # 7. Required Capability & Delivery Region Filtering Fail Closed
 # =========================================================================

@@ -92,7 +92,7 @@
 4. **Human-Only Discoverability Authority (INV-DISC-04):**  
    Discoverability state transitions and public discovery metadata modifications require authenticated human `MERCHANT_ADMIN` authorization. Autonomous agents, merchant LLMs, and external buyers fail closed.
 5. **Deterministic Matching, Bounded Discovery, & Integer Budget Safety (INV-DISC-05):**
-   Buyer intent evaluation, capability filtering, delivery region matching, available-inventory checks, and price range checks are completely deterministic. Search evaluates a bounded cursor page (at most 50 merchant candidates and 20 public product summaries per merchant); budget checks enforce the integer ceiling `min_var_paise * qty <= maximum_budget_paise`. Unsupported capabilities, unavailable inventory, and non-deliverable regions fail closed.
+   Buyer intent evaluation, capability filtering, delivery region matching, available-inventory checks, and price range checks are completely deterministic. Search evaluates a bounded cursor page (at most 50 merchant candidates and 20 SQL-selected eligible products/public summaries per merchant); public-profile range and availability aggregates remain authoritative across the full active catalog. Budget checks enforce the integer ceiling `min_var_paise * qty <= maximum_budget_paise`. Unsupported capabilities, unavailable inventory, and non-deliverable regions fail closed.
 6. **Prompt Injection Search-Keyword Neutralization (INV-DISC-06):**  
    Buyer discovery queries and preference parameters are treated strictly as untrusted literal search text. Prompt injection instructions never influence ranking scores, bypass eligibility filters, modify policies, or trigger model execution.
 7. **Replay-Safe Telemetry & Public Rate Limiting (INV-DISC-07):**  

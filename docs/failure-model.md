@@ -158,7 +158,7 @@ sequenceDiagram
 
 ### 5.6 Bounded Discovery Search and Handoff Retry
 - **Trigger:** A public caller requests a broad discovery search or retries a handoff after losing the first response.
-- **Handling:** Discovery evaluates one deterministic cursor page (at most 50 merchant candidates and 20 public product summaries per merchant) and returns a continuation cursor when more candidates remain. Handoff claims a merchant-scoped durable idempotency receipt before session creation.
-- **Resolution:** Broad requests cannot load an unbounded merchant result set. A matching handoff replay returns the original session identifier without minting another session or replaying a server-generated raw buyer token.
+- **Handling:** Discovery evaluates one deterministic cursor page (at most 50 merchant candidates). Per-merchant product/variant eligibility is constrained in SQL to at most 20 products, and public profiles expose no more than 20 summaries while computing range/availability aggregates separately. Handoff claims a merchant-scoped durable idempotency receipt before session creation.
+- **Resolution:** Broad requests cannot eager-load an unbounded merchant catalog or result set. A matching handoff replay returns the original session identifier without minting another session or replaying a server-generated raw buyer token.
 
 

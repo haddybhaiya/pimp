@@ -135,7 +135,7 @@
   - Extended ACP Protocol Adapter with `discovery_search` and `get_public_profile` actions.
 - [x] **Deterministic Matching & Explainable Ranking Engine:**
   - Filtering by currency, capability requirements, bounded delivery region, public product SKU, attributes, authoritative available inventory, and integer paise budget.
-  - Bounded cursor pagination (1-50 merchant candidates per page) and at most 20 public product summaries per merchant; a continuation cursor advances through deterministic slug order.
+  - Bounded cursor pagination (1-50 merchant candidates per page). Product/variant matching is constrained in SQL to at most 20 eligible products per merchant, while public profiles expose at most 20 SKU-ordered summaries with full-catalog price and stock aggregates; a continuation cursor advances through deterministic slug order.
   - Integer budget multiplication overflow protection (`min_price * qty <= budget_paise`).
   - Strict search keyword treatment: Prompt injection payloads are evaluated purely as literal search keywords, never instructions.
   - Explainable reason codes (`WITHIN_BUDGET`, `IN_STOCK`, `DELIVERY_SUPPORTED`, `CAPABILITY_MATCH`, `MATCH_EXACT_ATTRIBUTES`, `NEGOTIATION_SUPPORTED`, `PROFILE_COMPLETE`).

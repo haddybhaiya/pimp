@@ -979,7 +979,7 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 
 ## Phase 9 Public Discovery and Handoff Hardening (2026-09-04)
 
-- **Resolved — bounded public discovery:** Search now evaluates a deterministic cursor page of at most 50 merchant candidates and returns no more than 20 matching/public product summaries for one merchant. It reuses the eager-loaded candidate representation instead of reloading each public profile.
+- **Resolved — bounded public discovery:** Search now evaluates a deterministic cursor page of at most 50 merchant candidates. Product/variant eligibility is constrained in SQL to 20 products per merchant, avoiding full-catalog eager loading; public profiles return at most 20 summaries while computing accurate full-catalog price and availability aggregates separately.
 - **Resolved — stale autonomy UI:** An unavailable autonomy-status response clears the browser's last trusted status. The Agent page no longer offers autonomous execution while status is unknown; backend execution gates remain authoritative.
 - **Resolved — replay-safe handoff:** Discovery handoff claims/replays a merchant-scoped durable receipt before buyer-session creation. Retries return the same session and never store or repeat a generated raw buyer token.
 - **Verified by:** `tests/test_phase9_discovery_network.py` and `frontend/tests/phase7-agent-pages.test.tsx`.
@@ -1009,7 +1009,6 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
 - **P2 — `frontend/src/pages/policies.tsx:32`:** Make autonomy-rule loading best-effort or show a dedicated failure state so a secondary rule request does not hide the usable policy editor.
 - **P2 — `frontend/src/pages/discoverability.tsx:45`:** Load editable discovery metadata for `PRIVATE`/`PAUSED` merchants independently of the public-profile preview so a save cannot erase hidden tags.
 - **P2 — `frontend/src/pages/discoverability.tsx:102`:** Send explicit empty string/array values when a merchant clears description or delivery regions; omission currently means “leave unchanged.”
-- **P2 — `frontend/src/pages/agent.tsx:108`:** Clear or fail-close stale autonomy status after a refresh failure for every mutation control, including kill-switch interaction.
 - **P2 — `src/agent_ready_merchant/services/controlled_autonomy_service.py:1056`:** Return the actual resource version after an already-completed rollback rather than deriving it from the pre-rollback action state.
 - **P2 — `frontend/src/types/portal.ts:512`:** Narrow the merchant-editable discoverability-state type to `PRIVATE`, `DISCOVERABLE`, and `PAUSED`; `SUSPENDED` is system-owned.
 

@@ -20,7 +20,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +35,7 @@ from agent_ready_merchant.models.discovery import (
     MerchantDiscoveryTelemetry,
     compute_discovery_metadata_hash,
 )
+from agent_ready_merchant.models.inventory import InventoryItem
 from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.models.policy import PolicyRule
 from agent_ready_merchant.models.product import Product, ProductVariant
@@ -250,6 +251,177 @@ class DiscoveryService:
         return variant.price_override_paise or product.base_price_paise
 
     @classmethod
+    async def _load_public_catalog_summary(
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+    ) -> tuple[list[PublicProductSummary], int, int, bool]:
+        """Returns a bounded public sample plus authoritative catalog aggregates.
+
+        The public profile displays a small SKU-ordered sample. Price range and
+        availability are separately aggregated in SQL over the active catalog,
+        so response bounds never make public metadata inaccurate.
+        """
+        products_stmt = (
+            select(Product)
+            .options(
+                selectinload(Product.variants).selectinload(ProductVariant.inventory_item),
+            )
+            .where(
+                Product.merchant_id == merchant_id,
+                Product.is_active == True,  # noqa: E712
+            )
+            .order_by(Product.sku.asc())
+            .limit(_MAX_PUBLIC_PRODUCTS_PER_MERCHANT)
+        )
+        products = (await session.execute(products_stmt)).scalars().all()
+
+        summaries: list[PublicProductSummary] = []
+        for product in products:
+            active_variants = [variant for variant in product.variants if variant.is_active]
+            if not active_variants:
+                continue
+            variant_prices = [
+                cls._effective_variant_price(product, variant) for variant in active_variants
+            ]
+            sample_sku = next(
+                (variant.sku for variant in active_variants if variant.sku),
+                None,
+            )
+            summaries.append(
+                PublicProductSummary(
+                    product_sku=product.sku,
+                    title=product.title,
+                    category=product.category,
+                    description=product.description,
+                    price_range_paise={"min": min(variant_prices), "max": max(variant_prices)},
+                    in_stock=any(
+                        cls._variant_can_fulfill(variant, 1) for variant in active_variants
+                    ),
+                    attributes={"sample_sku": sample_sku} if sample_sku is not None else {},
+                )
+            )
+
+        effective_price = func.coalesce(
+            ProductVariant.price_override_paise,
+            Product.base_price_paise,
+        )
+        price_range_stmt = (
+            select(func.min(effective_price), func.max(effective_price))
+            .select_from(Product)
+            .join(ProductVariant, ProductVariant.product_id == Product.id)
+            .where(
+                Product.merchant_id == merchant_id,
+                Product.is_active == True,  # noqa: E712
+                ProductVariant.is_active == True,  # noqa: E712
+            )
+        )
+        overall_min, overall_max = (await session.execute(price_range_stmt)).one()
+
+        availability_stmt = (
+            select(ProductVariant.id)
+            .select_from(Product)
+            .join(ProductVariant, ProductVariant.product_id == Product.id)
+            .join(InventoryItem, InventoryItem.variant_id == ProductVariant.id)
+            .where(
+                Product.merchant_id == merchant_id,
+                Product.is_active == True,  # noqa: E712
+                ProductVariant.is_active == True,  # noqa: E712
+                InventoryItem.available_quantity >= InventoryItem.safety_threshold + 1,
+            )
+            .limit(1)
+        )
+        has_available_inventory = (await session.execute(availability_stmt)).scalar_one_or_none()
+        return (
+            summaries,
+            int(overall_min or 0),
+            int(overall_max or 0),
+            has_available_inventory is not None,
+        )
+
+    @classmethod
+    async def _load_matching_products(
+        cls,
+        session: AsyncSession,
+        merchant_id: uuid.UUID,
+        intent: BuyerDiscoveryIntent,
+        *,
+        query_text: str,
+        merchant_tags: list[str],
+    ) -> list[Product]:
+        """Loads at most 20 products matching all known buyer constraints.
+
+        Product, variant, stock, text, attribute, and budget predicates are
+        applied before the limit. Public search therefore cannot eager-load a
+        merchant's entire catalog, while an explicitly requested later SKU is
+        still discoverable.
+        """
+        stmt = (
+            select(Product)
+            .join(ProductVariant, ProductVariant.product_id == Product.id)
+            .join(InventoryItem, InventoryItem.variant_id == ProductVariant.id)
+            .options(
+                selectinload(Product.variants).selectinload(ProductVariant.inventory_item),
+            )
+            .where(
+                Product.merchant_id == merchant_id,
+                Product.is_active == True,  # noqa: E712
+                ProductVariant.is_active == True,  # noqa: E712
+                InventoryItem.available_quantity
+                >= InventoryItem.safety_threshold + intent.quantity,
+            )
+        )
+
+        if intent.product_sku:
+            stmt = stmt.where(Product.sku == intent.product_sku)
+
+        category_filter = (intent.category or "").strip().lower()
+        if category_filter:
+            stmt = stmt.where(func.lower(Product.category).contains(category_filter))
+
+        tag_matches_query = bool(
+            query_text and any(query_text in tag.lower() for tag in merchant_tags)
+        )
+        if query_text and not tag_matches_query:
+            text_predicates = [
+                func.lower(Product.title).contains(query_text),
+                func.lower(Product.description).contains(query_text),
+                func.lower(Product.category).contains(query_text),
+            ]
+            for word in query_text.split():
+                if len(word) > 2:
+                    text_predicates.extend(
+                        [
+                            func.lower(Product.title).contains(word),
+                            func.lower(Product.description).contains(word),
+                        ]
+                    )
+            stmt = stmt.where(or_(*text_predicates))
+
+        required_values = [
+            str(value).strip().lower()
+            for value in intent.required_attributes.values()
+            if str(value).strip()
+        ]
+        for value in required_values:
+            stmt = stmt.where(
+                or_(
+                    func.lower(ProductVariant.title).contains(value),
+                    func.lower(ProductVariant.sku).contains(value),
+                )
+            )
+
+        if intent.maximum_budget_paise is not None:
+            effective_price = func.coalesce(
+                ProductVariant.price_override_paise,
+                Product.base_price_paise,
+            )
+            stmt = stmt.where(effective_price * intent.quantity <= intent.maximum_budget_paise)
+
+        stmt = stmt.distinct().order_by(Product.sku.asc()).limit(_MAX_PUBLIC_PRODUCTS_PER_MERCHANT)
+        return list((await session.execute(stmt)).scalars().all())
+
+    @classmethod
     def get_public_capability_graph(cls) -> list[PublicCapabilityNode]:
         """Generates the safe, descriptive public capability graph.
 
@@ -309,9 +481,6 @@ class DiscoveryService:
                 select(Merchant)
                 .options(
                     selectinload(Merchant.discovery_profile),
-                    selectinload(Merchant.products)
-                    .selectinload(Product.variants)
-                    .selectinload(ProductVariant.inventory_item),
                 )
                 .where(Merchant.id == merchant_id)
             )
@@ -331,47 +500,12 @@ class DiscoveryService:
         ):
             return None
 
-        # Inspect active products and calculate non-binding price range
-        product_summaries: list[PublicProductSummary] = []
-        all_prices: list[int] = []
-
-        for p in sorted(merchant.products, key=lambda product: product.sku)[
-            :_MAX_PUBLIC_PRODUCTS_PER_MERCHANT
-        ]:
-            if not p.is_active:
-                continue
-
-            active_variants = [v for v in p.variants if v.is_active]
-            if not active_variants:
-                continue
-
-            var_prices = [cls._effective_variant_price(p, v) for v in active_variants]
-
-            min_p: int = min(var_prices)
-            max_p: int = max(var_prices)
-            all_prices.extend(var_prices)
-
-            # Safe allowlisted attributes only (sample_sku)
-            safe_attrs: dict[str, Any] = {}
-            for v in active_variants:
-                if v.sku:
-                    safe_attrs["sample_sku"] = v.sku
-                break
-
-            product_summaries.append(
-                PublicProductSummary(
-                    product_sku=p.sku,
-                    title=p.title,
-                    category=p.category,
-                    description=p.description,
-                    price_range_paise={"min": min_p, "max": max_p},
-                    in_stock=any(cls._variant_can_fulfill(v, 1) for v in active_variants),
-                    attributes=safe_attrs,
-                )
-            )
-
-        overall_min = min(all_prices) if all_prices else 0
-        overall_max = max(all_prices) if all_prices else 0
+        (
+            product_summaries,
+            overall_min,
+            overall_max,
+            has_available_inventory,
+        ) = await cls._load_public_catalog_summary(session, merchant_id)
 
         # Check negotiation support via active merchant policies
         stmt_pol = select(PolicyRule).where(
@@ -418,9 +552,7 @@ class DiscoveryService:
             supported_currencies=[merchant.currency],
             price_range_paise={"min": overall_min, "max": overall_max},
             safe_delivery_regions=profile.delivery_regions,
-            inventory_summary=(
-                "AVAILABLE" if any(p.in_stock for p in product_summaries) else "OUT_OF_STOCK"
-            ),
+            inventory_summary="AVAILABLE" if has_available_inventory else "OUT_OF_STOCK",
             negotiation_supported=negotiation_supported,
             checkout_available=not merchant.kill_switch_enabled,
             supported_canonical_capabilities=supported_caps,
@@ -517,9 +649,6 @@ class DiscoveryService:
             )
             .options(
                 selectinload(Merchant.discovery_profile),
-                selectinload(Merchant.products)
-                .selectinload(Product.variants)
-                .selectinload(ProductVariant.inventory_item),
             )
             .where(
                 MerchantDiscoveryProfile.discoverability_state
@@ -575,42 +704,25 @@ class DiscoveryService:
                 if not region_matched:
                     continue
 
-            # Inspect active products
+            # Inspect a SQL-bounded sample already matching the buyer's known
+            # product, stock, attribute, and budget constraints.
             matching_products: list[PublicProductSummary] = []
             has_attribute_match = False
             has_category_match = False
             is_within_budget = False
 
-            for p in sorted(m.products, key=lambda product: product.sku):
-                if not p.is_active:
-                    continue
-
-                if intent.product_sku and p.sku != intent.product_sku:
-                    continue
-
-                p_title = (p.title or "").lower()
-                p_desc = (p.description or "").lower()
+            candidate_products = await cls._load_matching_products(
+                session,
+                m.id,
+                intent,
+                query_text=query_text,
+                merchant_tags=[str(tag) for tag in profile.custom_tags],
+            )
+            for p in candidate_products:
                 p_cat = (p.category or "").lower()
 
-                # Category filter
-                if cat_filter and cat_filter not in p_cat:
-                    continue
                 if cat_filter and cat_filter in p_cat:
                     has_category_match = True
-
-                # Query keyword filter
-                if query_text:
-                    m_tags = [t.lower() for t in profile.custom_tags]
-                    words = [w for w in query_text.split() if len(w) > 2]
-                    matches_query = (
-                        query_text in p_title
-                        or query_text in p_desc
-                        or query_text in p_cat
-                        or any(query_text in t for t in m_tags)
-                        or any(word in p_title or word in p_desc for word in words)
-                    )
-                    if not matches_query:
-                        continue
 
                 active_variants = [v for v in p.variants if v.is_active]
                 purchasable_variants = [
@@ -626,9 +738,9 @@ class DiscoveryService:
                         v_title = (v.title or "").lower()
                         v_sku = (v.sku or "").lower()
                         req_vals = [
-                            val.strip().lower()
+                            str(val).strip().lower()
                             for val in intent.required_attributes.values()
-                            if val.strip()
+                            if str(val).strip()
                         ]
                         if req_vals and all(val in v_title or val in v_sku for val in req_vals):
                             attrs_satisfied = True
@@ -643,14 +755,7 @@ class DiscoveryService:
                 min_var_p: int = min(var_prices)
                 max_var_p: int = max(var_prices)
 
-                if intent.maximum_budget_paise is not None:
-                    qty = min(max(intent.quantity, 1), 1000)
-                    total_required_paise = min_var_p * qty
-                    if total_required_paise > intent.maximum_budget_paise:
-                        continue
-                    is_within_budget = True
-                else:
-                    is_within_budget = True
+                is_within_budget = True
 
                 matching_products.append(
                     PublicProductSummary(
@@ -728,7 +833,7 @@ class DiscoveryService:
             target_pid = next(
                 (
                     p.id
-                    for p in m.products
+                    for p in candidate_products
                     if matching_products and p.sku == matching_products[0].product_sku
                 ),
                 None,
