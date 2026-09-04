@@ -46,6 +46,13 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The FastAPI application serves the compiled React control plane from this
+# package path. Explicitly include it in wheels/non-editable installations
+# (including the production Docker image), rather than relying on the source
+# tree being present at runtime.
+[tool.setuptools.package-data]
+agent_ready_merchant = ["static/index.html", "static/assets/*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
