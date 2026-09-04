@@ -11,7 +11,6 @@ Adheres strictly to Phase 9 specifications:
 from __future__ import annotations
 
 import enum
-import uuid
 from datetime import datetime
 from typing import Any, Literal
 
@@ -75,7 +74,7 @@ class PublicProductSummary(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    product_id: str = Field(..., description="Public product identifier")
+    product_sku: str = Field(..., description="Public merchant-scoped product SKU")
     title: str = Field(..., description="Sanitized product title")
     category: str | None = Field(default=None, description="Product category")
     description: str | None = Field(default=None, description="Public product description")
@@ -96,7 +95,7 @@ class PublicMerchantProfile(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    public_id: str = Field(..., description="Public merchant UUID")
+    public_id: str = Field(..., description="Opaque public discovery identifier")
     slug: str = Field(..., description="Merchant store slug")
     display_name: str = Field(..., description="Merchant brand display name")
     category: str | None = Field(default=None, description="Primary store category")
@@ -159,9 +158,10 @@ class BuyerDiscoveryIntent(BaseModel):
         max_length=100,
         description="Target category filter",
     )
-    product_id: uuid.UUID | None = Field(
+    product_sku: str | None = Field(
         default=None,
-        description="Specific target product ID if known",
+        max_length=100,
+        description="Specific public merchant-scoped product SKU if known",
     )
     maximum_budget_paise: int | None = Field(
         default=None,
@@ -240,6 +240,9 @@ class DiscoverySearchResponse(BaseModel):
         default_factory=list, description="Ranked list of eligible matches"
     )
     total_matches: int = Field(..., description="Total count of eligible merchants")
+    correlation_id: str = Field(
+        ..., description="Replay-safe correlation ID for subsequent selection and handoff events"
+    )
     discovery_schema_version: str = Field(default="1.0.0", description="Discovery contract version")
     next_canonical_action: str = Field(
         default="START_BUYER_SESSION",
@@ -247,10 +250,38 @@ class DiscoverySearchResponse(BaseModel):
     )
 
 
+class DiscoveryProfileLookupRequest(BaseModel):
+    """Protocol-neutral public-profile lookup contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    public_id: str = Field(..., min_length=1, max_length=100)
+
+
+class DiscoveryHandoffRequest(BaseModel):
+    """Explicit bridge from public discovery to the existing buyer-session gateway."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    buyer_agent_identifier: str = Field(..., min_length=1, max_length=255)
+    requested_capabilities: list[str] = Field(default_factory=list, max_length=10)
+    duration_minutes: int = Field(default=60, ge=5, le=1440)
+    auth_token_raw: str | None = Field(default=None, min_length=8, max_length=512)
+    idempotency_key: str | None = Field(default=None, max_length=128)
+    correlation_id: str = Field(..., min_length=1, max_length=255)
+    selected_product_sku: str | None = Field(default=None, min_length=1, max_length=100)
+
+
 class DiscoverabilityUpdateRequest(BaseModel):
     """Request payload to update discoverability settings (Human MERCHANT_ADMIN only)."""
 
     model_config = ConfigDict(extra="forbid")
+
+    expected_profile_version: int = Field(
+        ...,
+        ge=1,
+        description="Current discovery-profile version required for an optimistic update",
+    )
 
     discoverability_state: str | None = Field(
         default=None,

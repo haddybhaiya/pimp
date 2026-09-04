@@ -35,7 +35,7 @@ from agent_ready_merchant.models.discovery import (
 )
 from agent_ready_merchant.models.merchant import Merchant
 from agent_ready_merchant.models.policy import PolicyRule
-from agent_ready_merchant.models.product import Product
+from agent_ready_merchant.models.product import Product, ProductVariant
 from agent_ready_merchant.schemas.discovery import (
     BuyerDiscoveryIntent,
     DiscoverabilityStatusResponse,
@@ -52,6 +52,10 @@ logger = logging.getLogger("agent_ready_merchant.discovery")
 
 class DiscoverySecurityError(Exception):
     """Raised when an unauthorized actor attempts to modify discoverability."""
+
+
+class DiscoveryConflictError(Exception):
+    """Raised when an optimistic discovery-profile update is stale."""
 
 
 class DiscoveryRateLimitError(Exception):
@@ -100,18 +104,24 @@ class DiscoveryService:
         cls,
         session: AsyncSession,
         merchant_id: uuid.UUID,
+        *,
+        for_update: bool = False,
     ) -> MerchantDiscoveryProfile:
         """Retrieves or creates the default PRIVATE discovery profile for a merchant."""
         stmt = select(MerchantDiscoveryProfile).where(
             MerchantDiscoveryProfile.merchant_id == merchant_id
         )
+        if for_update:
+            stmt = stmt.with_for_update()
         profile = (await session.execute(stmt)).scalar_one_or_none()
         if profile is not None:
             return profile
 
         # Default initial state is strictly PRIVATE
         initial_tags: list[str] = ["general", "commerce"]
-        initial_regions: list[str] = ["INDIA"]
+        # Delivery coverage is unknown until the merchant explicitly declares it.
+        # Do not fabricate a region in a public discovery response.
+        initial_regions: list[str] = []
         meta_hash = compute_discovery_metadata_hash(
             {
                 "merchant_id": str(merchant_id),
@@ -122,6 +132,7 @@ class DiscoveryService:
         )
 
         profile = MerchantDiscoveryProfile(
+            public_id=uuid.uuid4(),
             merchant_id=merchant_id,
             discoverability_state=DiscoverabilityState.PRIVATE.value,
             custom_tags=initial_tags,
@@ -155,7 +166,12 @@ class DiscoveryService:
                 "Only human MERCHANT_ADMIN may publish or modify discovery profiles."
             )
 
-        profile = await cls.get_or_create_profile(session, merchant_id)
+        profile = await cls.get_or_create_profile(session, merchant_id, for_update=True)
+
+        if req.expected_profile_version != profile.profile_version:
+            raise DiscoveryConflictError(
+                "Discovery profile was updated by another request. Refresh and retry."
+            )
 
         # Apply state changes if requested
         if req.discoverability_state is not None:
@@ -216,6 +232,20 @@ class DiscoveryService:
         )
         return profile
 
+    @staticmethod
+    def _variant_can_fulfill(variant: ProductVariant, quantity: int) -> bool:
+        """Uses the canonical inventory rule without reserving stock during discovery."""
+        inventory = variant.inventory_item
+        return (
+            inventory is not None
+            and inventory.available_quantity >= quantity + inventory.safety_threshold
+        )
+
+    @staticmethod
+    def _effective_variant_price(product: Product, variant: ProductVariant) -> int:
+        """Returns the canonical non-binding effective price for one variant."""
+        return variant.price_override_paise or product.base_price_paise
+
     @classmethod
     def get_public_capability_graph(cls) -> list[PublicCapabilityNode]:
         """Generates the safe, descriptive public capability graph.
@@ -273,7 +303,9 @@ class DiscoveryService:
             select(Merchant)
             .options(
                 selectinload(Merchant.discovery_profile),
-                selectinload(Merchant.products).selectinload(Product.variants),
+                selectinload(Merchant.products)
+                .selectinload(Product.variants)
+                .selectinload(ProductVariant.inventory_item),
             )
             .where(Merchant.id == merchant_id)
         )
@@ -305,15 +337,7 @@ class DiscoveryService:
             if not active_variants:
                 continue
 
-            var_prices: list[int] = [
-                v.price_override_paise
-                for v in active_variants
-                if v.price_override_paise is not None and v.price_override_paise > 0
-            ]
-            if not var_prices and p.base_price_paise > 0:
-                var_prices = [p.base_price_paise]
-            elif not var_prices:
-                var_prices = [10000]  # fallback positive paise
+            var_prices = [cls._effective_variant_price(p, v) for v in active_variants]
 
             min_p: int = min(var_prices)
             max_p: int = max(var_prices)
@@ -328,12 +352,12 @@ class DiscoveryService:
 
             product_summaries.append(
                 PublicProductSummary(
-                    product_id=str(p.id),
+                    product_sku=p.sku,
                     title=p.title,
                     category=p.category,
                     description=p.description,
                     price_range_paise={"min": min_p, "max": max_p},
-                    in_stock=True,  # Coarse signal
+                    in_stock=any(cls._variant_can_fulfill(v, 1) for v in active_variants),
                     attributes=safe_attrs,
                 )
             )
@@ -376,7 +400,7 @@ class DiscoveryService:
         desc = profile.custom_description or f"Official agent-ready storefront for {merchant.name}."
 
         return PublicMerchantProfile(
-            public_id=str(merchant.id),
+            public_id=str(profile.public_id),
             slug=merchant.slug,
             display_name=merchant.name,
             category=product_summaries[0].category if product_summaries else "General",
@@ -385,8 +409,10 @@ class DiscoveryService:
             safe_product_summaries=product_summaries,
             supported_currencies=[merchant.currency],
             price_range_paise={"min": overall_min, "max": overall_max},
-            safe_delivery_regions=profile.delivery_regions or ["INDIA"],
-            inventory_summary="AVAILABLE" if product_summaries else "OUT_OF_STOCK",
+            safe_delivery_regions=profile.delivery_regions,
+            inventory_summary=(
+                "AVAILABLE" if any(p.in_stock for p in product_summaries) else "OUT_OF_STOCK"
+            ),
             negotiation_supported=negotiation_supported,
             checkout_available=not merchant.kill_switch_enabled,
             supported_canonical_capabilities=supported_caps,
@@ -402,15 +428,41 @@ class DiscoveryService:
         cls,
         session: AsyncSession,
         public_id_or_slug: str,
+        *,
+        correlation_id: str | None = None,
     ) -> PublicMerchantProfile:
         """Retrieves a public merchant profile by ID or slug.
 
         Enforces anti-probing: throws uniform MerchantNotFoundError for nonexistent,
         PRIVATE, PAUSED, or SUSPENDED merchants.
         """
+        merchant_id = await cls.resolve_discoverable_merchant_id(session, public_id_or_slug)
+        profile = await cls.build_public_profile(session, merchant_id)
+        if profile is None:  # Defensive: resolution already performs this check.
+            raise MerchantNotFoundError("Merchant not found or not discoverable.")
+        if correlation_id is not None:
+            await cls.record_telemetry(
+                session=session,
+                merchant_id=merchant_id,
+                event_type=DiscoveryTelemetryEventType.MERCHANT_SELECTED.value,
+                correlation_id=correlation_id,
+            )
+        return profile
+
+    @classmethod
+    async def resolve_discoverable_merchant_id(
+        cls,
+        session: AsyncSession,
+        public_id_or_slug: str,
+    ) -> uuid.UUID:
+        """Resolves a public reference without exposing a merchant database identifier."""
         merchant_id: uuid.UUID | None = None
         try:
-            merchant_id = uuid.UUID(public_id_or_slug)
+            public_id = uuid.UUID(public_id_or_slug)
+            stmt_public_id = select(MerchantDiscoveryProfile.merchant_id).where(
+                MerchantDiscoveryProfile.public_id == public_id
+            )
+            merchant_id = (await session.execute(stmt_public_id)).scalar_one_or_none()
         except ValueError:
             # Slug lookup
             stmt_slug = select(Merchant.id).where(Merchant.slug == public_id_or_slug)
@@ -422,7 +474,7 @@ class DiscoveryService:
         profile = await cls.build_public_profile(session, merchant_id)
         if profile is None:
             raise MerchantNotFoundError("Merchant not found or not discoverable.")
-        return profile
+        return merchant_id
 
     @classmethod
     async def search_merchants(
@@ -455,7 +507,9 @@ class DiscoveryService:
             )
             .options(
                 selectinload(Merchant.discovery_profile),
-                selectinload(Merchant.products).selectinload(Product.variants),
+                selectinload(Merchant.products)
+                .selectinload(Product.variants)
+                .selectinload(ProductVariant.inventory_item),
             )
             .where(
                 MerchantDiscoveryProfile.discoverability_state
@@ -491,8 +545,7 @@ class DiscoveryService:
             if intent.delivery_region:
                 intent_reg = intent.delivery_region.strip().upper()
                 region_matched = (
-                    not merchant_regions
-                    or intent_reg in merchant_regions
+                    intent_reg in merchant_regions
                     or "ALL" in merchant_regions
                     or (
                         "INDIA" in merchant_regions
@@ -516,7 +569,7 @@ class DiscoveryService:
                 if not p.is_active:
                     continue
 
-                if intent.product_id and p.id != intent.product_id:
+                if intent.product_sku and p.sku != intent.product_sku:
                     continue
 
                 p_title = (p.title or "").lower()
@@ -544,13 +597,16 @@ class DiscoveryService:
                         continue
 
                 active_variants = [v for v in p.variants if v.is_active]
-                if not active_variants:
+                purchasable_variants = [
+                    v for v in active_variants if cls._variant_can_fulfill(v, intent.quantity)
+                ]
+                if not purchasable_variants:
                     continue
 
                 # Attributes check (e.g. size, color)
                 if intent.required_attributes:
                     attrs_satisfied = False
-                    for v in active_variants:
+                    for v in purchasable_variants:
                         v_title = (v.title or "").lower()
                         v_sku = (v.sku or "").lower()
                         req_vals = [
@@ -565,15 +621,9 @@ class DiscoveryService:
                         continue
                     has_attribute_match = True
 
-                var_prices: list[int] = [
-                    v.price_override_paise
-                    for v in active_variants
-                    if v.price_override_paise is not None and v.price_override_paise > 0
+                var_prices = [
+                    cls._effective_variant_price(p, variant) for variant in purchasable_variants
                 ]
-                if not var_prices and p.base_price_paise > 0:
-                    var_prices = [p.base_price_paise]
-                if not var_prices:
-                    continue
                 min_var_p: int = min(var_prices)
                 max_var_p: int = max(var_prices)
 
@@ -588,19 +638,19 @@ class DiscoveryService:
 
                 matching_products.append(
                     PublicProductSummary(
-                        product_id=str(p.id),
+                        product_sku=p.sku,
                         title=p.title,
                         category=p.category,
                         description=p.description,
                         price_range_paise={"min": min_var_p, "max": max_var_p},
                         in_stock=True,
-                        attributes={"variants_count": len(active_variants)},
+                        attributes={"variants_count": len(purchasable_variants)},
                     )
                 )
 
             # If search filters were provided, candidate must have matching products
             has_filter = bool(
-                query_text or intent.required_attributes or cat_filter or intent.product_id
+                query_text or intent.required_attributes or cat_filter or intent.product_sku
             )
             if has_filter and not matching_products:
                 continue
@@ -658,7 +708,22 @@ class DiscoveryService:
             )
 
             # Record telemetry replay-safely
-            target_pid = uuid.UUID(matching_products[0].product_id) if matching_products else None
+            target_pid = next(
+                (
+                    p.id
+                    for p in m.products
+                    if matching_products and p.sku == matching_products[0].product_sku
+                ),
+                None,
+            )
+            await cls.record_telemetry(
+                session=session,
+                merchant_id=m.id,
+                event_type=DiscoveryTelemetryEventType.SEARCH_RECEIVED.value,
+                correlation_id=corr_id,
+                sanitized_query=query_text[:255] if query_text else None,
+                product_id=target_pid,
+            )
             await cls.record_telemetry(
                 session=session,
                 merchant_id=m.id,
@@ -684,6 +749,7 @@ class DiscoveryService:
         return DiscoverySearchResponse(
             results=matched_results,
             total_matches=len(matched_results),
+            correlation_id=corr_id,
             discovery_schema_version="1.0.0",
             next_canonical_action="START_BUYER_SESSION",
         )

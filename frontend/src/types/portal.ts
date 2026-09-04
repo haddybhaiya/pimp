@@ -466,7 +466,7 @@ export interface PublicCapabilityGraphResponse {
 }
 
 export interface PublicProductSummary {
-  product_id: string;
+  product_sku: string;
   title: string;
   category?: string | null;
   description?: string | null;
@@ -508,6 +508,7 @@ export interface DiscoverabilityStatusResponse {
 }
 
 export interface DiscoverabilityUpdateRequest {
+  expected_profile_version: number;
   discoverability_state?: DiscoverabilityState;
   custom_tags?: string[];
   custom_description?: string;

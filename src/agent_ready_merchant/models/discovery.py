@@ -77,6 +77,15 @@ class MerchantDiscoveryProfile(Base, TimestampMixin):
         primary_key=True,
         default=uuid.uuid4,
     )
+    # This identifier is intentionally distinct from the merchant primary key.
+    # It is the only opaque identifier returned by the public discovery API.
+    public_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        unique=True,
+        nullable=False,
+        index=True,
+        default=uuid.uuid4,
+    )
     merchant_id: Mapped[uuid.UUID] = mapped_column(
         GUID(),
         ForeignKey("merchants.id", ondelete="CASCADE"),

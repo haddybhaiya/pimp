@@ -57,10 +57,15 @@ export const DiscoverabilityPage: React.FC = () => {
   }, []);
 
   const handleStateChange = async (targetState: DiscoverabilityState) => {
+    if (!data) {
+      setError('Discoverability status is unavailable. Refresh and try again.');
+      return;
+    }
     try {
       setIsSaving(true);
       setError(null);
       const updated = await api.updateDiscoverability({
+        expected_profile_version: data.profile_version,
         discoverability_state: targetState,
       });
       setData(updated);
@@ -75,6 +80,10 @@ export const DiscoverabilityPage: React.FC = () => {
 
   const handleSaveMetadata = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!data) {
+      setError('Discoverability status is unavailable. Refresh and try again.');
+      return;
+    }
     try {
       setIsSaving(true);
       setError(null);
@@ -88,6 +97,7 @@ export const DiscoverabilityPage: React.FC = () => {
         .filter(Boolean);
 
       const updated = await api.updateDiscoverability({
+        expected_profile_version: data.profile_version,
         custom_tags: tagsList,
         custom_description: customDesc.trim() || undefined,
         delivery_regions: regionsList.length > 0 ? regionsList : undefined,
