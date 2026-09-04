@@ -2103,6 +2103,162 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
+    # =========================================================================
+    # Phase 9: Discovery Network Endpoints
+    # =========================================================================
+    from agent_ready_merchant.schemas.discovery import (
+        BuyerDiscoveryIntent,
+        DiscoverabilityStatusResponse,
+        DiscoverabilityUpdateRequest,
+        DiscoverySearchResponse,
+        PublicCapabilityGraphResponse,
+        PublicMerchantProfile,
+    )
+    from agent_ready_merchant.services.discovery_service import (
+        DiscoveryRateLimitError,
+        DiscoverySecurityError,
+        DiscoveryService,
+        MerchantNotFoundError,
+    )
+
+    @app.post(
+        "/api/v1/discovery/search",
+        summary="Search and Discover Agent-Ready Merchants",
+        tags=["Discovery Network"],
+        response_model=DiscoverySearchResponse,
+    )
+    async def discovery_search_endpoint(
+        intent: BuyerDiscoveryIntent,
+        request: Request,
+        db: AsyncSession = Depends(get_db_session),
+    ) -> DiscoverySearchResponse:
+        client_ip = request.client.host if request.client else "127.0.0.1"
+        try:
+            return await DiscoveryService.search_merchants(
+                session=db,
+                intent=intent,
+                client_ip=client_ip,
+            )
+        except DiscoveryRateLimitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=str(exc),
+            ) from exc
+
+    @app.get(
+        "/api/v1/discovery/merchants/{public_id}",
+        summary="Retrieve Public Merchant Profile",
+        tags=["Discovery Network"],
+        response_model=PublicMerchantProfile,
+    )
+    async def get_public_merchant_endpoint(
+        public_id: str,
+        db: AsyncSession = Depends(get_db_session),
+    ) -> PublicMerchantProfile:
+        try:
+            return await DiscoveryService.get_public_merchant_by_id_or_slug(
+                session=db,
+                public_id_or_slug=public_id,
+            )
+        except MerchantNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Merchant not found or not discoverable.",
+            ) from exc
+
+    @app.get(
+        "/api/v1/discovery/merchants/{public_id}/capabilities",
+        summary="Retrieve Public Capability Graph for Merchant",
+        tags=["Discovery Network"],
+        response_model=PublicCapabilityGraphResponse,
+    )
+    async def get_public_merchant_capabilities_endpoint(
+        public_id: str,
+        db: AsyncSession = Depends(get_db_session),
+    ) -> PublicCapabilityGraphResponse:
+        try:
+            await DiscoveryService.get_public_merchant_by_id_or_slug(
+                session=db,
+                public_id_or_slug=public_id,
+            )
+            return PublicCapabilityGraphResponse(
+                capabilities=DiscoveryService.get_public_capability_graph(),
+                schema_version="1.0.0",
+            )
+        except MerchantNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Merchant not found or not discoverable.",
+            ) from exc
+
+    @app.get(
+        "/api/v1/discovery/capabilities",
+        summary="Retrieve Public Platform Capability Graph",
+        tags=["Discovery Network"],
+        response_model=PublicCapabilityGraphResponse,
+    )
+    async def get_public_capabilities_endpoint() -> PublicCapabilityGraphResponse:
+        return PublicCapabilityGraphResponse(
+            capabilities=DiscoveryService.get_public_capability_graph(),
+            schema_version="1.0.0",
+        )
+
+    @app.get(
+        "/api/v1/merchant/discoverability",
+        summary="Retrieve Merchant Discoverability Status, Metadata and Metrics",
+        tags=["Merchant Discoverability"],
+        response_model=DiscoverabilityStatusResponse,
+    )
+    async def get_merchant_discoverability_endpoint(
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> DiscoverabilityStatusResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        return await DiscoveryService.get_discoverability_status(
+            session=db,
+            merchant_id=x_merchant_id,
+        )
+
+    @app.put(
+        "/api/v1/merchant/discoverability",
+        summary="Update Discoverability State and Public Metadata",
+        tags=["Merchant Discoverability"],
+        response_model=DiscoverabilityStatusResponse,
+    )
+    async def update_merchant_discoverability_endpoint(
+        req: DiscoverabilityUpdateRequest,
+        x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
+        x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+        db: AsyncSession = Depends(get_db_session),
+        current_settings: Settings = Depends(get_settings),
+    ) -> DiscoverabilityStatusResponse:
+        await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
+        try:
+            await DiscoveryService.update_discoverability(
+                session=db,
+                merchant_id=x_merchant_id,
+                req=req,
+                actor_role="MERCHANT_ADMIN",
+                actor_id=str(x_merchant_id),
+            )
+            await db.commit()
+            return await DiscoveryService.get_discoverability_status(
+                session=db,
+                merchant_id=x_merchant_id,
+            )
+        except DiscoverySecurityError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=str(exc),
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
     return app
 
 

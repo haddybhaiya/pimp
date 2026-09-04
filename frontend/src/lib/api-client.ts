@@ -28,6 +28,10 @@ import {
   AutonomyActionItem,
   KillSwitchResponse,
   RollbackResponse,
+  DiscoverabilityStatusResponse,
+  DiscoverabilityUpdateRequest,
+  PublicMerchantProfile,
+  PublicCapabilityGraphResponse,
 } from '@/types/portal';
 
 export class ApiError extends Error {
@@ -526,6 +530,39 @@ export class ApiClient {
         payload,
       }),
     });
+  }
+
+  // =========================================================================
+  // Phase 9 — Discovery Network Methods
+  // =========================================================================
+
+  async getDiscoverabilityStatus(): Promise<DiscoverabilityStatusResponse> {
+    return this.request<DiscoverabilityStatusResponse>('/api/v1/merchant/discoverability');
+  }
+
+  async updateDiscoverability(payload: DiscoverabilityUpdateRequest): Promise<DiscoverabilityStatusResponse> {
+    return this.request<DiscoverabilityStatusResponse>('/api/v1/merchant/discoverability', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async searchDiscovery(intent: Record<string, unknown>): Promise<unknown> {
+    return this.request('/api/v1/discovery/search', {
+      method: 'POST',
+      body: JSON.stringify(intent),
+    });
+  }
+
+  async getPublicMerchantProfile(publicId: string): Promise<PublicMerchantProfile> {
+    return this.request<PublicMerchantProfile>(`/api/v1/discovery/merchants/${publicId}`);
+  }
+
+  async getPublicCapabilities(publicId?: string): Promise<PublicCapabilityGraphResponse> {
+    const path = publicId
+      ? `/api/v1/discovery/merchants/${publicId}/capabilities`
+      : '/api/v1/discovery/capabilities';
+    return this.request<PublicCapabilityGraphResponse>(path);
   }
 }
 
