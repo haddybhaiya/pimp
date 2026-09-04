@@ -29,6 +29,11 @@ def get_engine() -> AsyncEngine:
         if "sqlite" not in db_url:
             engine_kwargs["pool_size"] = settings.DB_POOL_SIZE
             engine_kwargs["max_overflow"] = settings.DB_MAX_OVERFLOW
+            # Managed PostgreSQL providers may close idle TCP connections.  Test
+            # a checked-out connection and retire it before the provider's
+            # typical idle timeout instead of surfacing a transient 500.
+            engine_kwargs["pool_pre_ping"] = True
+            engine_kwargs["pool_recycle"] = settings.DB_POOL_RECYCLE_SECONDS
 
         _engine = create_async_engine(db_url, **engine_kwargs)
     return _engine

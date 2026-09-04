@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     DB_ECHO: bool = False
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
+    DB_POOL_RECYCLE_SECONDS: int = Field(default=1800, ge=60, le=86_400)
 
     # --------------------------------------------------------------------------
     # 3. Razorpay Test-Mode Credentials (Stored safely as SecretStr)
