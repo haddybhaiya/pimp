@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 from pydantic import SecretStr, ValidationError
 
@@ -105,6 +107,35 @@ def test_settings_development_and_test_allow_default_secret() -> None:
         SECRET_KEY=SecretStr("default-insecure-secret-key-change-in-production"),
     )
     assert test_settings.ENVIRONMENT == "test"
+
+
+def test_postgresql_engine_enables_liveness_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Production PostgreSQL engines must replace provider-closed connections safely."""
+    import agent_ready_merchant.db.session as session_module
+
+    settings = Settings(
+        DATABASE_URL=SecretStr("postgresql+asyncpg://user:pass@db.example.test:5432/merchant"),
+        DB_POOL_SIZE=3,
+        DB_MAX_OVERFLOW=2,
+        DB_POOL_RECYCLE_SECONDS=1800,
+    )
+    captured: dict[str, Any] = {}
+    sentinel_engine = object()
+
+    def fake_create_async_engine(url: str, **kwargs: Any) -> object:
+        captured["url"] = url
+        captured.update(kwargs)
+        return sentinel_engine
+
+    monkeypatch.setattr(session_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(session_module, "create_async_engine", fake_create_async_engine)
+    monkeypatch.setattr(session_module, "_engine", None)
+
+    assert session_module.get_engine() is sentinel_engine
+    assert captured["pool_size"] == 3
+    assert captured["max_overflow"] == 2
+    assert captured["pool_pre_ping"] is True
+    assert captured["pool_recycle"] == 1800
 
 
 def test_settings_monetary_defaults_are_integer_paise() -> None:
