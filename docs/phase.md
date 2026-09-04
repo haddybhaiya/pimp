@@ -87,7 +87,7 @@
   - Detects object-first actions (e.g. `autonomy_increase`, `policy_override`, `capability_grant`), direct action values, and inflected verb-object phrases.
   - Evaluates both `metadata` and `metadata_payload` structured action envelopes fail-closed.
   - Preserves reviewability of legitimate commerce terms (`loyalty credits`, `shipping charges`, `refundable`, `credit score`, `delivery policy description`).
-- [x] **Database Models & Alembic Migrations 011–014 (`011_phase8_controlled_autonomy.py` through `014_autonomy_failure_telemetry.py`):**
+- [x] **Database Models & Alembic Migrations 011–014 and 017 (`011_phase8_controlled_autonomy.py` through `014_autonomy_failure_telemetry.py`, `017_phase8_deferred_hardening.py`):**
   - Added `merchants.kill_switch_enabled` boolean column.
   - Created `merchant_autonomy_rules` table with deterministic SHA-256 rule hashing, unique composite constraints `(merchant_id, action_type)`, hourly limit bounds [1, 100], and daily limit bounds [1, 1000].
   - Created `merchant_autonomy_actions` ledger with snapshot storage, composite foreign keys to `merchant_experiments(id, merchant_id)` and `merchant_proposals(id, merchant_id)`; proposal deletion clears only the optional `proposal_id` and preserves the tenant-scoped action history.
@@ -95,7 +95,7 @@
 - [x] **Authoritative 18-Precondition Gate Pipeline (`ControlledAutonomyService.execute_autonomous_action`):**
   - Pre-execution validation enforcing: (1) Actor authority, (2) Active merchant state, (3) Master kill-switch check, (4) Anomaly state evaluation, (5) Evidence-backed proposal existence and tenant ownership, (6) Typed action allowlist, (7) Rule enablement and `AUTO_LOW_RISK` classification, (8) Rule version & SHA-256 hash integrity, (9) Hourly rate limit budget, (10) Daily rate limit budget, (11) Cooldown period elapsed, (12) Target resource existence and tenant ownership, (13) Optimistic target version checking, (14) Pre-mutation JSON snapshot generation, (15) Idempotency claim receipt, (16) Target atomic domain mutation, (17) Ledger record persistence, (18) Cryptographic audit event append.
   - Rules are provisioned disabled until an authenticated merchant administrator explicitly enables a typed action. Merchant, rule, proposal, target, and rollback rows are locked at the execution boundary to serialize kill-switch, quota, conflict, and target-version checks.
-  - Product mutations require an explicitly identified tenant-owned product; targetless and Phase 7 `general` placeholder proposals fail closed rather than selecting an arbitrary catalog row.
+  - Product mutations require an explicitly identified tenant-owned product; targetless and known placeholder (`general`, `discovery`, `sku`) proposals fail closed rather than selecting an arbitrary catalog row.
 - [x] **Master Kill Switch & Anomaly Controller:**
   - Fast-path kill-switch endpoint (`POST /api/v1/merchant/autonomy/kill-switch`) instantly blocking all autonomous mutations.
   - Safely halts all currently `RUNNING` experiments with `stopped_by_kill_switch: True` and appends immutable audit events.
@@ -104,7 +104,7 @@
   - Reverts mutated resources back to exact pre-action snapshot state while asserting current target version equals expected post-action version.
   - Human Precedence Rule: If a human merchant modified the entity after autonomous execution, rollback fails closed with `RollbackConflictError` and records `rollback_status = CONFLICT_REJECTED`.
   - The rejected conflict state and its audit event are committed before HTTP 409 is returned for both direct action and delegated experiment rollbacks, so safety evidence is not lost to request rollback.
-  - Idempotent: Repeated rollback calls return the cached rollback receipt safely.
+  - Idempotent: Repeated rollback calls return the cached terminal receipt safely, including deterministic conflict outcomes.
   - Rolling back an autonomous experiment delegates to its linked autonomy-action rollback, restoring the captured target snapshot and reconciling both the experiment and ledger states.
 - [x] **Web Control Plane Integration:**
   - Master Kill Switch card on Agent page with live status indicator and emergency trigger.
@@ -112,7 +112,7 @@
   - Autonomous Actions Ledger on Agent page with snapshot inspector dialog and one-click deterministic rollback dialog.
   - Experiments workbench `AUTO_ELIGIBLE` badge, Stop Experiment, and Rollback Variation controls.
 - [x] **Comprehensive Test Suite & Quality Gate Compliance:**
-  - 24 dedicated integration tests in `tests/test_phase8_controlled_autonomy.py` covering authority boundaries, prohibited attacks, explicit opt-in defaults, rejected-proposal execution blocking, approval-first experiment starts, budget/cooldown enforcement, durable failure anomaly detection, optimistic locking, kill switch pre-execution and running experiment halting, E2E Golden Path, targetless/placeholder mutation rejection, experiment rollback reconciliation and conflict durability, rollback conflict rejection, tenant isolation, idempotency replay, and REST endpoints.
+  - 27 dedicated integration tests in `tests/test_phase8_controlled_autonomy.py` covering authority boundaries, prohibited attacks, explicit opt-in defaults, rejected-proposal execution blocking, approval-first experiment starts, budget/cooldown enforcement, durable failure anomaly detection, optimistic locking, kill switch pre-execution and running experiment halting, E2E Golden Path, targetless/placeholder mutation rejection, authoritative-evidence validation, rollback conflict receipt durability, tenant isolation, idempotency replay, and REST endpoints.
   - 100% clean passes: 316 pytest tests passing, 31 frontend vitest tests passing, 0 Mypy errors across 141 source files, 0 Ruff errors.
 - [x] **Phase 8 Completed & Signed Off.**
 

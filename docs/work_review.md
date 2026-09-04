@@ -66,7 +66,7 @@
 
 **Verified by:** `tests/test_phase8_controlled_autonomy.py` (23 passed), migration tests (5 passed), full pytest suite (314 passed, 3 skipped), and frontend test suite (31 passed).
 
-**Validated deferred follow-ups (2026-09-04 — no implementation in this review):**
+**Historical deferred follow-ups (2026-09-04 — resolved by the remediation log immediately below):**
    - **P1 — Incomplete rollback idempotency receipts:** A delegated experiment rollback can commit a `RollbackConflictError` while its experiment-stop and action-rollback receipts remain incomplete. A retry with the same key is then permanently reported as in progress. Complete or explicitly terminalize both receipts before committing the conflict outcome.
    - **P2 — Placeholder target aliases:** `discovery` and `sku`, like `general`, can currently resolve to literal product SKUs. Reject all server-known placeholders before product lookup.
    - **P2 — Autonomy execution idempotency length:** The API accepts 255-character keys while the successful autonomy-action ledger permits 128. Align validation and persistence limits before a successful action is recorded.
@@ -83,6 +83,14 @@
    - **P2 — Autonomous-action pagination bounds:** The action-ledger endpoint accepts negative or unbounded `limit`/`offset` values.
    - **P2 — Strict rollback request body:** `bool("false")` currently enables rollback because the stop endpoint accepts an untyped dictionary instead of a strict boolean schema.
    - **Already resolved — proposal tenant coupling:** The reported migration-011 `proposal_id` issue is superseded by migrations 012–013, which add the composite `(proposal_id, merchant_id)` foreign key and tenant uniqueness constraint.
+### Phase 8 Deferred Follow-ups Remediation (2026-09-04)
+
+- **Resolved — rollback conflict receipts:** Delegated rollback conflicts terminalize both the action-rollback and experiment-stop idempotency receipts as `CONFLICT_REJECTED`, then preserve the audit event and HTTP 409 outcome.
+- **Resolved — autonomous execution guards:** Server-known placeholder targets (`general`, `discovery`, `sku`) are rejected; keys are capped at the 128-character ledger bound; every evidence reference is rechecked against a fresh authoritative observation snapshot; and new-key rollback replay reports the actual current target version.
+- **Resolved — governance and control-plane correctness:** Acronym boundaries such as `REFUNDRequest` are normalized before prohibited-action screening; approval-gate coverage reaches `approval_required`; unavailable autonomy status/actions surface errors and fail closed; zero is a valid experiment target; and experiment rollback messaging uses the returned server outcome.
+- **Resolved — durable contracts:** Migration 017 database-constrains experiment duration to 1–365 days, typed client rule updates include all supported values, action-ledger paging is bounded, and strict stop schemas reject string booleans.
+- **Resolved — migration identifier compatibility:** Revision 016 now uses the short `016_phase9_public_ids` identifier, and migration tests reject any future revision ID longer than the existing 32-character `alembic_version.version_num` column.
+
 ---
 
 # Service, Telemetry, and Replay-Safety Follow-up Remediation Log

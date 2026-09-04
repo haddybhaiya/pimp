@@ -29,9 +29,7 @@ export const PoliciesPage: React.FC = () => {
     try {
       const [data, rules] = await Promise.all([
         api.getPolicies(),
-        typeof api.getAutonomyRules === 'function'
-          ? api.getAutonomyRules().catch(() => [])
-          : Promise.resolve([]),
+        api.getAutonomyRules(),
       ]);
       setPolicyData(data);
       setAutonomyRules(rules);

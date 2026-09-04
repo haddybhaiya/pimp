@@ -135,8 +135,8 @@ export const ExperimentsPage: React.FC = () => {
     setActionLoadingId(id);
     setErrorMessage(null);
     try {
-      await api.rollbackExperiment(id, 'Merchant requested rollback');
-      setSuccessMessage('Experiment rolled back to baseline.');
+      const result = await api.rollbackExperiment(id, 'Merchant requested rollback');
+      setSuccessMessage(result.message);
       await fetchExperiments();
     } catch (err: unknown) {
       setErrorMessage(err instanceof Error ? err.message : 'Failed to roll back experiment.');

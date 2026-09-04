@@ -447,8 +447,10 @@ export class ApiClient {
       max_executions_per_day?: number;
       cooldown_seconds?: number;
       experiment_duration_limit_days?: number;
+      experiment_exposure_limit?: number | null;
       rollback_required?: boolean;
       approval_required?: boolean;
+      bounded_monetary_limit_paise?: number;
       expected_version: number;
     }
   ): Promise<AutonomyRuleItem> {

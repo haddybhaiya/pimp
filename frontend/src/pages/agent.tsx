@@ -41,6 +41,8 @@ export const AgentPage: React.FC = () => {
   const [diagnoses, setDiagnoses] = useState<MerchantDiagnosisItem[]>([]);
   const [autonomyStatus, setAutonomyStatus] = useState<AutonomyStatusResponse | null>(null);
   const [autonomyActions, setAutonomyActions] = useState<AutonomyActionItem[]>([]);
+  const [autonomyStatusError, setAutonomyStatusError] = useState<string | null>(null);
+  const [autonomyActionsError, setAutonomyActionsError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [isTogglingKillSwitch, setIsTogglingKillSwitch] = useState<boolean>(false);
@@ -80,21 +82,31 @@ export const AgentPage: React.FC = () => {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const [snapData, propData, statusData, actionsData] = await Promise.all([
+      const [snapData, propData, statusResult, actionsResult] = await Promise.all([
         api.getAgentSnapshot(),
         api.listProposals(),
-        typeof api.getAutonomyStatus === 'function'
-          ? api.getAutonomyStatus().catch(() => null)
-          : Promise.resolve(null),
-        typeof api.getAutonomyActions === 'function'
-          ? api.getAutonomyActions(20).catch(() => [])
-          : Promise.resolve([]),
+        api.getAutonomyStatus().then(
+          (value) => ({ value, error: null as string | null }),
+          (error: unknown) => ({
+            value: null,
+            error: error instanceof Error ? error.message : 'Autonomy status is unavailable.',
+          })
+        ),
+        api.getAutonomyActions(20).then(
+          (value) => ({ value, error: null as string | null }),
+          (error: unknown) => ({
+            value: null,
+            error: error instanceof Error ? error.message : 'Autonomy action ledger is unavailable.',
+          })
+        ),
       ]);
       if (requestVersion === requestVersionRef.current) {
         setSnapshot(snapData);
         setProposals(propData);
-        if (statusData) setAutonomyStatus(statusData);
-        if (actionsData) setAutonomyActions(actionsData);
+        setAutonomyStatusError(statusResult.error);
+        setAutonomyActionsError(actionsResult.error);
+        if (statusResult.value) setAutonomyStatus(statusResult.value);
+        if (actionsResult.value) setAutonomyActions(actionsResult.value);
       }
     } catch (err: unknown) {
       if (requestVersion === requestVersionRef.current) {
@@ -112,7 +124,10 @@ export const AgentPage: React.FC = () => {
   }, []);
 
   const handleToggleKillSwitch = async () => {
-    if (!autonomyStatus) return;
+    if (!autonomyStatus) {
+      setErrorMessage('Autonomy status is unavailable. Refresh before changing the kill switch.');
+      return;
+    }
     setIsTogglingKillSwitch(true);
     setErrorMessage(null);
     setSuccessMessage(null);
@@ -210,9 +225,9 @@ export const AgentPage: React.FC = () => {
     const targetValue = Number(experimentTargetValue);
     if (
       action === 'CONVERT_TO_EXPERIMENT' &&
-      (!Number.isFinite(targetValue) || targetValue <= 0)
+      (experimentTargetValue.trim() === '' || !Number.isFinite(targetValue) || targetValue < 0)
     ) {
-      setErrorMessage('A valid positive target value is required to convert a proposal to an experiment.');
+      setErrorMessage('A valid non-negative target value is required to convert a proposal to an experiment.');
       return;
     }
 
@@ -311,7 +326,9 @@ export const AgentPage: React.FC = () => {
           <div className="flex items-center gap-3">
             <div
               className={`p-2.5 rounded-xl border ${
-                autonomyStatus?.kill_switch_enabled
+                !autonomyStatus
+                  ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                  : autonomyStatus.kill_switch_enabled
                   ? 'bg-rose-500/10 border-rose-500/30 text-rose-400'
                   : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
               }`}
@@ -325,7 +342,11 @@ export const AgentPage: React.FC = () => {
                   variant={autonomyStatus?.kill_switch_enabled ? 'destructive' : 'default'}
                   className="text-[10px] font-mono"
                 >
-                  {autonomyStatus?.kill_switch_enabled ? 'KILL SWITCH ACTIVE' : 'AUTONOMY ENGAGED'}
+                  {!autonomyStatus
+                    ? 'STATUS UNAVAILABLE'
+                    : autonomyStatus.kill_switch_enabled
+                    ? 'KILL SWITCH ACTIVE'
+                    : 'AUTONOMY ENGAGED'}
                 </Badge>
                 {autonomyStatus?.anomaly_state && autonomyStatus.anomaly_state !== 'NORMAL' && (
                   <Badge variant="outline" className="text-[10px] font-mono border-amber-500/40 text-amber-400">
@@ -334,7 +355,9 @@ export const AgentPage: React.FC = () => {
                 )}
               </div>
               <p className="text-xs text-text-muted mt-0.5">
-                {autonomyStatus?.kill_switch_enabled
+                {!autonomyStatus
+                  ? 'Autonomy status could not be loaded. Mutations are unavailable until refreshed.'
+                  : autonomyStatus.kill_switch_enabled
                   ? 'All autonomous mutations paused. System operates strictly in manual approval mode.'
                   : 'Allows autonomous execution of low-risk reversible optimizations within configured hourly/daily budgets.'}
               </p>
@@ -363,6 +386,8 @@ export const AgentPage: React.FC = () => {
               variant={autonomyStatus?.kill_switch_enabled ? 'primary' : 'destructive'}
               isLoading={isTogglingKillSwitch}
               onClick={handleToggleKillSwitch}
+              disabled={!autonomyStatus}
+              title={!autonomyStatus ? 'Autonomy status is unavailable. Refresh and try again.' : undefined}
               className="text-xs font-semibold shrink-0"
             >
               <Power className="h-3.5 w-3.5 mr-1.5" />
@@ -371,6 +396,13 @@ export const AgentPage: React.FC = () => {
           </div>
         </div>
       </Card>
+
+      {(autonomyStatusError || autonomyActionsError) && (
+        <div className="flex items-center gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs text-amber-100">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          <span>{autonomyStatusError ?? autonomyActionsError}</span>
+        </div>
+      )}
 
       {/* Safety & Invariant Indicator */}
       <div className="flex items-center justify-between px-4 py-2.5 bg-[#171A1C] rounded-xl border border-emerald-500/20 text-xs">
@@ -516,7 +548,9 @@ export const AgentPage: React.FC = () => {
                 p.risk_level === 'LOW_RISK_REVERSIBLE' &&
                 isPending &&
                 p.proposal_type !== 'SUGGEST_BOUNDED_EXPERIMENT' &&
-                !autonomyStatus?.kill_switch_enabled;
+                autonomyStatus !== null &&
+                !autonomyStatus.kill_switch_enabled &&
+                !['PAUSE_AUTONOMY', 'REQUIRE_HUMAN_REVIEW'].includes(autonomyStatus.anomaly_state);
 
               return (
                 <Card key={p.id} className="p-4 bg-[#171A1C] border-white/10">

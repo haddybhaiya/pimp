@@ -117,7 +117,12 @@ sequenceDiagram
 - **Handling:** Server queries committed ledger records in past 1 hour and 1 day.
 - **Resolution:** Rejects request fail-closed with `AutonomyExecutionError` detailing exhausted quota or remaining cooldown seconds. State remains unmutated.
 
-### 4.5 High Failure Anomaly Circuit Breaker
+### 4.5 Rollback Conflict Idempotency Completion
+- **Trigger:** A delegated experiment rollback encounters a target changed by a newer human merchant edit.
+- **Handling:** The action-rollback and experiment-stop operations each persist a terminal `CONFLICT_REJECTED` receipt before the endpoint commits the conflict audit event and returns HTTP 409.
+- **Resolution:** Same-key retries deterministically return the terminal conflict rather than an indefinite "in progress" response. No target state is overwritten.
+
+### 4.6 High Failure Anomaly Circuit Breaker
 - **Trigger:** 3 or more autonomous execution failures occur within the trailing 1-hour window.
 - **Handling:** Each rejected execution gate or optimistic-lock conflict rolls back its nested execution transaction, then appends a tenant-scoped `merchant_autonomy_failures` record and immutable `AUTONOMOUS_ACTION_REJECTED` audit event. `evaluate_anomaly_state` counts these durable records over the trailing hour.
 - **Resolution:** Subsequent autonomous execution attempts fail closed with `REQUIRE_HUMAN_REVIEW` while the rolling failure threshold is met. The state is intentionally derived rather than persisted, so it returns to `NORMAL` only after all qualifying failure records age out of the one-hour window.

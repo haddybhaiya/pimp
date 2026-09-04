@@ -1,6 +1,6 @@
 """Use opaque discovery identifiers instead of merchant database identifiers.
 
-Revision ID: 016_phase9_public_discovery_identifiers
+Revision ID: 016_phase9_public_ids
 Revises: 015_phase9_discovery_network
 """
 
@@ -9,7 +9,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "016_phase9_public_discovery_identifiers"
+revision: str = "016_phase9_public_ids"
 down_revision: str | None = "015_phase9_discovery_network"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
