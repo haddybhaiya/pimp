@@ -130,6 +130,10 @@ class MerchantAutonomyRule(Base, TimestampMixin, OptimisticLockMixin):
             name="ck_merchant_autonomy_rules_cooldown_bounds",
         ),
         CheckConstraint(
+            "experiment_duration_limit_days >= 1 AND experiment_duration_limit_days <= 365",
+            name="ck_merchant_autonomy_rules_experiment_duration_bounds",
+        ),
+        CheckConstraint(
             "bounded_monetary_limit_paise >= 0",
             name="ck_merchant_autonomy_rules_monetary_limit_non_negative",
         ),

@@ -617,7 +617,8 @@ class MerchantAgentService:
 
             def normalize_structured_text(raw_value: Any) -> str:
                 """Normalize separators and camelCase without broad substring matching."""
-                with_word_breaks = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(raw_value))
+                acronym_split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", str(raw_value))
+                with_word_breaks = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", acronym_split)
                 return re.sub(r"[^a-z0-9]+", " ", with_word_breaks.lower()).strip()
 
             def has_prohibited_scalar(raw_value: Any) -> bool:

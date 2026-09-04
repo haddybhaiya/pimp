@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
@@ -1798,6 +1798,7 @@ def create_app() -> FastAPI:
         KillSwitchUpdateRequest,
         RollbackRequest,
         RollbackResponse,
+        StopExperimentRequest,
     )
     from agent_ready_merchant.services.controlled_autonomy_service import (
         AutonomyExecutionError,
@@ -1959,8 +1960,8 @@ def create_app() -> FastAPI:
     async def list_autonomy_actions_endpoint(
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
-        limit: int = 50,
-        offset: int = 0,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> list[AutonomyActionResponse]:
@@ -2009,7 +2010,7 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         x_idempotency_key: str = Header(
-            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+            ..., min_length=1, max_length=128, alias="X-Idempotency-Key"
         ),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
@@ -2053,7 +2054,7 @@ def create_app() -> FastAPI:
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         x_idempotency_key: str = Header(
-            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+            ..., min_length=1, max_length=128, alias="X-Idempotency-Key"
         ),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
@@ -2094,18 +2095,18 @@ def create_app() -> FastAPI:
     )
     async def stop_experiment_endpoint(
         experiment_id: uuid.UUID,
-        payload: dict[str, Any],
+        payload: StopExperimentRequest,
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         x_idempotency_key: str = Header(
-            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+            ..., min_length=1, max_length=128, alias="X-Idempotency-Key"
         ),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
-        reason = str(payload.get("reason", "Human merchant requested stop"))
-        require_rollback = bool(payload.get("require_rollback", False))
+        reason = payload.reason
+        require_rollback = payload.require_rollback
         try:
             result = await ControlledAutonomyService.stop_experiment(
                 session=db,
@@ -2135,17 +2136,17 @@ def create_app() -> FastAPI:
     )
     async def rollback_experiment_endpoint(
         experiment_id: uuid.UUID,
-        payload: dict[str, Any],
+        payload: StopExperimentRequest,
         x_merchant_id: uuid.UUID = Header(..., alias="X-Merchant-ID"),
         x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
         x_idempotency_key: str = Header(
-            ..., min_length=1, max_length=255, alias="X-Idempotency-Key"
+            ..., min_length=1, max_length=128, alias="X-Idempotency-Key"
         ),
         db: AsyncSession = Depends(get_db_session),
         current_settings: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         await _require_merchant_auth(x_merchant_id, x_auth_token, current_settings, db)
-        reason = str(payload.get("reason", "Human merchant requested rollback"))
+        reason = payload.reason
         try:
             result = await ControlledAutonomyService.stop_experiment(
                 session=db,

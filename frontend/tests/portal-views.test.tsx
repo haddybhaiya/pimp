@@ -21,6 +21,7 @@ vi.mock('../src/lib/api-client', () => ({
     listApprovals: vi.fn(),
     resolveApproval: vi.fn(),
     getPolicies: vi.fn(),
+    getAutonomyRules: vi.fn(),
     updatePolicies: vi.fn(),
     getAuditLedger: vi.fn(),
     listOrders: vi.fn(),
@@ -158,6 +159,7 @@ describe('Phase 5.2 Merchant Control Plane Views Tests', () => {
       protocol_version: '2026-03-01',
       rules: [],
     });
+    vi.mocked(api.getAutonomyRules).mockResolvedValueOnce([]);
 
     render(
       <AuthProvider>

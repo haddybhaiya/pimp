@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from agent_ready_merchant.models.autonomy import (
     AnomalyState,
@@ -120,6 +120,15 @@ class RollbackRequest(BaseModel):
 
     reason: str = Field(..., min_length=3, max_length=500)
     expected_target_version: int = Field(..., ge=1)
+
+
+class StopExperimentRequest(BaseModel):
+    """Strict human request to stop or roll back an experiment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="Human merchant requested stop", min_length=3, max_length=500)
+    require_rollback: StrictBool = False
 
 
 class RollbackResponse(BaseModel):
