@@ -360,9 +360,6 @@ class DiscoveryService:
             select(Product)
             .join(ProductVariant, ProductVariant.product_id == Product.id)
             .join(InventoryItem, InventoryItem.variant_id == ProductVariant.id)
-            .options(
-                selectinload(Product.variants).selectinload(ProductVariant.inventory_item),
-            )
             .where(
                 Product.merchant_id == merchant_id,
                 Product.is_active == True,  # noqa: E712
@@ -418,8 +415,30 @@ class DiscoveryService:
             )
             stmt = stmt.where(effective_price * intent.quantity <= intent.maximum_budget_paise)
 
-        stmt = stmt.distinct().order_by(Product.sku.asc()).limit(_MAX_PUBLIC_PRODUCTS_PER_MERCHANT)
-        return list((await session.execute(stmt)).scalars().all())
+        # A Product can have multiple eligible variants.  Deduplicate its IDs
+        # before loading full entities: PostgreSQL cannot apply DISTINCT to the
+        # Product.attributes JSON column included by ``select(Product)``.
+        # Grouping only scalar identity/order columns is portable and leaves the
+        # outer query free to load JSON attributes normally.
+        candidate_products = (
+            stmt.with_only_columns(
+                Product.id.label("product_id"),
+                Product.sku.label("product_sku"),
+            )
+            .group_by(Product.id, Product.sku)
+            .order_by(Product.sku.asc())
+            .limit(_MAX_PUBLIC_PRODUCTS_PER_MERCHANT)
+            .subquery()
+        )
+        products_stmt = (
+            select(Product)
+            .join(candidate_products, candidate_products.c.product_id == Product.id)
+            .options(
+                selectinload(Product.variants).selectinload(ProductVariant.inventory_item),
+            )
+            .order_by(candidate_products.c.product_sku.asc())
+        )
+        return list((await session.execute(products_stmt)).scalars().all())
 
     @classmethod
     def get_public_capability_graph(cls) -> list[PublicCapabilityNode]:
