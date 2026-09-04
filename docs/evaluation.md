@@ -223,7 +223,7 @@ graph LR
 
 ## 6. Phase 9 Discovery Network Verification Results Summary
 
-- **Total Backend Pytest Tests:** 333 passed, 3 skipped (live Razorpay sandbox / testmode)
+- **Total Backend Pytest Tests:** Full current suite is required; the count evolves with remediation coverage. Live Razorpay sandbox/testmode cases remain skipped where credentials are unavailable.
 - **Phase 9 Dedicated Tests (`test_phase9_discovery_network.py`):** 17 passed (100%)
 - **Total Frontend Vitest Tests:** 31 passed across 8 test suites
 - **Frontend Production Build:** 100% clean TypeScript compilation and Vite bundling (`npm run build`)

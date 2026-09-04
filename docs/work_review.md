@@ -957,8 +957,14 @@ The Agent-Ready Merchant backend and persistence layer were deployed to the link
   4. **Frontend Discoverability Control Plane (`frontend/src/pages/discoverability.tsx`):**
      - State toggle (`DISCOVERABLE`, `PAUSED`, `PRIVATE`), metadata editor, public preview, capability graph viewer, live metrics.
   5. **Verification Matrix:**
-     - 17 dedicated tests in `tests/test_phase9_discovery_network.py` (100% pass).
-     - Full project regression: 333 backend pytest tests pass, 31 frontend vitest tests pass, production Vite build passes, 0 Mypy issues, 0 Ruff issues.
+     - Phase 9 focused tests, full backend regression, frontend Vitest, and production Vite build are rerun after every remediation.
   6. **Final Project Roadmap Sign-off:**
      - All 9 authorized phases are complete. Execution stops cleanly.
 
+# Phase 9 Review Remediation — Discovery Contract Integrity
+
+- Resolved: Public discovery now evaluates the canonical available-inventory rule before returning or ranking product candidates; unavailable products are not advertised as in stock.
+- Resolved: Public merchant and product database IDs are replaced by opaque discovery-profile IDs and merchant-scoped public SKUs.
+- Resolved: ACP discovery actions dispatch through the typed, read-only discovery contract rather than the merchant commerce dispatcher; public handoff delegates buyer-session creation to the existing canonical gateway.
+- Resolved: Search, merchant selection, product selection, and successful handoff events use replay-safe tenant telemetry.
+- Resolved: Merchant discoverability updates require the current profile version and lock the profile before mutation, preventing silent concurrent overwrites.

@@ -176,7 +176,7 @@
 - **STATUS:** **VERIFIED (PASS)**
 - **CONFIDENCE:** 100%
 - **FAILURE IF WRONG:** Aggregator bots could probe private stores, leak internal pricing floor margins, initiate unauthorized buyer sessions from discovery, cause DoS via prompt injection, or inflate search telemetry via replays.
-- **MITIGATION:** Descriptive-only architecture; uniform `MerchantNotFoundError` for non-discoverable stores; default-deny allowlisted public projection (`PublicMerchantProfile`); integer multiplication overflow protection for budget filtering; prompt injection inputs treated as literal search strings; in-memory sliding window rate limits (60 req/min per client IP); and composite DB replay constraint `(merchant_id, event_type, correlation_id)` on search telemetry.
+- **MITIGATION:** Descriptive-only architecture; uniform `MerchantNotFoundError` for non-discoverable stores; default-deny allowlisted public projection (`PublicMerchantProfile`) with opaque discovery IDs rather than merchant/product database IDs; authoritative available-inventory filtering; integer multiplication overflow protection for budget filtering; prompt injection inputs treated as literal search strings; in-memory sliding window rate limits (60 req/min per client IP); and composite DB replay constraint `(merchant_id, event_type, correlation_id)` on discovery telemetry.
 
 
 
