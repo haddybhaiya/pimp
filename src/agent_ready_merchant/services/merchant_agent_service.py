@@ -805,7 +805,7 @@ class MerchantAgentService:
             resp = await llm_provider.generate_response(
                 messages=messages,
                 temperature=0.2,
-                max_tokens=2048,
+                max_tokens=settings.LLM_MAX_OUTPUT_TOKENS,
                 timeout=min(settings.LLM_TIMEOUT_SECONDS, 15.0),
             )
             raw_json = resp.content.strip()

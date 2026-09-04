@@ -422,6 +422,7 @@ async def test_diagnose_and_propose_with_mock_llm(
     assert proposals[0].risk_level == "LOW_RISK_REVERSIBLE"
     assert proposals[0].status == "PROPOSED"
     assert proposals[0].target_entity == "RUN-ALPHA-01"
+    assert mock_llm.call_options[-1]["max_tokens"] == settings.LLM_MAX_OUTPUT_TOKENS
 
 
 @pytest.mark.asyncio

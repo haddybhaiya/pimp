@@ -18,6 +18,7 @@ class MockLLMProvider(BaseLLMProvider):
         self.handler = handler
         self.model = model
         self.call_history: list[list[LLMMessage]] = []
+        self.call_options: list[dict[str, float | int]] = []
 
     async def generate_response(
         self,
@@ -27,6 +28,13 @@ class MockLLMProvider(BaseLLMProvider):
         timeout: float = 15.0,
     ) -> LLMResponse:
         self.call_history.append(messages)
+        self.call_options.append(
+            {
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "timeout": timeout,
+            }
+        )
 
         if self.handler:
             content = self.handler(messages)

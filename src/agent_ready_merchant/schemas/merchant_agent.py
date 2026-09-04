@@ -128,6 +128,86 @@ class MerchantProposalCreate(BaseModel):
     metadata_payload: dict[str, Any] = Field(default_factory=dict)
 
 
+# This deliberately narrow schema is sent to providers that support constrained
+# decoding.  It describes only untrusted intelligence output; persisted proposal
+# records still pass evidence and deterministic-governance validation below the
+# provider boundary.
+MERCHANT_AGENT_LLM_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["diagnoses", "proposals"],
+    "properties": {
+        "diagnoses": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "pattern",
+                    "summary",
+                    "severity",
+                    "evidence_references",
+                    "affected_entities",
+                ],
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "enum": [item.value for item in DiagnosisPattern],
+                    },
+                    "summary": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+                    "evidence_references": {"type": "array", "items": {"type": "string"}},
+                    "affected_entities": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        "proposals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "proposal_type",
+                    "title",
+                    "observation",
+                    "evidence",
+                    "hypothesis",
+                    "proposed_change",
+                    "target_entity",
+                    "expected_effect",
+                    "expected_metric",
+                    "confidence",
+                    "estimated_cost_paise",
+                    "metadata_payload",
+                ],
+                "properties": {
+                    "proposal_type": {
+                        "type": "string",
+                        "enum": [item.value for item in ProposalType],
+                    },
+                    "title": {"type": "string"},
+                    "observation": {"type": "string"},
+                    "evidence": {"type": "array", "items": {"type": "string"}},
+                    "hypothesis": {"type": "string"},
+                    "proposed_change": {"type": "string"},
+                    "target_entity": {"type": "string"},
+                    "expected_effect": {"type": "string"},
+                    "expected_metric": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "estimated_cost_paise": {"type": "integer", "minimum": 0},
+                    # Phase 7 does not delegate arbitrary structured actions to the model.
+                    "metadata_payload": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {},
+                    },
+                },
+            },
+        },
+    },
+}
+
+
 class MerchantProposalResponse(BaseModel):
     """Authoritative API response for a merchant proposal."""
 

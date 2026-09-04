@@ -32,7 +32,7 @@
 - **STATUS:** **VERIFIED (PASS)**
 - **CONFIDENCE:** 100%
 - **FAILURE IF WRONG:** Application crashes with unhandled deserialization errors or executes invalid tool parameters.
-- **MITIGATION:** Schema validator wraps all LLM responses; validation errors feed back into bounded retry loop (max 2 attempts); fallback refusal message returned if loop exceeds budget. All tools gated server-side.
+- **MITIGATION:** For Groq GPT-OSS models, the provider requests strict JSON-schema constrained decoding; all providers remain wrapped by parser, evidence, and governance validation. Invalid output degrades to no new intelligence action. All tools remain server-side gated.
 
 ---
 

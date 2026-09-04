@@ -1446,6 +1446,7 @@ def create_app() -> FastAPI:
     import json
 
     from agent_ready_merchant.schemas.merchant_agent import (
+        MERCHANT_AGENT_LLM_OUTPUT_SCHEMA,
         ExperimentCreateRequest,
         ExperimentResponse,
         ExperimentResultResponse,
@@ -1549,6 +1550,7 @@ def create_app() -> FastAPI:
                 llm_instance = GroqProvider(
                     api_key=current_settings.GROQ_API_KEY.get_secret_value(),
                     model=current_settings.LLM_MODEL_NAME,
+                    response_schema=MERCHANT_AGENT_LLM_OUTPUT_SCHEMA,
                 )
 
             result = await MerchantAgentService.execute_agent_run(
