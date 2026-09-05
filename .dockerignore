@@ -1,6 +1,8 @@
 .git
 .github
 .insforge
+.insta
+.codex
 .env
 .env.*
 !.env.example
@@ -14,6 +16,7 @@ __pycache__
 *.sqlite*
 
 frontend
+**/node_modules
 tests
 docs
 htmlcov
