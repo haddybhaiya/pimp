@@ -71,3 +71,11 @@ frontend/dist/
 .roo
 .trae
 .windsurf
+
+# InstaCloud: agent skills installed by `npx skills add` (regenerable, not source)
+.claude/skills/
+.agents/skills/
+.github/skills/
+.insta/observe/
+.codex/
+skills-lock.json
